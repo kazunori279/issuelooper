@@ -1,0 +1,29 @@
+#!/bin/sh
+# Agent sessions never commit the framework or its settings: .claude/, .agents/,
+# .issuelooper/ and CLAUDE.md change only on the owner's word. The owner commits
+# them with ISSUELOOPER_CONFIG_OK=1.
+if [ "$ISSUELOOPER_CONFIG_OK" != "1" ]; then
+    files=$(git diff --cached --name-only 2>/dev/null || true)
+    if [ -n "$files" ]; then
+        while IFS= read -r f || [ -n "$f" ]; do
+            case "$f" in
+            .claude|.claude/*|*/.claude|*/.claude/*|\
+            .agents|.agents/*|*/.agents|*/.agents/*|\
+            .issuelooper|.issuelooper/*|*/.issuelooper|*/.issuelooper/*|\
+            CLAUDE.md|*/CLAUDE.md)
+                echo "pre-commit: refusing a commit touching $f." >&2
+                echo "  .claude/, .agents/, .issuelooper/ and CLAUDE.md change only on the owner's word." >&2
+                echo "  committer CC_ROLE='${CC_ROLE:-<unset>}'" >&2
+                echo "  To propose a change, say so on the issue or file one for the owner," >&2
+                echo "  and unstage the file: git restore --staged -- '$f'" >&2
+                echo "  To commit as the owner, set ISSUELOOPER_CONFIG_OK=1." >&2
+                exit 1
+                ;;
+            esac
+        done <<LIST
+$files
+LIST
+    fi
+fi
+
+exit 0

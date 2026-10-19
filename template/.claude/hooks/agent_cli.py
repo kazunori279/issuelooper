@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""What differs between the agent CLIs a session can run on: agy and Claude Code.
+
+    python3 agent_cli.py cli ROLE        the CLI ROLE's sessions run on
+    python3 agent_cli.py model ROLE      the model ROLE's sessions use ('' = the CLI's default)
+    python3 agent_cli.py clis ROLE...    the distinct CLIs those roles need, one per line
+
+The supervisor (ccpool.py) and the monitor host (broker.py) start sessions, read
+their stream-json output and decide when to resume one. Everything that depends on
+the CLI lives here: the arguments for a first turn and for a resume, the session id
+in the stream, whether the model went silent after a finished step, and whether a
+result ended on a quota error with no answer.
+
+Which CLI a role uses: CCROLE_<ROLE>_CLI, else CCROLE_CLI, else agy. The model:
+CCROLE_MODEL_<ROLE>, else CCROLE_MODEL, else none (the CLI picks). ccrole.sh applies
+the same order and adds --model, --add-dir and --dangerously-skip-permissions, so the
+arguments built here leave those out.
+
+agy's format is in AGY_PROTOCOL.md. Claude Code's is implemented from its documented
+stream-json format and has not yet been checked against a live run:
+
+    {"type": "system", "subtype": "init", "session_id": ..., "model": ...}
+    {"type": "assistant", "message": {"content": [{"type": "text", ...},
+                                                  {"type": "tool_use", "id": ..., ...}]}}
+    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": ...}]}}
+    {"type": "result", "subtype": "success" | "error_max_turns" | "error_during_execution",
+     "is_error": bool, "result": "<final text>", "session_id": ..., "usage": {...}}
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+DEFAULT = "agy"
+
+
+def parse(lines) -> list[dict]:
+    """The JSON objects among stream lines; anything else is skipped."""
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            out.append(e)
+    return out
+
+
+class Cli:
+    name = ""
+    prompt_flag = ""
+    quota: re.Pattern = re.compile(r"(?!x)x")
+    # Text on stderr that means the CLI's own time limit ended the run ('' = it has none).
+    timeout_text = ""
+
+    def first_turn(self, prompt: str, timeout_s: float) -> list[str]:
+        raise NotImplementedError
+
+    def resume(self, prompt: str, session_id: str, timeout_s: float) -> list[str]:
+        raise NotImplementedError
+
+    def is_init(self, e: dict) -> bool:
+        raise NotImplementedError
+
+    def is_result(self, e: dict) -> bool:
+        raise NotImplementedError
+
+    def current(self, events: list[dict]) -> list[dict]:
+        """The events of the newest process: a resume appends a second stream to the
+        same file, and a tool the killed process left running never gets its result."""
+        for k in range(len(events) - 1, -1, -1):
+            if self.is_init(events[k]):
+                return events[k:]
+        return events
+
+    def session_id(self, events: list[dict]) -> str | None:
+        raise NotImplementedError
+
+    def model(self, events: list[dict]) -> str:
+        """The model the stream's newest init event names, or ''."""
+        for e in reversed(events):
+            if self.is_init(e):
+                return self.init_model(e)
+        return ""
+
+    def init_model(self, e: dict) -> str:
+        return str(e.get("model") or "")
+
+    def model_stalled(self, events: list[dict]) -> bool:
+        """The last event is a finished step and no tool is running: if nothing comes
+        next for a while, the model went silent."""
+        raise NotImplementedError
+
+    def quota_result(self, e: dict) -> bool:
+        """A result that ended on a model quota or rate-limit error with no answer."""
+        raise NotImplementedError
+
+    # --- a long-lived session (the monitor, fed through stdin) ---
+    def stream_args(self, session_id: str | None, logs: pathlib.Path) -> list[str]:
+        raise NotImplementedError
+
+    def user_message(self, text: str) -> dict:
+        raise NotImplementedError
+
+    def read(self, e: dict) -> dict:
+        """One stream event, normalized for broker.py:
+        {"kind": "init", "session_id"}, {"kind": "step", "steps": [...]},
+        {"kind": "result", "status": SUCCESS|ERROR, "response", "error", "session_id", "quota"},
+        or {"kind": "other"}. A step is {"i", "type", "state", "sec"} plus "tool" and
+        "text" for a tool call and "role" for a subagent."""
+        raise NotImplementedError
+
+
+class Agy(Cli):
+    name = "agy"
+    prompt_flag = "--print"
+    # A model quota or capacity error in any wording agy has used. One wording ("TPM
+    # quota exhausted. No spare capacity ...") came with no RESOURCE_EXHAUSTED in the
+    # result (that was only on stderr); without it those sessions were never resumed
+    # and each counted as a failed claim attempt.
+    quota = re.compile(
+        r"RESOURCE_EXHAUSTED|TPM quota exhausted|No spare capacity|\bcode 429\b"
+    )
+    timeout_text = "print timeout"
+
+    def first_turn(self, prompt, timeout_s):
+        return [
+            "--print",
+            prompt,
+            "--print-timeout",
+            f"{int(timeout_s)}s",
+            "--output-format",
+            "stream-json",
+        ]
+
+    def resume(self, prompt, session_id, timeout_s):
+        return self.first_turn(prompt, timeout_s) + ["--conversation", session_id]
+
+    def is_init(self, e):
+        return e.get("event") == "init"
+
+    def init_model(self, e):
+        init = e.get("init") if isinstance(e.get("init"), dict) else {}
+        return str(init.get("model") or e.get("model") or "")
+
+    def is_result(self, e):
+        return e.get("event") == "result"
+
+    def session_id(self, events):
+        sid = None
+        for e in events:
+            if e.get("event") == "init" and e.get("conversation_id"):
+                sid = e["conversation_id"]
+            elif e.get("event") == "result" and isinstance(e.get("result"), dict):
+                sid = (
+                    e["result"].get("conversation_id") or sid
+                )  # the result names it too
+        return sid
+
+    def model_stalled(self, events):
+        events = self.current(events)
+        last = events[-1] if events else {}
+        step = last.get("step_update") if last.get("event") == "step_update" else None
+        return isinstance(step, dict) and step.get("state") != "ACTIVE"
+
+    def quota_result(self, e):
+        # A result that has a full answer next to a stale 429 from a retried call did finish.
+        r = e.get("result") if e.get("event") == "result" else None
+        if not isinstance(r, dict) or len((r.get("response") or "").strip()) > 20:
+            return False
+        return bool(self.quota.search(json.dumps(r)))
+
+    def stream_args(self, session_id, logs):
+        # Its own CLI log: the retry and backoff lines behind a slow turn are there.
+        args = [
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--log-file",
+            str(logs / "agy-cli.log"),
+        ]
+        return args + (["--conversation", session_id] if session_id else [])
+
+    def user_message(self, text):
+        return {"event": "user", "message": {"content": text}}
+
+    def read(self, e):
+        kind = e.get("event")
+        if kind == "init":
+            return {"kind": "init", "session_id": e.get("conversation_id")}
+        if kind == "step_update":
+            s = e.get("step_update") or {}
+            if s.get("state") in ("DONE", "ERROR"):
+                return {"kind": "step", "steps": [self._condense(s)]}
+            return {"kind": "step", "steps": []}
+        if kind == "result":
+            r = dict(e.get("result") or {})
+            quota = self.quota_result(e)
+            # A stale 429 from a retried call next to a full answer is not a failed
+            # turn: report it as a success, with the error kept.
+            if (
+                r.get("status") == "ERROR"
+                and not quota
+                and self.quota.search(json.dumps(r))
+            ):
+                r["stale_error"] = r.pop("error", None)
+                r["status"] = "SUCCESS"
+            return {
+                "kind": "result",
+                "status": r.get("status") or "SUCCESS",
+                "response": r.get("response") or "",
+                "error": r.get("error"),
+                "stale_error": r.get("stale_error"),
+                "session_id": r.get("conversation_id"),
+                "quota": quota,
+            }
+        return {"kind": "other"}
+
+    @staticmethod
+    def _condense(s):
+        out = {
+            "i": s.get("step_index"),
+            "type": s.get("step_type"),
+            "state": s.get("state"),
+            "sec": round(s.get("duration_seconds") or 0, 1),
+        }
+        if s.get("step_type") == "tool":
+            params = (s.get("tool_info") or {}).get("parameters") or {}
+            out["tool"] = s.get("tool_name")
+            out["text"] = str(
+                params.get("CommandLine")
+                or params.get("Question")
+                or params.get("TargetFile")
+                or params.get("AbsolutePath")
+                or ""
+            )[:200]
+        if s.get("step_type") == "subagent" or s.get("tool_name") == "invoke_subagent":
+            subs = (s.get("subagent_info") or {}).get("subagents") or []
+            if subs:
+                out["role"] = ", ".join(x.get("role") or "" for x in subs)
+        return out
+
+
+class Claude(Cli):
+    """Claude Code. Not yet verified against a live run; built from its documented
+    stream-json format. It has no print timeout: the supervisor's timeouts apply."""
+
+    name = "claude"
+    prompt_flag = "-p"
+    quota = re.compile(r"\b429\b|rate_limit_error|overloaded_error|usage limit", re.I)
+
+    def first_turn(self, prompt, timeout_s):
+        return ["-p", prompt, "--output-format", "stream-json", "--verbose"]
+
+    def resume(self, prompt, session_id, timeout_s):
+        return [
+            "-p",
+            prompt,
+            "--resume",
+            session_id,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+
+    def is_init(self, e):
+        return e.get("type") == "system" and e.get("subtype") == "init"
+
+    def is_result(self, e):
+        return e.get("type") == "result"
+
+    def session_id(self, events):
+        sid = None
+        for e in events:
+            sid = e.get("session_id") or sid
+        return sid
+
+    @staticmethod
+    def _parts(e):
+        content = (e.get("message") or {}).get("content")
+        return (
+            [p for p in content if isinstance(p, dict)]
+            if isinstance(content, list)
+            else []
+        )
+
+    def pending_tool(self, events) -> bool:
+        """A tool_use with no tool_result after it."""
+        asked, answered = [], set()
+        for e in events:
+            for p in self._parts(e):
+                if e.get("type") == "assistant" and p.get("type") == "tool_use":
+                    asked.append(p.get("id"))
+                elif e.get("type") == "user" and p.get("type") == "tool_result":
+                    answered.add(p.get("tool_use_id"))
+        return any(x not in answered for x in asked)
+
+    def model_stalled(self, events):
+        events = self.current(events)
+        if not events or events[-1].get("type") not in ("assistant", "user"):
+            return False
+        return not self.pending_tool(events)
+
+    def quota_result(self, e):
+        if e.get("type") != "result":
+            return False
+        text = str(e.get("result") or "")
+        if e.get("is_error") or (e.get("subtype") or "success") != "success":
+            return bool(
+                self.quota.search(text + " " + json.dumps(e.get("error") or ""))
+            )
+        # The plan's usage limit can arrive as a short, non-error result.
+        return text.strip().lower().startswith("claude ai usage limit reached")
+
+    def stream_args(self, session_id, logs):
+        args = [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+        return args + (["--resume", session_id] if session_id else [])
+
+    def user_message(self, text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def read(self, e):
+        kind = e.get("type")
+        if self.is_init(e):
+            return {"kind": "init", "session_id": e.get("session_id")}
+        if kind in ("assistant", "user"):
+            steps = []
+            for p in self._parts(e):
+                if p.get("type") == "tool_use":
+                    params = p.get("input") or {}
+                    step = {
+                        "i": p.get("id"),
+                        "type": "tool",
+                        "state": "DONE",
+                        "sec": 0,
+                        "tool": p.get("name"),
+                        "text": str(
+                            params.get("command")
+                            or params.get("file_path")
+                            or params.get("pattern")
+                            or params.get("description")
+                            or ""
+                        )[:200],
+                    }
+                    if p.get("name") == "Task":
+                        step["role"] = str(
+                            params.get("subagent_type")
+                            or params.get("description")
+                            or ""
+                        )
+                    steps.append(step)
+                elif p.get("type") == "text" and kind == "assistant":
+                    steps.append(
+                        {"i": None, "type": "agent_response", "state": "DONE", "sec": 0}
+                    )
+            return {"kind": "step", "steps": steps}
+        if kind == "result":
+            quota = self.quota_result(e)
+            ok = (
+                not quota
+                and not e.get("is_error")
+                and (e.get("subtype") or "success") == "success"
+            )
+            text = str(e.get("result") or "")
+            return {
+                "kind": "result",
+                "status": "SUCCESS" if ok else "ERROR",
+                "response": text if ok else "",
+                "error": None if ok else (text or e.get("subtype")),
+                "session_id": e.get("session_id"),
+                "quota": quota,
+            }
+        return {"kind": "other"}
+
+
+CLIS = {"agy": Agy(), "claude": Claude()}
+
+
+def get(name: str) -> Cli:
+    try:
+        return CLIS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown agent CLI {name!r}: use one of {', '.join(CLIS)}"
+        ) from None
+
+
+def cli_for(role: str, env=None) -> str:
+    env = os.environ if env is None else env
+    return (
+        env.get(f"CCROLE_{role.upper()}_CLI") or env.get("CCROLE_CLI") or DEFAULT
+    ).strip()
+
+
+def model_for(role: str, env=None) -> str:
+    env = os.environ if env is None else env
+    return (
+        env.get(f"CCROLE_MODEL_{role.upper()}") or env.get("CCROLE_MODEL") or ""
+    ).strip()
+
+
+def for_role(role: str, env=None) -> Cli:
+    return get(cli_for(role, env))
+
+
+def main(argv: list[str]) -> int:
+    sys.path.insert(0, str(HERE))
+    import config
+
+    config.apply()
+    if len(argv) >= 3 and argv[1] == "cli":
+        print(cli_for(argv[2]))
+        return 0
+    if len(argv) >= 3 and argv[1] == "model":
+        print(model_for(argv[2]))
+        return 0
+    if len(argv) >= 3 and argv[1] == "clis":
+        for name in dict.fromkeys(cli_for(r) for r in argv[2:]):
+            print(name)
+        return 0
+    print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

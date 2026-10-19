@@ -1,0 +1,1837 @@
+#!/usr/bin/env python3
+"""Cases for ccpool.py. Run it: `python3 ccpool_test.py`.
+
+Two layers. The scheduling cases build the GitHub state by hand and drive
+Pool.step() with sessions not started, finishing them by hand, so every rule
+(one session per unit, caps, nothing twice, slots freed at once) is checked
+without timing. The end-to-end case runs the real supervisor loop against a fake
+`gh` (claim_test.py's REST fake plus a GraphQL answer from the same state) and a
+fake ccrole.sh that records what each session was started with. The session cases
+run a fake CLI per schema (agy, and Claude Code from its documented format).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import socket
+import socketserver
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import agent_cli  # noqa: E402
+import ccpool  # noqa: E402
+import claim_test  # noqa: E402
+
+FAILURES: list[str] = []
+CHECKS = 0
+MAIN = "a" * 40
+NOW = 2_000_000_000.0
+
+
+def check(label: str, got, want) -> None:
+    global CHECKS
+    CHECKS += 1
+    if got != want:
+        FAILURES.append(f"{label}\n     want: {want!r}\n      got: {got!r}")
+
+
+def iss(n, labels, body="", updated="2026-10-09T10:00:00Z", title=None):
+    return {
+        "number": n,
+        "title": title or f"issue {n}",
+        "body": body,
+        "updated": updated,
+        "labels": sorted(labels),
+    }
+
+
+def pr(n, issue, head="b" * 40, mergeable="MERGEABLE", draft=False):
+    return {
+        "number": n,
+        "branch": f"issue-{issue}",
+        "head": head,
+        "body": f"Fixes #{issue}",
+        "draft": draft,
+        "mergeable": mergeable,
+    }
+
+
+def closed(n, labels=(), reason="COMPLETED", at="2026-10-09T11:00:00Z"):
+    return {
+        "number": n,
+        "title": f"issue {n}",
+        "closed": at,
+        "reason": reason,
+        "labels": sorted(labels),
+    }
+
+
+def state(open_=(), closed_=(), prs=(), main=MAIN):
+    return {
+        "open": list(open_),
+        "closed": list(closed_),
+        "prs": list(prs),
+        "main": main,
+    }
+
+
+class Rig:
+    """A Pool whose fetcher returns `self.st` and whose sessions never start."""
+
+    def __init__(self, st, **cfg):
+        self.st = st
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-test-"))
+        base = dict(
+            logdir=self.dir / "pool",
+            caps={r: 0 for r in ccpool.ROLES},
+            monitor_min_gap_s=0,
+        )
+        base.update(cfg)
+        self.pool = ccpool.Pool(
+            ccpool.Config(**base), fetcher=lambda: self.st, spawn=False
+        )
+        self.now = NOW
+        self.pool.clock = lambda: self.now
+
+    def step(self, dt=1.0):
+        self.now += dt
+        return self.pool.step(self.now)
+
+    def running(self, role=None):
+        return sorted(
+            u.key for u in self.pool.book.running.values() if role in (None, u.role)
+        )
+
+    def finish(self, key, outcome="ok"):
+        w = next(w for w in self.pool.sessions.values() if w.unit.key == key)
+        self.pool.finished(w, outcome)
+
+
+def keys(units):
+    return [u.key for u in units]
+
+
+def test_one_worker_per_claimable_issue() -> None:
+    h = Rig(state([iss(n, ["stage:triage", "P1"]) for n in range(1, 13)]))
+    started = h.step()
+    check("12 claimable issues start 12 workers (no cap)", len(started), 12)
+    check("all of them workers", {u.role for u in started}, {"worker"})
+    check("a second poll of the same state starts nothing", h.step(), [])
+
+
+def test_cap_and_instant_refill() -> None:
+    issues = [
+        iss(1, ["stage:ready", "P2"]),
+        iss(2, ["stage:triage", "P0"]),
+        iss(3, ["stage:triage", "P1"]),
+        iss(4, ["stage:triage"]),
+        iss(5, ["stage:ready", "P1"]),
+    ]
+    h = Rig(state(issues), caps={"worker": 2, "merger": 0, "tester": 0})
+    started = h.step()
+    check(
+        "cap 2 starts the two highest priorities", [u.number for u in started], [2, 3]
+    )
+    check("nothing more while the cap is full", h.step(), [])
+    h.finish(started[0].key)
+    h.st = state([i for i in issues if i["number"] != 2] + [iss(2, ["stage:pr", "P0"])])
+    check(
+        "a finished session frees its slot on the next poll",
+        [u.number for u in h.step(0)],
+        [5],
+    )
+
+
+def test_global_cap_orders_roles() -> None:
+    st = state(
+        [
+            iss(1, ["stage:triage", "P0"]),
+            iss(2, []),
+            iss(3, ["stage:pr", "P1"]),
+            iss(4, ["stage:pr"]),
+        ],
+        [closed(9)],
+        [pr(20, 3), pr(21, 4, mergeable="CONFLICTING")],
+    )
+    h = Rig(st, global_cap=2, ux=True)
+    rebased = f"rebase:21@{'b' * 12}@{MAIN[:12]}"
+    h.pool.book.tries[rebased] = 1  # the supervisor's rebase of #21 already failed
+    started = h.step()
+    check(
+        "global cap 2: the auto-merge does not count; merger, then the UX run (workers last)",
+        [(u.role, u.kind) for u in started],
+        [("auto", "merge"), ("merger", "land"), ("tester", "ux")],
+    )
+    h2 = Rig(st, ux=True)
+    h2.pool.book.tries[rebased] = 1
+    check(
+        "uncapped, everything due starts; closed issues start nothing",
+        sorted((u.role, u.kind) for u in h2.step()),
+        [
+            ("auto", "merge"),
+            ("merger", "land"),
+            ("tester", "ux"),
+            ("worker", "implement"),
+        ],
+    )
+    h3 = Rig(
+        state(
+            prs=[pr(30 + n, n) for n in range(1, 7)],
+            open_=[iss(n, ["stage:pr"]) for n in range(1, 7)],
+        ),
+        auto_cap=4,
+    )
+    check("POOL_CAP_AUTO caps the auto-merges", len(h3.step()), 4)
+
+
+def test_what_is_not_claimable() -> None:
+    st = state(
+        [
+            iss(1, ["stage:triage", "P1", "on hold"]),
+            iss(2, ["stage:ready", "P1", "hold:monitor"]),
+            iss(3, ["stage:triage", "P0"], body="Blocked by: #4"),
+            iss(4, ["stage:doing", "P0"], updated="2099-01-01T00:00:00Z"),
+            iss(5, ["stage:owner", "P1"]),
+            iss(6, ["stage:triage", "P2"], body="Blocked by: #99"),
+        ]
+    )
+    h = Rig(st)
+    check(
+        "held, blocked, in flight and owner issues start nothing; a closed blocker does not block",
+        keys(h.step()),
+        ["wrk:6@2026-10-09T10:00:00Z"],
+    )
+
+
+def test_merges_one_per_pr() -> None:
+    st = state(
+        [
+            iss(1, ["stage:pr"]),
+            iss(2, ["stage:pr"]),
+            iss(3, ["stage:triage"]),
+            iss(4, ["stage:pr", "on hold"]),
+            iss(5, ["stage:pr"]),
+            iss(6, ["stage:pr", "needs:live"]),
+            iss(7, ["stage:pr"]),
+        ],
+        prs=[
+            pr(11, 1),
+            pr(12, 2, mergeable="CONFLICTING"),
+            pr(13, 3),
+            pr(14, 4),
+            pr(15, 5, draft=True),
+            pr(16, 6),
+            pr(17, 7, mergeable="UNKNOWN"),
+        ],
+    )
+    h = Rig(st, unknown_s=300, live=True)
+    started = h.step()
+    check(
+        "MERGEABLE: the supervisor merges; CONFLICTING: the supervisor's rebase first; UNKNOWN: wait",
+        sorted((u.role, u.kind, u.number) for u in started if u.role != "worker"),
+        [("auto", "merge", 11), ("auto", "merge", 16), ("auto", "rebase", 12)],
+    )
+    r12 = next(u for u in started if u.number == 12)
+    check("the rebase unit knows the branch", r12.info["branch"], "issue-2")
+    h.finish(r12.key, "left to a merger (a hunk changes existing lines)")
+    check(
+        "after one rebase attempt at this head and main, a merger session",
+        [(u.role, u.number) for u in h.step()],
+        [("merger", 12)],
+    )
+    check(
+        "the handed-back PR's issue goes to a worker",
+        [u.number for u in started if u.role == "worker"],
+        [3],
+    )
+    m16 = next(u for u in started if u.number == 16)
+    check(
+        "the merge unit names its issue, head and needs:live",
+        (m16.info["issue"], m16.info["needs_live"]),
+        (6, True),
+    )
+    check("no second unit for the same PR", h.step(), [])
+    h.finish(next(k for k in h.running("merger")), "ok")
+    h.finish(
+        next(u.key for u in started if u.number == 11), "failed (review gate exit 2)"
+    )
+    check("a failed auto-merge is retried once", [u.number for u in h.step()], [11])
+    h.finish(
+        next(k for k in h.running("auto") if k.startswith("merge:11")),
+        "failed (review gate exit 2)",
+    )
+    check("then not again for the same head and main", [u.number for u in h.step()], [])
+    check(
+        "and the monitor hears it is stuck",
+        any("stuck: auto unit merge PR #11" in e for e in h.pool.events),
+        True,
+    )
+    h.st = state(st["open"], prs=st["prs"], main="c" * 40)
+    check(
+        "main moving gives the PR a fresh attempt (and #12 a fresh rebase)",
+        sorted((u.kind, u.number) for u in h.step()),
+        [("merge", 11), ("rebase", 12)],
+    )
+    check(
+        "UNKNOWN for POOL_UNKNOWN_S: a merger session takes it",
+        [(u.role, u.number) for u in h.step(400) if u.number == 17],
+        [("merger", 17)],
+    )
+
+
+def test_no_merger_while_its_worker_runs() -> None:
+    h = Rig(state([iss(1, ["stage:triage"])]))
+    h.step()
+    h.st = state([iss(1, ["stage:pr"])], prs=[pr(30, 1)])
+    check("PR opened but its worker still finishing: no merge yet", h.step(), [])
+    h.finish("wrk:1@2026-10-09T10:00:00Z")
+    check(
+        "the merge starts as soon as the worker ends",
+        [u.role for u in h.step(0)],
+        ["auto"],
+    )
+
+
+def test_clean_exit_never_restarts_on_a_stale_read() -> None:
+    h = Rig(state([iss(1, ["stage:triage"]), iss(2, [])]))
+    started = h.step()
+    for u in started:
+        h.finish(u.key)
+    check("the same (stale) state after clean exits starts nothing", h.step(), [])
+    h.st = state([iss(1, ["stage:triage"], updated="2026-10-09T12:00:00Z"), iss(2, [])])
+    check(
+        "a changed issue (released claim) is a new unit",
+        keys(h.step()),
+        ["wrk:1@2026-10-09T12:00:00Z"],
+    )
+
+
+def test_unclaimable_is_remembered() -> None:
+    h = Rig(state([iss(1, ["stage:triage"])]))
+    u = h.step()[0]
+    h.finish(u.key, "unclaimable")
+    check(
+        "claim.py refused: not retried while the issue and main are unchanged",
+        h.step(),
+        [],
+    )
+    h.st = state([iss(1, ["stage:triage"])], main="e" * 40)
+    check("a merge may have closed a native blocker: retried", len(h.step()), 1)
+
+
+def test_ux_run_per_gap() -> None:
+    h = Rig(state(main="1" * 40))
+    check("POOL_UX off: no UX run", h.step(), [])
+    h = Rig(state(main="1" * 40), ux=True, ux_gap_s=2700, ux_idle_gap_s=1e12)
+    t1 = h.step()
+    check(
+        "no deploy command: a UX run on main's head",
+        [(u.role, u.kind, u.info["sha"], u.info["deployed"]) for u in t1],
+        [("tester", "ux", "1" * 40, False)],
+    )
+    check("and the tester is told so", "does not deploy" in ccpool.tester_prompt(t1[0], 8021, "30m"), True)
+    h.finish(t1[0].key)
+    h.st = state(main="2" * 40)
+    check("a new sha within the gap starts none", h.step(60), [])
+    t2 = h.step(2700)
+    check(
+        "after the gap, the newest sha gets the next run",
+        [u.info["sha"] for u in t2],
+        ["2" * 40],
+    )
+    check(
+        "testers get distinct ports",
+        (h.pool.take_port(), h.pool.take_port()),
+        (8021, 8121),
+    )
+    h.pool.cfg.deploy_cmd = "./deploy.sh"
+    check("with a deploy command, nothing deployed yet: no target", h.pool.ux_target(h.st), "")
+    h.pool.own_deployed = "9" * 40
+    check("then the last good deploy is the target", h.pool.ux_target(h.st), "9" * 40)
+
+
+def test_ux_gap_settings() -> None:
+    old = {k: os.environ.pop(k, None) for k in ("POOL_UX_GAP_MIN", "POOL_UX_GAP_S")}
+    try:
+        check("default 25 minutes", ccpool.ux_gap_s(), 1500)
+        os.environ["POOL_UX_GAP_MIN"] = "10"
+        check("POOL_UX_GAP_MIN in minutes", ccpool.ux_gap_s(), 600)
+        os.environ["POOL_UX_GAP_S"] = "90"
+        check("POOL_UX_GAP_S overrides it", ccpool.ux_gap_s(), 90)
+        check("idle UX gap default 10 minutes", ccpool.gap_s("POOL_UX_IDLE_GAP", 10), 600)
+        check("spec gap default 45 minutes", ccpool.Config.from_env().spec_gap_s, 2700)
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_deploys_survive_a_restart() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-deploy-")) / "pool"
+    d.mkdir()
+    (d / "deploys.jsonl").write_text(
+        json.dumps({"sha": "9" * 40, "ok": True}) + "\n" + json.dumps({"sha": "8" * 40, "ok": False}) + "\n"
+    )
+    h = Rig(state(main="8" * 40), logdir=d, ux=True, deploy_cmd="exit 1")
+    started = h.step()
+    check(
+        "the last good deployment (not the failed one) gets the UX run",
+        [u.info["sha"] for u in started],
+        ["9" * 40],
+    )
+    check(
+        "a sha this run already tried to deploy is not redeployed",
+        h.pool.deploying,
+        False,
+    )
+
+
+def test_reclaim_and_live() -> None:
+    st = state(
+        [
+            iss(1, []),
+            iss(3, ["stage:doing"], updated="2026-10-09T08:00:00Z"),
+            iss(4, ["stage:live"]),
+        ],
+        [closed(5), closed(7, reason="NOT_PLANNED")],
+    )
+    h = Rig(st, live=True)
+    h.now = -ccpool.age_s("2026-10-09T08:00:00Z", 0) + 2 * 3600
+    got = sorted((u.role, u.kind, u.number) for u in h.step())
+    check(
+        "auto: stale reclaim; tester: stage:live; nothing for closed issues or the untriaged #1",
+        got,
+        [("auto", "reclaim", 3), ("tester", "live", 4)],
+    )
+    check(
+        "the stale claim wakes the monitor",
+        any("#3's claim went stale" in e for e in h.pool.events),
+        True,
+    )
+
+
+def test_live_off() -> None:
+    st = state(
+        [iss(4, ["stage:live"]), iss(6, ["stage:pr", "needs:live"])],
+        prs=[pr(16, 6)],
+    )
+    h = Rig(st)
+    got = h.step()
+    check("POOL_LIVE off: no live check, the merge still runs", [(u.kind, u.number) for u in got],
+          [("merge", 16)])
+    check("and the merge does not route to stage:live", got[0].info["needs_live"], False)
+    claim = {"issue": 6, "token": "t", "from": "stage:triage", "title": "x", "needs_live": True}
+    check("nor is the worker told to write Refs", "Refs #6" in ccpool.worker_prompt(claim, "1", "45m", "u"), False)
+    check("with POOL_LIVE on it is", "Refs #6" in ccpool.worker_prompt(claim, "1", "45m", "u", live=True), True)
+
+
+def test_crash_breaker() -> None:
+    h = Rig(
+        state([iss(n, ["stage:triage"]) for n in range(1, 5)]),
+        crash_max=3,
+        crash_pause_s=60,
+        caps={"worker": 1, "merger": 0, "tester": 0},
+    )
+    for _ in range(3):
+        u = h.step()[0]
+        h.finish(u.key, "startup crash (exit 1)")
+    check("three startup crashes in a row pause the role", h.step(), [])
+    check(
+        "and the monitor hears it",
+        any("died at startup" in e for e in h.pool.events),
+        True,
+    )
+    check("the pause ends by itself", len(h.step(61)), 1)
+
+
+def test_idle_and_drained_events() -> None:
+    h = Rig(state([iss(1, ["stage:owner"])]))
+    h.step()
+    check(
+        "open issues and nothing to do is reported once",
+        sum("pipeline idle" in e for e in h.pool.events),
+        1,
+    )
+    h.step()
+    check(
+        "not repeated while it stays idle",
+        sum("pipeline idle" in e for e in h.pool.events),
+        1,
+    )
+    h.st = state([], [closed(1, ["stage:verified"])])
+    h.pool.idle_flagged = False
+    h.step()
+    check(
+        "an empty backlog is reported",
+        any("backlog empty" in e for e in h.pool.events),
+        True,
+    )
+
+
+def test_signature_moves_with_the_queue() -> None:
+    a = state([iss(1, ["stage:triage"])])
+    b = state([iss(1, ["stage:doing"])])
+    check(
+        "same state, same signature",
+        ccpool.signature(a),
+        ccpool.signature(json.loads(json.dumps(a))),
+    )
+    check("a label change moves it", ccpool.signature(a) != ccpool.signature(b), True)
+
+
+def test_normalize_graphql() -> None:
+    data = {
+        "data": {
+            "repository": {
+                "open": {
+                    "nodes": [
+                        {
+                            "number": 1,
+                            "title": "t",
+                            "body": None,
+                            "updatedAt": "u",
+                            "labels": {
+                                "nodes": [{"name": "stage:triage"}, {"name": "P1"}]
+                            },
+                        }
+                    ]
+                },
+                "closed": {
+                    "nodes": [
+                        {
+                            "number": 2,
+                            "title": "c",
+                            "closedAt": "x",
+                            "stateReason": "COMPLETED",
+                            "labels": {"nodes": []},
+                        }
+                    ]
+                },
+                "pullRequests": {
+                    "nodes": [
+                        {
+                            "number": 3,
+                            "headRefName": "issue-1",
+                            "headRefOid": "h",
+                            "body": "",
+                            "isDraft": False,
+                            "mergeable": "MERGEABLE",
+                        }
+                    ]
+                },
+                "main": {"target": {"oid": "m"}},
+            }
+        }
+    }
+    st = ccpool.normalize(data)
+    check("normalize: labels sorted", st["open"][0]["labels"], ["P1", "stage:triage"])
+    check("normalize: PR to issue by branch", ccpool.pr_issue(st["prs"][0]), 1)
+    check(
+        "normalize: PR to issue by body",
+        ccpool.pr_issue({"branch": "x", "body": "Refs #7"}),
+        7,
+    )
+    check("normalize: main", st["main"], "m")
+
+
+class FakeBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def test_monitor_feed_only_when_idle() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-broker-"))
+    sock = str(d / "broker.sock")
+    said, status = [], {"busy": False, "done": 0}
+
+    class H(socketserver.StreamRequestHandler):
+        def handle(self):
+            req = json.loads(self.rfile.readline())
+            if req["cmd"] == "say":
+                said.append(req)
+                resp = {"turn": len(said)}
+            else:
+                resp = dict(status)
+            self.wfile.write((json.dumps(resp) + "\n").encode())
+
+    srv = FakeBroker(sock, H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    h = Rig(state([iss(1, ["stage:triage"])]), broker_sock=sock)
+    h.step()
+    h.st = state([iss(1, ["stage:triage"]), iss(2, [], title="new bug")])
+    h.step()
+    check("before the owner's kickoff (no finished turn) nothing is sent", said, [])
+    status.update(done=1, busy=True)
+    h.step()
+    check("while the monitor is busy nothing is sent", said, [])
+    status.update(busy=False)
+    h.step()
+    check("idle: one message", len(said), 1)
+    check(
+        "it carries the event and the queue summary",
+        ("new issue #2: new bug" in said[0]["text"], "Queue:" in said[0]["text"]),
+        (True, True),
+    )
+    check("tagged as the pool's feed", said[0]["tag"], "pool_feed")
+    h.step()
+    check("no change, no message", len(said), 1)
+    h.st = state([iss(2, [], title="new bug")], [closed(1)], main="9" * 40)
+    h.step()
+    check(
+        "a closure and a merge wake it again",
+        ("#1 closed" in said[-1]["text"], "main moved" in said[-1]["text"]),
+        (True, True),
+    )
+    check(
+        "the untriaged issue is named as the monitor's",
+        "Untriaged (yours): #2" in said[-1]["text"],
+        True,
+    )
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_deploy_safety_net() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-netdeploy-"))
+    st = state([iss(1, ["stage:pr"])], prs=[pr(5, 1, mergeable="CONFLICTING")], main="f" * 40)
+    rebased = f"rebase:5@{'b' * 12}@{'f' * 12}"
+    h0 = Rig(st)
+    h0.pool.book.tries[rebased] = 1
+    h0.step()
+    h0.finish(h0.running("merger")[0])
+    h0.step()
+    check("no POOL_DEPLOY_CMD: no deploys", (h0.pool.deploying, h0.pool.deploy_tried), (False, set()))
+    h = Rig(st, deploy_grace_s=300, deploy_cmd=f'echo "deployed $DEPLOY_SHA" >> {d}/calls')
+    h.pool.book.tries[rebased] = 1  # the supervisor's rebase already failed
+    h.step()
+    check(
+        "main undeployed but a merger session is running: wait for its merge",
+        (d / "calls").exists(),
+        False,
+    )
+    h.finish(h.running("merger")[0])
+    h.step()
+    for _ in range(50):
+        if not h.pool.deploying and (d / "calls").exists():
+            break
+        time.sleep(0.1)
+    check(
+        "no merger running: the supervisor runs the deploy command with DEPLOY_SHA",
+        (d / "calls").read_text(),
+        f"deployed {'f' * 40}\n",
+    )
+    check("and remembers it", h.pool.own_deployed, "f" * 40)
+    check(
+        "in the run's deploy log",
+        json.loads((h.dir / "pool" / "deploys.jsonl").read_text())["ok"],
+        True,
+    )
+    h.step()
+    time.sleep(0.3)
+    check("never twice for one sha", (d / "calls").read_text().count("deployed"), 1)
+    h2 = Rig(state(main="e" * 40), deploy_cmd="echo broken >&2; exit 3")
+    h2.step()
+    for _ in range(50):
+        if not h2.pool.deploying:
+            break
+        time.sleep(0.1)
+    check(
+        "a failed deploy tells the monitor",
+        any("deploy of eeeeeeeeeeee FAILED" in e and "broken" in e for e in h2.pool.events),
+        True,
+    )
+
+
+def test_live_rechecked_on_each_entry() -> None:
+    """A re-entry into stage:live after a hand-back or a reopen gets a new check (a key
+    of live:{n} alone ran once per supervisor)."""
+    before = len(FAILURES)
+    t = lambda hm: f"2026-10-09T{hm}:00Z"  # noqa: E731
+    h = Rig(state([iss(4, ["stage:live"], updated=t("10:00"))]), live=True)
+    first = h.step()
+    check(
+        "a stage:live issue gets a live check",
+        [(u.kind, u.number) for u in first],
+        [("live", 4)],
+    )
+    h.finish(first[0].key)
+    check("not again for the same entry", h.step(), [])
+    h.st = state([iss(4, ["stage:live"], updated=t("10:05"))])
+    check("a comment (the tester's own) is no new entry", h.step(), [])
+    h.st = state([iss(4, ["stage:triage"], updated=t("10:10"))])
+    for u in h.step():
+        h.finish(u.key)
+    h.st = state([iss(4, ["stage:live"], updated=t("11:00"))], main="c" * 40)
+    again = h.step()
+    check(
+        "handed back, reworked and merged again: checked again",
+        [(u.kind, u.number) for u in again],
+        [("live", 4)],
+    )
+    check(
+        "the tester is told which entry counts",
+        t("11:00") in ccpool.tester_prompt(again[0], 8021, "30m"),
+        True,
+    )
+    h.finish(again[0].key)
+    h.st = state([iss(4, ["stage:pr"], updated=t("10:30"))], main="c" * 40)
+    h.step()
+    h.st = state([iss(4, ["stage:live"], updated=t("11:20"))], main="d" * 40)
+    check(
+        "a stale read that drops the label, and a merge, start no second check",
+        h.step(),
+        [],
+    )
+
+    h2 = Rig(state([iss(5, ["stage:live"])]), live=True)
+    h2.finish(h2.step()[0].key, "timed out after 30m")
+    h2.finish(h2.step()[0].key, "failed (exit 1)")
+    check("two unfinished checks: no third at the same main", h2.step(), [])
+    check(
+        "the monitor hears it is stuck",
+        any("stuck: tester unit live #5" in e for e in h2.pool.events),
+        True,
+    )
+    h2.st = state([iss(5, ["stage:live"])], main="c" * 40)
+    check(
+        "a check that never finished is tried again once main moves",
+        [u.kind for u in h2.step()],
+        ["live"],
+    )
+    assert len(FAILURES) == before, FAILURES[before:]
+
+
+def test_ux_proposed_is_left_alone() -> None:
+    """Issues labeled ux:proposed are proposals waiting for the owner."""
+    before = len(FAILURES)
+    h = Rig(state([iss(1, ["stage:triage"])]))
+    for u in h.step():
+        h.finish(u.key)
+    ux = [
+        iss(7, ["sev:minor", "ux:proposed"], title="UX: tiny"),
+        iss(8, ["P1", "stage:triage", "ux:proposed"]),
+    ]
+    h.st = state([iss(1, ["stage:triage"])] + ux, [closed(9, ["ux:proposed"])])
+    check("no worker, merge or tester for ux:proposed issues", h.step(), [])
+    check(
+        "the monitor is not asked to triage them",
+        [e for e in h.pool.events if any(f"#{n}" in e for n in (7, 8, 9))],
+        [],
+    )
+    check(
+        "not listed as untriaged",
+        "Untriaged (yours): none" in h.pool.summary(h.st),
+        True,
+    )
+    h.st = state(
+        [
+            iss(1, ["stage:triage"]),
+            iss(7, ["P1", "ux:accepted"], updated="2026-10-09T12:00:00Z"),
+            ux[1],
+        ],
+        [closed(9, ["ux:proposed"])],
+    )
+    h.step()
+    check(
+        "the owner's acceptance reaches the monitor",
+        any("#7 is no longer ux:proposed" in e for e in h.pool.events),
+        True,
+    )
+    check(
+        "ux:proposed in the tester's rules",
+        "ux:proposed"
+        in ccpool.tester_prompt(
+            ccpool.Unit(
+                "tester", "ux", "ux:x", "tst:ux", None, (2, 0, 0), {"sha": MAIN}
+            ),
+            8021,
+            "30m",
+        ),
+        True,
+    )
+    assert len(FAILURES) == before, FAILURES[before:]
+
+
+FAKE_CCROLE_429 = r"""#!/usr/bin/env python3
+import json, os, sys
+calls = os.environ["FAKE_CALLS"]
+with open(calls, "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+n = len(open(calls).read().splitlines())
+print(json.dumps({"event": "init", "conversation_id": "conv-1"}))
+if n <= int(os.environ["FAKE_429_TIMES"]):
+    print(json.dumps({"event": "result", "result": {"conversation_id": "conv-1", "status": "ERROR",
+          "response": "", "error": os.environ.get("FAKE_429_TEXT",
+          "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): TPM quota exhausted.")}}))
+    sys.exit(1)
+print(json.dumps({"event": "result", "result": {"response": "done"}}))
+"""
+
+# Claude Code's documented stream-json shape; not recorded from a live run.
+FAKE_CCROLE_429_CLAUDE = r"""#!/usr/bin/env python3
+import json, os, sys
+calls = os.environ["FAKE_CALLS"]
+with open(calls, "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+n = len(open(calls).read().splitlines())
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1", "model": "m"}))
+if n <= int(os.environ["FAKE_429_TIMES"]):
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "session_id": "sess-1",
+          "result": 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}'}))
+    sys.exit(1)
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": "sess-1",
+      "result": "done"}))
+"""
+
+
+def run_429_session(times: int, labels: list[str], text: str = "", resumes_max: int = 3, cli: str = "agy"):
+    """A merger unit whose CLI exits on a 429 `times` times; the fake gh shows the issue
+    with `labels` (stage:pr still on it: the work is not done)."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-429-"))
+    role = d / "ccrole"
+    role.write_text(FAKE_CCROLE_429_CLAUDE if cli == "claude" else FAKE_CCROLE_429)
+    role.chmod(0o755)
+    gh = d / "gh"
+    view = {"state": "OPEN", "labels": [{"name": x} for x in labels], "comments": []}
+    gh.write_text(f"#!/bin/sh\necho '{json.dumps(view)}'\n")
+    gh.chmod(0o755)
+    cfg = ccpool.Config(
+        logdir=d / "pool",
+        ccrole=str(role),
+        render="cat",
+        gh=str(gh),
+        timeouts={"merger": "20m"},
+        quota_resumes=resumes_max,
+        quota_wait_s=0.05,
+        quota_wait_max_s=0.2,
+    )
+    pool = ccpool.Pool(cfg, fetcher=state, spawn=False)
+    w = ccpool.Session(
+        pool,
+        ccpool.Unit("merger", "land", "mrg:9@x", "mrg:9", 9, (0, 9), {"issue": 2}),
+        1,
+    )
+    w.dir.mkdir(parents=True)
+    env = dict(w.env(), FAKE_CALLS=str(d / "calls"), FAKE_429_TIMES=str(times), CCROLE_MERGER_CLI=cli)
+    if text:
+        env["FAKE_429_TEXT"] = text
+    rc, _, timed_out = w.session("do it", env)
+    run_429_session.last = w
+    calls = [json.loads(x) for x in (d / "calls").read_text().splitlines()]
+    rl = w.dir / "resumes.log"
+    resumes = [x for x in rl.read_text().splitlines() if " conversation " in x] if rl.exists() else []
+    events = [
+        e.get("event") or e.get("type")
+        for e in agent_cli.parse((w.dir / "session.jsonl").read_text().splitlines())
+    ]
+    return rc, timed_out, calls, resumes, events
+
+
+def test_idle_pool_makes_tester_work() -> None:
+    h = Rig(state([iss(1, ["stage:triage", "P1"])], main="a" * 40),
+            ux=True, spec=True, ux_gap_s=1500, ux_idle_gap_s=600, spec_gap_s=2700)
+    first = h.step()
+    check("with a worker due: one UX run and the worker, no spec check",
+          sorted(u.kind for u in first), ["implement", "ux"])
+    for u in first:
+        h.finish(u.key)
+    h.st = state(main="a" * 40)  # nothing left for workers
+    later = h.step(700)
+    check("idle: an extra UX run on the same sha and a spec check",
+          sorted((u.kind, u.key.split(":")[-1][:4]) for u in later), [("spec", "0"), ("ux", "idle")])
+    for u in later:
+        h.finish(u.key)
+    check("not again before the gaps pass", h.step(60), [])
+    again = h.step(600)
+    check("another idle UX run after POOL_UX_IDLE_GAP_MIN, the spec check waits",
+          [u.kind for u in again], ["ux"])
+    spec = next(u for u in later if u.kind == "spec")
+    text = ccpool.tester_prompt(spec, 8021, "60m")
+    check("the spec check prompt", ("Spec check" in text, "at most five" in text, "does not deploy" in text),
+          (True, True, True))
+    ux = next(u for u in first if u.kind == "ux")
+    check("UX runs file up to five", "at most five" in ccpool.tester_prompt(ux, 8021, "60m"), True)
+
+    h = Rig(state(main="b" * 40), ux=False, spec=False, ux_idle_gap_s=0, spec_gap_s=0)
+    check("UX runs and spec checks off: an idle pool starts nothing", h.step(), [])
+    h = Rig(state(main="b" * 40), ux=False, spec=True, spec_gap_s=0)
+    check("spec checks alone", [u.kind for u in h.step()], ["spec"])
+
+
+def test_stall_threshold_by_model() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)
+    inits = {
+        "agy, Claude model": {"event": "init", "init": {"model": "claude-opus-high"}},
+        "agy, other model": {"event": "init", "init": {"model": "some-other-model"}},
+        "Claude Code": {"type": "system", "subtype": "init", "session_id": "s", "model": "claude-sonnet"},
+    }
+    got = {}
+    for i, (name, init) in enumerate(inits.items()):
+        w = ccpool.Session(pool, ccpool.Unit("worker", "implement", f"wrk:{i}@x", f"wrk:{i}", i, (4,), {}), i + 1)
+        w.cli = ccpool.agent_cli.get("claude" if "subtype" in init else "agy")
+        w.dir.mkdir(parents=True)
+        (w.dir / "session.jsonl").write_text(json.dumps(init) + "\n")
+        got[name] = w.stall_after(pool.cfg)
+    check("fast models count as stalled after 4 min, others after 10", got,
+          {"agy, Claude model": 240, "agy, other model": 600, "Claude Code": 240})
+    pool.cfg.stall_s = 0
+    check("POOL_STALL_S=0 turns stall resumes off", w.stall_after(pool.cfg), 0)
+
+
+def test_resume_after_quota_exit() -> None:
+    """The CLI exits after a 429, so a resume that only fires while it is alive never would."""
+    before = len(FAILURES)
+    rc, timed_out, calls, resumes, events = run_429_session(1, ["stage:pr"])
+    check(
+        "exited on a 429, work not done: resumed once and finished",
+        (rc, timed_out, len(calls)),
+        (0, False, 2),
+    )
+    check(
+        "the resume continues the conversation",
+        calls[1][-2:],
+        ["--conversation", "conv-1"],
+    )
+    check(
+        "the first prompt is kept for the first session only",
+        "do it" in calls[0] and "do it" not in calls[1],
+        True,
+    )
+    check("resumes.log says why", ["exited with 1" in r for r in resumes], [True])
+    check(
+        "session.jsonl keeps both sessions",
+        events,
+        ["init", "result", "init", "result"],
+    )
+    rc, _, calls, resumes, _ = run_429_session(9, ["stage:pr"])
+    check("at most POOL_QUOTA_RESUMES resumes (3 here)", (rc, len(calls), len(resumes)), (1, 4, 3))
+    check("and the session counts as ended on quota", run_429_session.last.ended_on_quota(), True)
+    capacity = (
+        "TPM quota exhausted. No spare capacity is currently available to serve over-limit "
+        "requests. Please try again later, reduce your request rate or contact the sales team."
+    )
+    rc, timed_out, calls, resumes, _ = run_429_session(2, ["stage:pr"], text=capacity, resumes_max=8)
+    check(
+        "the capacity wording (no RESOURCE_EXHAUSTED in the result) is a quota error too",
+        (rc, timed_out, len(calls), len(resumes)),
+        (0, False, 3, 2),
+    )
+    waits = [x for x in (run_429_session.last.dir / "resumes.log").read_text().splitlines() if "quota wait" in x]
+    check("each resume waits first", len(waits), 2)
+    rc, _, calls, resumes, _ = run_429_session(1, [])
+    check(
+        "the work is already on GitHub: no resume",
+        (rc, len(calls), resumes),
+        (1, 1, []),
+    )
+    rc, timed_out, calls, resumes, events = run_429_session(1, ["stage:pr"], cli="claude")
+    check(
+        "claude: exited on a 429, resumed once and finished",
+        (rc, timed_out, len(calls)),
+        (0, False, 2),
+    )
+    check(
+        "claude: the resume names the session",
+        (calls[1][calls[1].index("--resume") + 1], calls[1][2]),
+        ("sess-1", "-p"),
+    )
+    check("claude: no print timeout flag", any("--print-timeout" in c for c in calls), False)
+    check("claude: both streams kept", events, ["system", "result", "system", "result"])
+    rc, _, calls, _, _ = run_429_session(9, ["stage:pr"], cli="claude")
+    check("claude: at most POOL_QUOTA_RESUMES, then counted as quota",
+          (rc, len(calls), run_429_session.last.ended_on_quota()), (1, 4, True))
+    assert len(FAILURES) == before, FAILURES[before:]
+
+
+def test_family_cap_counts_failures_and_spares_workers() -> None:
+    h = Rig(state(), family_max=2)
+    started = 0
+    for i in range(5):  # a merged PR that a live check sends back: new key each time
+        h.st = state([iss(9, ["stage:triage", "P0"], updated=f"2026-10-09T1{i}:00:00Z")])
+        t = [u for u in h.step(10) if u.number == 9]
+        started += len(t)
+        for u in t:
+            h.finish(u.key, "failed (exit 1)" if i % 2 else "ok")
+    check("a worker keeps getting sessions past POOL_FAMILY_MAX (claim.py bounds it)", started, 5)
+    fam = ccpool.Unit("merger", "land", "mrg:5@a", "mrg:5", 5, (0, 5), {})
+    h.pool.book.family_starts[fam.family] = 2
+    check("another role is stopped after POOL_FAMILY_MAX failures", h.pool.book.why_not(fam, h.pool.cfg), "family")
+    w = ccpool.Session(h.pool, fam, 99)
+    h.pool.book.running[fam.family] = fam
+    h.pool.sessions[fam.family] = w
+    h.pool.finished(w, "ok")
+    check("a session that ends ok does not count", h.pool.book.family_starts[fam.family], 1)
+
+
+def test_quota_backoff_and_pause() -> None:
+    check(
+        "the wait doubles and is capped",
+        [ccpool.quota_backoff(k, 60, 900) for k in (1, 2, 3, 4, 5, 6)],
+        [60, 120, 240, 480, 900, 900],
+    )
+    check(
+        "a full answer next to a stale 429 is not a quota result",
+        agent_cli.get("agy").quota_result({"event": "result", "result": {
+            "status": "ERROR", "error": "API error (attempt 1): RESOURCE_EXHAUSTED",
+            "response": "Merged PR #9 and moved the issue to stage:live as the skill says."}}),
+        False,
+    )
+    h = Rig(
+        state([iss(1, ["stage:triage", "P1"]), iss(2, ["stage:triage", "P1"])]),
+        caps={r: 0 for r in ccpool.ROLES}, quota_wait_s=60, quota_wait_max_s=900,
+    )
+    first = h.step()
+    check("two workers start", sorted(u.number for u in first), [1, 2])
+    h.finish(first[0].key, "quota error (exit 3)")
+    check("a quota error pauses new agent sessions", h.pool.book.quota_until, h.now + 60)
+    check("and spends no try", h.pool.book.tries[first[0].key], 0)
+    check("nothing starts during the pause", h.step(30), [])
+    again = h.step(31)
+    check("the unit is due again after it", [u.number for u in again], [first[0].number])
+    h.finish(again[0].key, "quota error (exit 3)")
+    check("the next pause in a row is twice as long", h.pool.book.quota_until, h.now + 120)
+    check("the monitor hears each pause once", sum("no new agent sessions" in e for e in h.pool.events), 2)
+    h.finish(first[1].key, "ok")
+    check("a session that ends ok resets the streak", h.pool.book.quota_streak, 0)
+
+
+def auto_session(guard_out: str, review_rc: int = 0):
+    """Session.auto_merge with a logging fake gh, a fake review gate and a fake guard."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-auto-"))
+    gh = d / "gh"
+    gh.write_text(f'#!/bin/sh\necho "$*" >> {d}/gh.log\n')
+    gh.chmod(0o755)
+    review = d / "review"
+    review.write_text(f"#!/bin/sh\nexit {review_rc}\n")
+    review.chmod(0o755)
+    guard = d / "guard"
+    guard.write_text(f"#!/bin/sh\ncat > /dev/null\necho '{guard_out}'\n")
+    guard.chmod(0o755)
+    cfg = ccpool.Config(
+        logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=str(guard)
+    )
+    pool = ccpool.Pool(cfg, fetcher=state, spawn=False)
+    u = ccpool.Unit(
+        "auto",
+        "merge",
+        "merge:9@x",
+        "mrg:9",
+        9,
+        (0, 9),
+        {"issue": 2, "head": "c" * 40, "mergeable": "MERGEABLE", "needs_live": True},
+    )
+    w = ccpool.Session(pool, u, 1)
+    w.dir.mkdir(parents=True)
+    outcome = w.work()
+    log = (d / "gh.log").read_text().splitlines() if (d / "gh.log").exists() else []
+    return outcome, log, pool
+
+
+def test_auto_merge_paths() -> None:
+    outcome, log, _ = auto_session("{}")
+    check("gates pass: merged", outcome, "ok")
+    check(
+        "squash merge at the head, then stage:pr -> stage:live for a needs:live issue",
+        log[:2],
+        [
+            f"pr merge 9 --squash --delete-branch --match-head-commit {'c' * 40}",
+            "issue edit 2 --remove-label stage:pr --add-label stage:live",
+        ],
+    )
+    check(
+        "and a signed merge comment",
+        log[2].startswith("issue comment 2 --body <!-- merger -->"),
+        True,
+    )
+    outcome, log, _ = auto_session(
+        json.dumps(
+            {"decision": "block", "reason": "PR #9 body is missing `Fail-before`."}
+        )
+    )
+    check(
+        "a gate refusal hands the PR back",
+        outcome,
+        "refused by the merge gates (handed back)",
+    )
+    text = "\n".join(log)
+    check(
+        "with the reason on the PR and the issue back at stage:triage",
+        (log[0].startswith("pr comment 9") and "Fail-before" in text, log[-1]),
+        (True, "issue edit 2 --remove-label stage:pr --add-label stage:triage"),
+    )
+    check("never merged", any("pr merge" in x for x in log), False)
+    outcome, log, pool = auto_session(
+        json.dumps({"decision": "block", "reason": "The shared checkout is dirty."})
+    )
+    check(
+        "Gate 0 (the shared checkout) is not the PR's fault: no hand-back",
+        (outcome, log),
+        ("failed (gate 0: shared checkout)", []),
+    )
+    check("the monitor hears it", any("Gate 0" in e for e in pool.events), True)
+    outcome, log, _ = auto_session("{}", review_rc=1)
+    check(
+        "a review-gate reject stops before the merge gates",
+        (outcome, log),
+        ("rejected by the review gate (handed back)", []),
+    )
+
+
+def git(*args, cwd):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_unfinished_work_survives() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-wip-"))
+    origin, root = d / "origin.git", d / "repo"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True
+    )
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(root)], check=True, capture_output=True
+    )
+    for k, v in (("user.name", "t"), ("user.email", "t@t")):
+        git("config", k, v, cwd=root)
+    (root / "a.txt").write_text("a\n")
+    git("add", ".", cwd=root)
+    git("commit", "-q", "-m", "base", cwd=root)
+    git("push", "-q", "origin", "main", cwd=root)
+    wt = d / "wrk-7-12-wt"
+    git("worktree", "add", "-q", "-B", "issue-12", str(wt), "origin/main", cwd=root)
+    (wt / "b.txt").write_text("half done\n")
+    gh = d / "gh"
+    gh.write_text("#!/bin/sh\nexit 0\n")  # pr list --head: no PR
+    gh.chmod(0o755)
+    old = os.environ.get("SHARED_REPO_PATH")
+    os.environ["SHARED_REPO_PATH"] = str(root)
+    try:
+        pool = ccpool.Pool(
+            ccpool.Config(logdir=d / "pool", gh=str(gh)), fetcher=state, spawn=False
+        )
+        w = ccpool.Session(
+            pool,
+            ccpool.Unit("worker", "implement", "wrk:12@x", "wrk:12", 12, (4,), {}),
+            7,
+        )
+        w.dir.mkdir(parents=True)
+        w.save_wip(str(d / "wrk-7-*-wt"))
+        check(
+            "the unfinished work is pushed to issue-12",
+            git("show", "origin/issue-12:b.txt", cwd=root)
+            if git("fetch", "-q", "origin", cwd=root) == ""
+            else "",
+            "half done",
+        )
+        wip = w.wip_branch(12)
+        check(
+            "the next worker learns about it",
+            wip.endswith("WIP #12: unfinished worker session"),
+            True,
+        )
+        claim = {"issue": 12, "token": "t", "from": "stage:triage", "title": "x"}
+        text = ccpool.worker_prompt(claim, "8", "45m", "unlimited", wip)
+        check(
+            "and is told to start from origin/issue-12",
+            "git worktree add -B issue-12 <worktree> origin/issue-12" in text,
+            True,
+        )
+        check("no branch, no hint", w.wip_branch(99), "")
+        with_pr = ccpool.worker_prompt(
+            dict(claim, pr={"number": 5, "branch": "issue-12"}), "8", "45m", "u", ""
+        )
+        check(
+            "a handed-back PR is updated, not restarted",
+            "Do not open a second" in with_pr,
+            True,
+        )
+    finally:
+        if old is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old
+
+
+def conflict_repo(test_only: bool, append_src: bool = False):
+    """origin with main and branch issue-7 that both append a case to one test file
+    (and, unless test_only, both change one line of a source file, or with append_src
+    both append a function to it)."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-rebase-"))
+    origin, root = d / "origin.git", d / "repo"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True
+    )
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(root)], check=True, capture_output=True
+    )
+    g = lambda *a: git(*a, cwd=root)  # noqa: E731
+    g("config", "user.name", "t")
+    g("config", "user.email", "t@t")
+    (root / "tests").mkdir()
+    (root / "tests/test_shell.py").write_text("def test_a():\n    assert True\n")
+    (root / "app.js").write_text("const x = 1;\n")
+    g("add", ".")
+    g("commit", "-q", "-m", "base")
+    g("push", "-q", "origin", "main")
+    g("checkout", "-q", "-b", "issue-7")
+    with open(root / "tests/test_shell.py", "a") as f:
+        f.write("\n\ndef test_issue_7():\n    assert 7\n")
+    if append_src:
+        with open(root / "app.js", "a") as f:
+            f.write("function seven() {\n  return 7;\n}\n")
+    elif not test_only:
+        (root / "app.js").write_text("const x = 7;\n")
+    g("commit", "-qam", "issue 7")
+    g("push", "-q", "origin", "issue-7")
+    g("checkout", "-q", "main")
+    with open(root / "tests/test_shell.py", "a") as f:
+        f.write("\n\ndef test_issue_8():\n    assert 8\n")
+    if append_src:
+        with open(root / "app.js", "a") as f:
+            f.write("function eight() {\n  return 8;\n}\n")
+    elif not test_only:
+        (root / "app.js").write_text("const x = 8;\n")
+    g("commit", "-qam", "issue 8")
+    g("push", "-q", "origin", "main")
+    return d, root, origin
+
+
+def run_rebase(test_only: bool, append_src: bool = False):
+    d, root, origin = conflict_repo(test_only, append_src)
+    sweep = (
+        d / "sweep_locked.py"
+    )  # stands in for the real sweep: green, records the call
+    sweep.write_text(
+        f"import sys\nopen({str(d / 'swept')!r}, 'a').write(' '.join(sys.argv[1:]))\nprint('3 green: unit 3')\n"
+    )
+    old = (os.environ.get("SHARED_REPO_PATH"), ccpool.HERE)
+    os.environ["SHARED_REPO_PATH"] = str(root)
+    ccpool.HERE = d
+    try:
+        pool = ccpool.Pool(
+            ccpool.Config(logdir=d / "pool", gh="true", split_after=1),
+            fetcher=state,
+            spawn=False,
+        )
+        u = ccpool.Unit(
+            "auto",
+            "rebase",
+            "rebase:41@x",
+            "mrg:41",
+            41,
+            (0, 41),
+            {
+                "issue": 7,
+                "head": "b" * 40,
+                "mergeable": "CONFLICTING",
+                "branch": "issue-7",
+            },
+        )
+        w = ccpool.Session(pool, u, 1)
+        w.dir.mkdir(parents=True)
+        outcome = w.work()
+    finally:
+        ccpool.HERE = old[1]
+        if old[0] is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old[0]
+    git("fetch", "-q", "origin", cwd=root)
+    pushed = git("show", "origin/issue-7:tests/test_shell.py", cwd=root)
+    if append_src:
+        pushed = git("show", "origin/issue-7:app.js", cwd=root)
+    return (
+        outcome,
+        pushed,
+        (d / "swept").read_text() if (d / "swept").exists() else "",
+        pool,
+    )
+
+
+def test_supervisor_rebase() -> None:
+    outcome, pushed, swept, pool = run_rebase(test_only=True)
+    check(
+        "two cases appended to one test file: rebased by the supervisor", outcome, "ok"
+    )
+    check(
+        "both cases are kept, main's first",
+        (
+            pushed.find("test_issue_8") < pushed.find("test_issue_7"),
+            "<<<<<<<" in pushed,
+        ),
+        (True, False),
+    )
+    check("swept with --update-pr before the push", swept, "--update-pr 41")
+    check(
+        "test-file conflicts do not count toward a split", pool.book.split_filed, set()
+    )
+    outcome, pushed, swept, pool = run_rebase(test_only=False)
+    check(
+        "a source hunk that changes a line is left to a merger",
+        outcome,
+        "left to a merger (a hunk changes existing lines)",
+    )
+    check("nothing pushed and no sweep", ("test_issue_8" in pushed, swept), (False, ""))
+    check(
+        "the source file counts toward a split issue (split_after=1 here)",
+        pool.book.split_filed,
+        {"app.js"},
+    )
+    check(
+        "and the monitor hears it",
+        any("split issue for app.js" in e for e in pool.events),
+        True,
+    )
+
+
+def test_split_rules() -> None:
+    h = Rig(state(), split_after=3, split_window_s=600, split_max=1, gh="true")
+    for pr in (1, 2):
+        h.pool.record_conflicts(pr, {"src/app.js", "tests/test_page.py"})
+    check("two PRs: below the threshold", h.pool.book.split_filed, set())
+    h.pool.record_conflicts(2, {"src/app.js"})
+    check("the same PR twice counts once", h.pool.book.split_filed, set())
+    h.pool.record_conflicts(3, {"src/app.js", "src/style.css"})
+    check(
+        "three PRs on one source file: one split issue",
+        h.pool.book.split_filed,
+        {"src/app.js"},
+    )
+    for pr in (4, 5, 6):
+        h.pool.record_conflicts(pr, {"src/style.css"})
+    check(
+        "POOL_SPLIT_MAX caps the issues per run",
+        h.pool.book.split_filed,
+        {"src/app.js"},
+    )
+    h2 = Rig(state(), split_after=2, split_window_s=60, gh="true")
+    h2.pool.record_conflicts(1, {"main.py"})
+    h2.now += 120
+    h2.pool.record_conflicts(2, {"main.py"})
+    check(
+        "conflicts older than the window do not count", h2.pool.book.split_filed, set()
+    )
+
+
+def test_source_and_test_files() -> None:
+    old = os.environ.pop("REVIEW_PATHS", None)
+    try:
+        check("test files in any common layout",
+              [ccpool.is_test(f) for f in ("tests/unit/test_a.py", "web/src/a.test.ts", "pkg/a_test.go",
+                                           "app/tests/x.py", "src/app.py")],
+              [True, True, True, True, False])
+        check("source: under REVIEW_PATHS (default src/), not a test",
+              [ccpool.is_source(f) for f in ("src/app.py", "src/a.test.ts", "docs/x.md", "lib/b.py")],
+              [True, False, False, False])
+        os.environ["REVIEW_PATHS"] = "lib/,src/"
+        check("REVIEW_PATHS lists the source roots", ccpool.is_source("lib/b.py"), True)
+    finally:
+        os.environ.pop("REVIEW_PATHS", None)
+        if old is not None:
+            os.environ["REVIEW_PATHS"] = old
+
+
+def test_supervisor_rebase_appended_source() -> None:
+    outcome, pushed, swept, pool = run_rebase(test_only=False, append_src=True)
+    check("two functions appended to one source file: rebased", outcome, "ok")
+    check(
+        "both kept, main's first, no markers",
+        (pushed.find("eight") < pushed.find("seven"), "<<<<<<<" in pushed),
+        (True, False),
+    )
+    check("swept before the push", swept, "--update-pr 41")
+
+
+def test_split_per_window_and_large_files() -> None:
+    h = Rig(state(), split_after=1, split_window_s=600, split_per_window=1, gh="true")
+    h.pool.record_conflicts(1, {"src/a.js"})
+    h.pool.record_conflicts(2, {"src/b.js"})
+    check("one split issue per window", h.pool.book.split_filed, {"src/a.js"})
+    h.now += 700
+    h.pool.record_large({"src/places.py": 1371, "src/small.py": 950})
+    check(
+        "a long file is split in the next window, the longest first",
+        h.pool.book.split_filed,
+        {"src/a.js", "src/places.py"},
+    )
+    h.now += 700
+    h.pool.record_conflicts(3, {"src/live.py"})
+    check(
+        "a conflicting file goes before a long one",
+        h.pool.book.split_filed,
+        {"src/a.js", "src/places.py", "src/live.py"},
+    )
+    h2 = Rig(state(), split_lines=900, gh="true")
+    h2.pool.record_large({"src/ok.py": 900})
+    check("at the limit is not over it", h2.pool.book.split_filed, set())
+
+
+def test_ux_runs_never_run_out() -> None:
+    h = Rig(state(), ux=True, ux_gap_s=60, family_max=3, ux_idle_gap_s=1e12)
+    ran = 0
+    for i in range(8):
+        h.st = state(main=str(i + 1) * 40)
+        t = h.step(120)
+        ran += len([u for u in t if u.kind == "ux"])
+        for u in t:
+            h.finish(u.key)
+    check("a UX run per sha past POOL_FAMILY_MAX", ran, 8)
+    check(
+        "and no stuck events for UX",
+        [e for e in h.pool.events if "stuck" in e and "ux" in e],
+        [],
+    )
+
+
+def test_auto_merge_resweeps_a_sweep_refusal() -> None:
+    calls = []
+    real = ccpool.Session.resweep
+
+    def fake(self, pr, branch, head, env):
+        calls.append((pr, branch, head))
+        return True
+
+    ccpool.Session.resweep = fake
+    try:
+        d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-resweep-"))
+        guard = d / "guard"
+        guard.write_text(
+            f"#!/bin/sh\ncat > /dev/null\nif [ -e {d}/once ]; then echo '{{}}'; else touch {d}/once; "
+            "echo '{\"decision\": \"block\", \"reason\": \"No sweep record for this head.\"}'; fi\n"
+        )
+        guard.chmod(0o755)
+        gh = d / "gh"
+        gh.write_text(f'#!/bin/sh\necho "$*" >> {d}/gh.log\n')
+        gh.chmod(0o755)
+        review = d / "review"
+        review.write_text("#!/bin/sh\nexit 0\n")
+        review.chmod(0o755)
+        pool = ccpool.Pool(
+            ccpool.Config(logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=str(guard)),
+            fetcher=state, spawn=False,
+        )
+        u = ccpool.Unit("auto", "merge", "merge:9@x", "mrg:9", 9, (0, 9),
+                        {"issue": 2, "head": "c" * 40, "mergeable": "MERGEABLE", "branch": "issue-2"})
+        w = ccpool.Session(pool, u, 1)
+        w.dir.mkdir(parents=True)
+        outcome = w.work()
+    finally:
+        ccpool.Session.resweep = real
+    check("a sweep refusal is swept here and merged", outcome, "ok")
+    check("at the PR's head and branch", calls, [(9, "issue-2", "c" * 40)])
+
+
+def test_worker_prompt_points_to_the_project() -> None:
+    claim = {"issue": 5, "token": "t", "from": "stage:triage", "title": "x"}
+    text = ccpool.worker_prompt(claim, "1", "45m", "u")
+    check("the worker reads the project's own facts", ".issuelooper/project.md" in text, True)
+    check("and the issue's newest comments (a reopened issue says why there)", "newest" in text, True)
+    check("the renamed skill", "issuelooper-worker skill" in text, True)
+    check("the review rules come from the config", ".issuelooper/review_rules.md" in text, True)
+    m = ccpool.merger_prompt(
+        ccpool.Unit("merger", "land", "k", "f", 9, (0,), {"issue": 2, "head": "c" * 40, "mergeable": "X"}), "45m")
+    check("the merger runs review_gate.py", ('review_gate.py" --pr 9' in m, "issuelooper-merger" in m), (True, True))
+
+
+FAKE_AGY_WRAP = r"""#!/usr/bin/env python3
+import json, sys, time
+args = sys.argv[1:]
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(args) + "\n")
+if "--conversation" in args:
+    print(json.dumps({"event": "result", "result": {"response": "pushed"}}), flush=True)
+    sys.exit(0)
+print(json.dumps({"event": "init", "conversation_id": "conv-1"}), flush=True)
+time.sleep(120)
+"""
+
+
+FAKE_AGY_STALL = r"""#!/usr/bin/env python3
+import json, sys, time
+args = sys.argv[1:]
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(args) + "\n")
+if "--conversation" in args:
+    print(json.dumps({"event": "result", "result": {"response": "continued and finished"}}), flush=True)
+    sys.exit(0)
+print(json.dumps({"event": "init", "conversation_id": "conv-7"}), flush=True)
+step = sys.argv[0].endswith("busy")
+state = "ACTIVE" if step else "DONE"
+print(json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": state,
+      "step_type": "tool", "tool_name": "run_command"}}), flush=True)
+time.sleep(40 if step else 120)
+print(json.dumps({"event": "result", "result": {"response": "the long command ended"}}), flush=True)
+"""
+
+
+FAKE_CLAUDE_STALL = r"""#!/usr/bin/env python3
+import json, sys, time
+args = sys.argv[1:]
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(args) + "\n")
+if "--resume" in args:
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": "s7",
+          "result": "continued and finished"}), flush=True)
+    sys.exit(0)
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "s7"}), flush=True)
+busy = sys.argv[0].endswith("busy")
+print(json.dumps({"type": "assistant", "session_id": "s7", "message": {"content": [
+    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}]}}), flush=True)
+if not busy:
+    print(json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "3 passed"}]}}), flush=True)
+time.sleep(40 if busy else 120)
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": "s7",
+      "result": "the long command ended"}), flush=True)
+"""
+
+
+def stall_session(name, cli="agy"):
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stall-"))
+    agy = d / name
+    agy.write_text(FAKE_CLAUDE_STALL if cli == "claude" else FAKE_AGY_STALL)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(
+        ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"tester": "60m"},
+                      stall_s=2),
+        fetcher=state, spawn=False,
+    )
+    w = ccpool.Session(pool, ccpool.Unit("tester", "ux", "ux:abc", "tst:ux:abc", None, (2,), {}), 1)
+    w.dir.mkdir(parents=True)
+    rc, _, timed_out = w.session("walk the app", dict(os.environ, CCROLE_TESTER_CLI=cli))
+    calls = [json.loads(x) for x in (d / f"{name}.calls").read_text().splitlines()]
+    return rc, timed_out, calls
+
+
+def test_silent_model_is_resumed() -> None:
+    rc, timed_out, calls = stall_session("agy-silent")
+    check("silent after a finished step: resumed in the same conversation", (rc, timed_out, len(calls)), (0, False, 2))
+    check("told why", "stopped responding" in calls[1][calls[1].index("--print") + 1], True)
+    rc, timed_out, calls = stall_session("agy-busy")
+    check("silent while a tool is running: left alone", (rc, len(calls)), (0, 1))
+    rc, timed_out, calls = stall_session("claude-silent", "claude")
+    check("claude: silent after a tool result: resumed", (rc, timed_out, len(calls)), (0, False, 2))
+    check("claude: in the same session, told why",
+          (calls[1][calls[1].index("--resume") + 1], "stopped responding" in calls[1][calls[1].index("-p") + 1]),
+          ("s7", True))
+    rc, timed_out, calls = stall_session("claude-busy", "claude")
+    check("claude: a tool_use with no result yet is left alone", (rc, len(calls)), (0, 1))
+
+
+def test_worker_wrap_up() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-wrap-"))
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_WRAP)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(
+        ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"worker": "60m"},
+                      worker_wrap_s=1, worker_wrap_budget_s=90),
+        fetcher=state, spawn=False,
+    )
+    w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
+    w.dir.mkdir(parents=True)
+    t0 = time.time()
+    rc, elapsed, timed_out = w.session("do issue 5", dict(os.environ))
+    calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+    check("a worker past POOL_WORKER_WRAP_S is resumed once", len(calls), 2)
+    second = calls[-1]
+    check(
+        "in the same conversation, told to wrap up, with the short budget",
+        (second[second.index("--conversation") + 1], "Time is almost up" in second[second.index("--print") + 1],
+         second[second.index("--print-timeout") + 1]),
+        ("conv-1", True, "90s"),
+    )
+    check("and ends cleanly well before its timeout", (rc, timed_out, time.time() - t0 < 60), (0, False, True))
+
+
+FAKE_CLAUDE_WRAP = r"""#!/usr/bin/env python3
+import json, sys, time
+args = sys.argv[1:]
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(args) + "\n")
+if "--resume" in args:
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "pushed"}), flush=True)
+    sys.exit(0)
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}), flush=True)
+time.sleep(120)
+"""
+
+
+def test_worker_wrap_up_on_claude() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-wrapc-"))
+    cli = d / "ccrole"
+    cli.write_text(FAKE_CLAUDE_WRAP)
+    cli.chmod(0o755)
+    pool = ccpool.Pool(
+        ccpool.Config(logdir=d / "pool", ccrole=str(cli), render="cat", timeouts={"worker": "60m"},
+                      worker_wrap_s=1, worker_wrap_budget_s=90),
+        fetcher=state, spawn=False,
+    )
+    w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
+    w.dir.mkdir(parents=True)
+    rc, _, timed_out = w.session("do issue 5", dict(os.environ, CCROLE_WORKER_CLI="claude"))
+    calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+    check("claude: the role's CLI is the one started", calls[0][:3], ["worker", "--", "-p"])
+    second = calls[-1]
+    check(
+        "claude: wrap-up resumes the session",
+        (len(calls), second[second.index("--resume") + 1], "Time is almost up" in second[second.index("-p") + 1]),
+        (2, "s1", True),
+    )
+    check("claude: ends cleanly", (rc, timed_out), (0, False))
+
+
+# --- end to end: the real loop, fake gh and fake agy ---------------------------
+
+FAKE_GH_GRAPHQL = r"""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[:2] == ["api", "graphql"]:
+    import fcntl
+    with open(os.environ["FAKE_GH_STATE"] + ".lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        s = json.load(open(os.environ["FAKE_GH_STATE"]))
+    lab = lambda i: {"nodes": [{"name": n} for n in i["labels"]]}
+    issues = list(s["issues"].values())
+    out = {"data": {"repository": {
+        "open": {"nodes": [{"number": i["number"], "title": i["title"], "body": i.get("body", ""),
+                            "updatedAt": i["updated_at"], "labels": lab(i)}
+                           for i in issues if i.get("state", "open") == "open"]},
+        "closed": {"nodes": [{"number": i["number"], "title": i["title"], "closedAt": i["updated_at"],
+                              "stateReason": "COMPLETED", "labels": lab(i)}
+                             for i in issues if i.get("state") == "closed"]},
+        "pullRequests": {"nodes": [{"number": p["number"], "headRefName": p["head"]["ref"],
+                                    "headRefOid": p["head"].get("sha", "b" * 40), "body": p.get("body", ""),
+                                    "isDraft": False, "mergeable": "MERGEABLE"} for p in s["prs"]]},
+        "main": {"target": {"oid": s.get("main", "a" * 40)}}}}}
+    print(json.dumps(out))
+    sys.exit(0)
+if args[:2] in (["pr", "merge"], ["pr", "list"], ["pr", "comment"], ["issue", "comment"]):
+    import fcntl
+    with open(os.environ["FAKE_GH_STATE"] + ".lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        s = json.load(open(os.environ["FAKE_GH_STATE"]))
+        with open(os.environ["FAKE_GH_STATE"] + ".calls", "a") as f:
+            f.write(json.dumps(args) + "\n")
+        if args[:2] == ["pr", "merge"]:
+            n = int(args[2])
+            p = next(p for p in s["prs"] if p["number"] == n)
+            s["prs"] = [q for q in s["prs"] if q["number"] != n]
+            s["main"] = "e" * 40
+            issue = p["body"].split("#")[1]
+            if p["body"].startswith("Fixes"):
+                s["issues"][issue]["state"] = "closed"
+            json.dump(s, open(os.environ["FAKE_GH_STATE"], "w"))
+    sys.exit(0)
+os.execv(sys.executable, [sys.executable, os.environ["FAKE_GH_REST"]] + args)
+"""
+
+FAKE_CCROLE = r"""#!/usr/bin/env python3
+import fcntl, json, os, sys, time
+role = sys.argv[1]
+prompt = sys.argv[sys.argv.index("--print") + 1]
+rec = {"role": role, "CC_ROLE_set_by_ccrole": True, "first": prompt.splitlines()[0],
+       "MERGE_PR": os.environ.get("MERGE_PR"), "TST_PORT": os.environ.get("TST_PORT"),
+       "WRK_CLAIM_FILE": os.environ.get("WRK_CLAIM_FILE"), "WORKER_POOL": os.environ.get("WORKER_POOL"),
+       "claim": open(os.environ["WRK_CLAIM_FILE"]).read() if os.environ.get("WRK_CLAIM_FILE") else None}
+with open(os.environ["FAKE_CCROLE_LOG"], "a") as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
+    f.write(json.dumps(rec) + "\n")
+time.sleep(float(os.environ.get("FAKE_CCROLE_SLEEP", "0.3")))
+print(json.dumps({"event": "result", "result": {"response": "done"}}))
+"""
+
+
+def test_end_to_end_with_fake_github() -> None:
+    repo = claim_test.Repo(
+        [
+            claim_test.issue(1, ["stage:triage", "P1"]),
+            claim_test.issue(2, ["stage:ready", "P0"]),
+            claim_test.issue(3, ["stage:pr", "P1"]),
+            claim_test.issue(5, ["stage:pr", "P1"]),
+            claim_test.issue(4, ["stage:triage", "P2"], body="Blocked by: #1"),
+        ],
+        prs=[
+            {
+                "number": 40,
+                "head": {"ref": "issue-3", "sha": "c" * 40},
+                "body": "Fixes #3",
+            },
+            {
+                "number": 41,
+                "head": {"ref": "issue-5", "sha": "d" * 40},
+                "body": "Fixes #5",
+            },
+        ],
+    )
+    gh = repo.dir / "gh-graphql"
+    gh.write_text(FAKE_GH_GRAPHQL)
+    gh.chmod(0o755)
+    fake = repo.dir / "ccrole"
+    fake.write_text(FAKE_CCROLE)
+    fake.chmod(0o755)
+    log = repo.dir / "sessions.jsonl"
+    review = repo.dir / "review"
+    review.write_text(
+        f'#!/bin/sh\necho "$@" >> {repo.dir}/reviews\n[ "$2" = 41 ] && exit 1\nexit 0\n'
+    )
+    review.chmod(0o755)
+    guard = repo.dir / "guard"
+    guard.write_text(
+        f"#!/bin/sh\ncat > /dev/null\necho \"$CC_ROLE $MERGE_PR\" >> {repo.dir}/guards\necho '{{}}'\n"
+    )
+    guard.chmod(0o755)
+    env = repo.env(role="")
+    env.pop("CC_ROLE", None)
+    env.update(
+        CLAIM_GH=str(gh),
+        FAKE_GH_REST=str(repo.gh),
+        POOL_CCROLE=str(fake),
+        POOL_RENDER="cat",
+        FAKE_CCROLE_LOG=str(log),
+        POOL_LOGDIR=str(repo.dir / "pool"),
+        POOL_POLL_S="0.5",
+        POOL_MIN_FETCH_S="0.2",
+        GH_REPO="o/r",
+        TST_PORT="8721",
+        CLAIM_SETTLE_S="0",
+        SHARED_REPO_PATH=str(HERE.parents[1]),
+        POOL_REVIEW_CMD=str(review),
+        POOL_GUARD_CMD=str(guard),
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(HERE / "ccpool.py"), "run"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        labels = {n: repo.labels(n) for n in (1, 2)}
+        if all("stage:owner" in v for v in labels.values()):
+            break
+        time.sleep(0.5)
+    proc.terminate()
+    out = proc.communicate(timeout=30)[0]
+    sessions = (
+        [json.loads(line) for line in log.read_text().splitlines()]
+        if log.exists()
+        else []
+    )
+    imps = [s for s in sessions if s["role"] == "worker"]
+    mergers = [s for s in sessions if s["role"] == "merger"]
+    check(
+        "e2e: both claimable issues got workers, the blocked one none",
+        sorted({json.loads(s["claim"])["issue"] for s in imps}),
+        [1, 2],
+    )
+    check(
+        "e2e: blocked #4 never claimed",
+        any(json.loads(s["claim"])["issue"] == 4 for s in imps),
+        False,
+    )
+    check(
+        "e2e: every worker session started with a written claim (token, origin stage)",
+        all(
+            json.loads(s["claim"]).get("token") and json.loads(s["claim"]).get("from")
+            for s in imps
+        ),
+        True,
+    )
+    check(
+        "e2e: workers see an unlimited pool",
+        {s["WORKER_POOL"] for s in imps},
+        {"unlimited"},
+    )
+    calls = (
+        [
+            json.loads(x)
+            for x in (repo.dir / "state.json.calls").read_text().splitlines()
+        ]
+        if (repo.dir / "state.json.calls").exists()
+        else []
+    )
+    check("e2e: no merger session for mergeable PRs", mergers, [])
+    reviews = (repo.dir / "reviews").read_text().split("\n")[:-1]
+    check(
+        "e2e: the review gate ran on both PRs (#40 once)",
+        (reviews.count("--pr 40"), reviews.count("--pr 41") >= 1),
+        (1, True),
+    )
+    check(
+        "e2e: the merge gates ran as the merger for #40 only (#41 was rejected)",
+        (repo.dir / "guards").read_text().split("\n")[:-1],
+        ["merger 40"],
+    )
+    check(
+        "e2e: #40 squash-merged at its head",
+        [c for c in calls if c[:2] == ["pr", "merge"]],
+        [
+            [
+                "pr",
+                "merge",
+                "40",
+                "--squash",
+                "--delete-branch",
+                "--match-head-commit",
+                "c" * 40,
+            ]
+        ],
+    )
+    check(
+        "e2e: stage:pr cleared on #3 and a signed merge comment posted",
+        (
+            "stage:pr" in repo.labels(3),
+            any(
+                c[:3] == ["issue", "comment", "3"]
+                and c[4].startswith("<!-- merger -->")
+                for c in calls
+            ),
+        ),
+        (False, True),
+    )
+    check(
+        "e2e: a session without a PR is released, and the third failure parks it at stage:owner",
+        (repo.labels(1), repo.labels(2)),
+        (["P1", "stage:owner"], ["P0", "stage:owner"]),
+    )
+    check(
+        "e2e: each issue got exactly three worker sessions",
+        sorted(json.loads(s["claim"])["issue"] for s in imps),
+        [1, 1, 1, 2, 2, 2],
+    )
+    claims = [c for c in repo.comments(1) if "<!-- claim " in c]
+    check(
+        "e2e: the claims are v2's signed comments",
+        all(c.startswith("<!-- worker -->") for c in claims),
+        True,
+    )
+    if FAILURES:
+        print(out[-3000:])
+
+
+def main() -> int:
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+    if FAILURES:
+        print(f"{len(FAILURES)} failing:\n")
+        for f in FAILURES:
+            print(f"  - {f}\n")
+        return 1
+    print(f"all ccpool cases pass ({len(tests)} groups, {CHECKS} checks)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

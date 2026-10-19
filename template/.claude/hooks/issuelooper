@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# issuelooper: run this repository's issue loop.
+#
+#   issuelooper start        check the prerequisites, start the monitor, send it its
+#                            kickoff, then start the supervisor (ccpool.py) in the background
+#   issuelooper stop         stop the supervisor (and its sessions) and the monitor
+#   issuelooper status       what is running, the monitor's state, the supervisor's view
+#   issuelooper say "TEXT"   send the monitor a message and wait for its answer
+#   issuelooper plan         print the units the supervisor would start now
+#
+# Settings come from .issuelooper/config.toml (an exported variable wins). What the
+# agents need to know about the project is in .issuelooper/project.md. The monitor's
+# first message is .issuelooper/monitor_kickoff.md when it exists. Logs and pid files
+# go to $ISSUELOOPER_RUN (default .issuelooper/run, which git must ignore).
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${SHARED_REPO_PATH:-$(cd "$HERE/../.." && pwd)}"
+export SHARED_REPO_PATH="$ROOT"
+# Python would write .claude/hooks/__pycache__/ into the shared checkout, and the merge
+# gate refuses to merge from a checkout that is not clean. Every process started from
+# here inherits this.
+export PYTHONDONTWRITEBYTECODE=1
+
+die() { printf 'issuelooper: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'issuelooper: %s\n' "$*" >&2; }
+
+command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH (3.11 or later is needed)"
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' ||
+  die "python3 is $(python3 -c 'import platform; print(platform.python_version())'); 3.11 or later is needed (tomllib)"
+
+eval "$(python3 "$HERE/config.py" env)"
+RUN="${ISSUELOOPER_RUN:-$ROOT/.issuelooper/run}"
+export ISSUELOOPER_RUN="$RUN"
+export POOL_LOGDIR="${POOL_LOGDIR:-$RUN/pool}"
+export POOL_BROKER_SOCK="${POOL_BROKER_SOCK:-$RUN/broker.sock}"
+
+DEFAULT_KICKOFF="Use the issuelooper-shared skill, then work as the monitor per the issuelooper-monitor skill. Run its pass over the open queue now."
+
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+prerequisites() {
+  local bad=0 cli role
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "$ROOT is not a git repository"
+  if ! command -v gh >/dev/null 2>&1; then
+    warn "gh (the GitHub CLI) is not on PATH: install it from https://cli.github.com"; bad=1
+  elif ! gh auth status >/dev/null 2>&1; then
+    warn "gh is not signed in: run \`gh auth login\`"; bad=1
+  fi
+  for cli in $(python3 "$HERE/agent_cli.py" clis worker merger tester monitor); do
+    case "$cli" in
+      agy|claude) ;;
+      *) warn "unknown agent CLI '$cli' in CCROLE_CLI or CCROLE_<ROLE>_CLI: use agy or claude"; bad=1; continue ;;
+    esac
+    if ! command -v "$cli" >/dev/null 2>&1; then
+      roles=""
+      for role in worker merger tester monitor; do
+        [ "$(python3 "$HERE/agent_cli.py" cli "$role")" = "$cli" ] && roles="$roles $role"
+      done
+      warn "'$cli' is not on PATH (used by:$roles); install it or set [agents] cli in .issuelooper/config.toml"
+      bad=1
+    fi
+  done
+  case "$RUN/" in
+    "$ROOT"/*)
+      git -C "$ROOT" check-ignore -q "$RUN/x" ||
+        { warn "$RUN is not ignored by git: add '${RUN#"$ROOT"/}/' to .gitignore (the merge gate needs a clean checkout)"; bad=1; }
+      ;;
+  esac
+  if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+    warn "the checkout at $ROOT has uncommitted changes: commit or stash them first (the merge gate refuses to merge from a dirty shared checkout; nobody edits it while the loop runs)"
+    bad=1
+  fi
+  [ -f "$ROOT/.issuelooper/project.md" ] ||
+    warn "no .issuelooper/project.md: the agents will not know how to set up, run or test this project"
+  [ "$bad" = 0 ] || die "fix the above, then run \`issuelooper start\` again"
+}
+
+cmd_start() {
+  alive "$RUN/pool.pid" && die "already running (supervisor pid $(cat "$RUN/pool.pid")); \`issuelooper stop\` first"
+  prerequisites
+  mkdir -p "$RUN/logs" "$POOL_LOGDIR"
+  python3 "$HERE/monitorctl.py" start --run "$RUN" >/dev/null
+  local kickoff="$DEFAULT_KICKOFF"
+  [ -f "$ROOT/.issuelooper/monitor_kickoff.md" ] && kickoff="$(cat "$ROOT/.issuelooper/monitor_kickoff.md")"
+  python3 "$HERE/monitorctl.py" say --run "$RUN" --tag kickoff --no-wait "$kickoff" >/dev/null
+  local launch=()
+  command -v setsid >/dev/null 2>&1 && launch=(setsid)
+  ( cd "$ROOT" && exec ${launch[@]+"${launch[@]}"} python3 "$HERE/ccpool.py" run >>"$RUN/pool.out" 2>&1 </dev/null ) &
+  echo $! > "$RUN/pool.pid"
+  sleep 1
+  alive "$RUN/pool.pid" || die "the supervisor exited at once; see $RUN/pool.out"
+  echo "issuelooper is running for $ROOT"
+  echo "  monitor:    \`issuelooper say \"...\"\`, log $RUN/logs/"
+  echo "  supervisor: $RUN/pool.out, sessions under $POOL_LOGDIR/"
+}
+
+cmd_stop() {
+  if alive "$RUN/pool.pid"; then
+    local pid; pid="$(cat "$RUN/pool.pid")"
+    kill -TERM "$pid"
+    # The supervisor stops its sessions on SIGTERM; give it time to.
+    for _ in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    echo "supervisor stopped"
+  fi
+  rm -f "$RUN/pool.pid"
+  if [ -S "$RUN/broker.sock" ] && python3 "$HERE/monitorctl.py" stop --run "$RUN" >/dev/null 2>&1; then
+    echo "monitor stopped"
+  elif alive "$RUN/broker.pid"; then
+    kill -TERM "$(cat "$RUN/broker.pid")" && echo "monitor stopped"
+  fi
+  rm -f "$RUN/broker.pid"
+}
+
+cmd_status() {
+  if alive "$RUN/pool.pid"; then echo "supervisor: running (pid $(cat "$RUN/pool.pid"))"
+  else echo "supervisor: not running"; fi
+  local st=""
+  [ -S "$RUN/broker.sock" ] && st="$(python3 "$HERE/monitorctl.py" status --run "$RUN" 2>/dev/null || true)"
+  if [ -n "$st" ]; then
+    python3 - "$st" <<'PY'
+import json, sys
+s = json.loads(sys.argv[1])
+state = "busy" if s["busy"] else "idle"
+print(f"monitor: running on {s['cli']}, turn {s['done']} of {s['sent']}, {state}, restarts {s['restarts']}")
+PY
+  else
+    echo "monitor: not running"
+  fi
+  if [ -f "$POOL_LOGDIR/state.json" ]; then
+    python3 - "$POOL_LOGDIR/state.json" <<'PY'
+import json, sys, time
+s = json.load(open(sys.argv[1]))
+print(f"last poll {time.time() - s['t']:.0f} s ago; main {s['main'][:8]}" +
+      (f", deployed {s['deployed'][:8]}" if s.get("deployed") else ""))
+for fam, key in sorted(s.get("running", {}).items()):
+    print(f"  running  {key}")
+for key in s.get("due_not_started", []):
+    print(f"  waiting  {key}")
+for key in s.get("stuck", []):
+    print(f"  stuck    {key}")
+PY
+  fi
+}
+
+case "${1:-}" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  status) cmd_status ;;
+  say)
+    shift
+    [ $# -gt 0 ] || die 'usage: issuelooper say "TEXT"'
+    exec python3 "$HERE/monitorctl.py" say --run "$RUN" "$*"
+    ;;
+  plan)
+    shift
+    cd "$ROOT"
+    exec python3 "$HERE/ccpool.py" plan "$@"
+    ;;
+  ""|-h|--help|help)
+    awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
+    ;;
+  *) die "unknown command '$1' (start, stop, status, say, plan)" ;;
+esac

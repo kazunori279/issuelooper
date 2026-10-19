@@ -1,0 +1,27 @@
+#!/bin/sh
+# main moves only through merges: never delete it, never force-push over it.
+zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_ref" ] && continue
+    case "$remote_ref" in
+    refs/heads/main) protected=yes ;;
+    *) protected=no ;;
+    esac
+    if [ "$local_sha" = "$zero" ]; then
+        if [ "$protected" = yes ]; then
+            echo "pre-push: refusing to delete remote main." >&2
+            status=1
+        fi
+        continue
+    fi
+    if [ "$protected" = yes ] && [ "$remote_sha" != "$zero" ]; then
+        if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+            echo "pre-push: refusing a non-fast-forward (forced) push to main." >&2
+            echo "  remote $remote_sha is not an ancestor of local $local_sha." >&2
+            echo "  If main is wrong locally, fix main -- do not overwrite the remote." >&2
+            status=1
+        fi
+    fi
+done
+exit $status

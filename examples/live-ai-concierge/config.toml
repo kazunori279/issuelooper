@@ -1,0 +1,36 @@
+# The settings the framework was developed with: a FastAPI + vanilla JS app with
+# a live voice/text model mode and a scripted mode that needs no credentials.
+
+[agents]
+cli = "agy"
+model = ""                   # the experiment pinned one model per role here
+
+[sweep]
+command = "make verify"      # ruff, pytest tests/unit, pytest-playwright tests/e2e
+slots = 4
+
+[deploy]
+command = ""                 # set to the command that puts origin/main on your server
+
+[live]
+enabled = true
+
+[ux]
+enabled = true
+gap_minutes = 25
+idle_gap_minutes = 10
+
+[spec]
+enabled = true
+gap_minutes = 45
+
+[review]
+enabled = true
+rules = ".issuelooper/review_rules.md"
+production_paths = ["src/"]
+
+[pool]
+max_sessions = 16
+
+[guard]
+secret_urls = ["/api/config"]   # answers with the browser Maps key in the clear
