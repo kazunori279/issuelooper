@@ -6,10 +6,11 @@
 #   issuelooper aide [N]       open another aide (an ad-hoc session: research, filing, comments)
 #   issuelooper say "TEXT"     send the monitor a message (--wait: wait and print its answer)
 #   issuelooper status         what is running, the monitor's and aides' state, the supervisor's view
-#   issuelooper watch [SECS]   status, refreshed every SECS seconds (default 10)
+#   issuelooper watch [SECS]   the dashboard in the terminal, refreshed every SECS seconds (default 10)
+#   issuelooper dashboard      the dashboard's URL (starts it if it is not running)
 #   issuelooper attach         open the herdr session the loop runs in (from a plain terminal)
 #   issuelooper plan           print the units the supervisor would start now
-#   issuelooper stop [--all]   stop the supervisor and the monitor (--all: the aides too)
+#   issuelooper stop [--all]   stop the supervisor, the monitor and the dashboard (--all: the aides too)
 #
 # With `[monitor] host = "herdr"` (the default) the monitor and the aides are interactive
 # agent sessions in panes of a herdr tab named "issuelooper": you talk to each one in its
@@ -145,6 +146,32 @@ kickoff_text() {
   else printf '%s' "$DEFAULT_KICKOFF"; fi
 }
 
+# The dashboard (dashboard.py) on the first free port from ISSUELOOPER_DASHBOARD_PORT.
+start_dashboard() {
+  case "${ISSUELOOPER_DASHBOARD:-1}" in 0|false|no|off) return 0 ;; esac
+  alive "$RUN/dashboard.pid" && return 0
+  local port
+  port="$(python3 - "${ISSUELOOPER_DASHBOARD_PORT:-8780}" <<'PY'
+import socket, sys
+base = int(sys.argv[1])
+for p in range(base, base + 10):
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", p))
+        except OSError:
+            continue
+        print(p)
+        break
+PY
+)"
+  [ -n "$port" ] || { warn "no free port for the dashboard from ${ISSUELOOPER_DASHBOARD_PORT:-8780}"; return 0; }
+  ( cd "$ROOT" && exec python3 "$HERE/dashboard.py" --port "$port" >>"$RUN/dashboard.out" 2>&1 </dev/null ) &
+  echo $! > "$RUN/dashboard.pid"
+  echo "$port" > "$RUN/dashboard.port"
+}
+
+dashboard_url() { alive "$RUN/dashboard.pid" && echo "http://127.0.0.1:$(cat "$RUN/dashboard.port")/"; }
+
 start_herdr() {
   local envs=() e tab mon aide status_pane mname aname
   while IFS= read -r e; do envs+=("$e"); done < <(pane_env)
@@ -163,11 +190,14 @@ start_herdr() {
   echo "starting an aide in pane $aide ($aname) ..."
   python3 "$LINK" start-role aide "$aname" "$aide" >/dev/null || warn "the aide did not start; see pane $aide"
   start_supervisor POOL_HERDR_MONITOR="$mon" HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-}"
+  start_dashboard
   python3 "$LINK" run "$status_pane" "$(printf '%q' "$HERE/issuelooper") watch" || true
   echo "issuelooper is running for $ROOT in the herdr tab \"issuelooper\""
   echo "  monitor ($mname): talk to it in its pane; queue updates from the supervisor arrive there too"
   echo "  aide ($aname): research, questions, filing issues; \`issuelooper aide\` opens another"
   echo "  supervisor: $RUN/pool.out, sessions under $POOL_LOGDIR/"
+  dashboard_url >/dev/null && echo "  dashboard:  $(dashboard_url)"
+  return 0
 }
 
 start_broker() {
@@ -175,9 +205,12 @@ start_broker() {
   python3 "$HERE/monitorctl.py" start --run "$RUN" >/dev/null
   python3 "$HERE/monitorctl.py" say --run "$RUN" --tag kickoff --no-wait "$(kickoff_text)" >/dev/null
   start_supervisor POOL_BROKER_SOCK="$POOL_BROKER_SOCK"
+  start_dashboard
   echo "issuelooper is running for $ROOT (headless monitor)"
   echo "  monitor:    \`issuelooper say \"...\"\`, log $RUN/logs/"
   echo "  supervisor: $RUN/pool.out, sessions under $POOL_LOGDIR/"
+  dashboard_url >/dev/null && echo "  dashboard:  $(dashboard_url)"
+  return 0
 }
 
 cmd_start() {
@@ -225,6 +258,8 @@ cmd_stop() {
     echo "supervisor stopped"
   fi
   rm -f "$RUN/pool.pid"
+  if alive "$RUN/dashboard.pid"; then kill -TERM "$(cat "$RUN/dashboard.pid")" && echo "dashboard stopped"; fi
+  rm -f "$RUN/dashboard.pid" "$RUN/dashboard.port"
   if [ -f "$HERDR_REC" ]; then
     local p panes
     panes="$(rec monitor) $(rec status_pane)"
@@ -244,6 +279,7 @@ cmd_stop() {
 cmd_status() {
   if alive "$RUN/pool.pid"; then echo "supervisor: running (pid $(cat "$RUN/pool.pid"))"
   else echo "supervisor: not running"; fi
+  if dashboard_url >/dev/null; then echo "dashboard: $(dashboard_url)"; fi
   if [ "$HOST" = herdr ]; then
     if [ -f "$HERDR_REC" ]; then
       echo "monitor: $(python3 "$LINK" status "$(rec monitor)") ($(rec monitor_name), pane $(rec monitor), herdr session ${HERDR_SESSION:-$(rec session)})"
@@ -286,19 +322,18 @@ cmd_watch() {
   local secs="${1:-10}"
   while true; do
     printf '\033[H\033[2J'
-    date '+%H:%M:%S'
-    cmd_status 2>&1 || true
-    if [ -f "$POOL_LOGDIR/pool.jsonl" ]; then
-      echo; echo "recent:"
-      tail -n 8 "$POOL_LOGDIR/pool.jsonl" | python3 -c 'import json, sys, time
-for line in sys.stdin:
-    try: r = json.loads(line)
-    except ValueError: continue
-    rest = " ".join(f"{k}={v}" for k, v in r.items() if k not in ("t", "kind"))
-    print(time.strftime("%H:%M", time.localtime(r.get("t", 0))), r.get("kind", ""), rest[:110])'
-    fi
+    python3 "$HERE/dash_model.py" text 2>&1 || cmd_status
     sleep "$secs"
   done
+}
+
+cmd_dashboard() {
+  if ! dashboard_url >/dev/null; then
+    mkdir -p "$RUN"
+    ISSUELOOPER_DASHBOARD=1 start_dashboard
+    sleep 1
+  fi
+  dashboard_url || die "the dashboard did not start; see $RUN/dashboard.out"
 }
 
 cmd_attach() {
@@ -317,6 +352,7 @@ case "${1:-}" in
   aide) shift; cmd_aide "$@" ;;
   say) shift; cmd_say "$@" ;;
   attach) cmd_attach ;;
+  dashboard) cmd_dashboard ;;
   plan)
     shift
     cd "$ROOT"
@@ -325,5 +361,5 @@ case "${1:-}" in
   ""|-h|--help|help)
     awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
     ;;
-  *) die "unknown command '$1' (start, aide, say, status, watch, attach, plan, stop)" ;;
+  *) die "unknown command '$1' (start, aide, say, status, watch, dashboard, attach, plan, stop)" ;;
 esac

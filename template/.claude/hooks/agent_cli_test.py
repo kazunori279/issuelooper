@@ -434,6 +434,34 @@ def test_model_from_init() -> None:
     check("no init: empty", agy.model([{"event": "step_update"}]), "")
 
 
+def test_usage_and_last_tool() -> None:
+    agy, claude = agent_cli.get("agy"), agent_cli.get("claude")
+    ev = [
+        {"event": "init", "conversation_id": "c"},
+        {"event": "step_update", "step_update": {"step_type": "tool", "state": "ACTIVE", "tool_name": "run_command",
+                                                  "tool_info": {"parameters": {"CommandLine": "pytest -q"}}}},
+        {"event": "result", "result": {"usage": {"input_tokens": 100, "output_tokens": 10, "thinking_tokens": 5,
+                                                 "cache_read_tokens": 50}}},
+        {"event": "result", "result": {"usage": {"input_tokens": 20, "output_tokens": 2}}},
+    ]
+    check("agy: tokens over every turn, no cost", agy.usage(ev),
+          {"input": 120, "output": 12, "thinking": 5, "cache_read": 50, "turns": 2, "cost_usd": None})
+    check("agy: the running tool", agy.last_tool(ev), "run_command pytest -q")
+    cev = [
+        {"type": "system", "subtype": "init", "session_id": "s"},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                                       "input": {"command": "make verify"}}]}},
+        {"type": "result", "subtype": "success", "result": "ok", "total_cost_usd": 0.25,
+         "usage": {"input_tokens": 10, "cache_creation_input_tokens": 5, "output_tokens": 3,
+                   "cache_read_input_tokens": 40}},
+        {"type": "result", "subtype": "success", "result": "ok", "total_cost_usd": 0.5, "usage": {}},
+    ]
+    check("claude: tokens and the CLI's own cost", claude.usage(cev),
+          {"input": 15, "output": 3, "thinking": 0, "cache_read": 40, "turns": 2, "cost_usd": 0.75})
+    check("claude: the newest tool call", claude.last_tool(cev), "Bash make verify")
+    check("no tool yet", agy.last_tool([{"event": "init"}]), "")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

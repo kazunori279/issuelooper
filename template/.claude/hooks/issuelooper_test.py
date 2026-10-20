@@ -53,6 +53,13 @@ for line in sys.stdin:
 """
 
 
+def free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def git(*args, cwd):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
@@ -101,6 +108,7 @@ def setup():
         HOME=str(d),
         FAKE_LOG=str(d / "agy.log"),
         GH_REPO="o/r",
+        ISSUELOOPER_DASHBOARD_PORT=str(free_port()),
     )
     return d, repo, env
 
@@ -190,6 +198,18 @@ def test_broker_host() -> None:
             ).stdout,
             "",
         )
+        port = (repo / ".issuelooper" / "run" / "dashboard.port").read_text().strip()
+        import urllib.request
+        page = ""
+        for _ in range(50):
+            try:
+                page = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
+                break
+            except OSError:
+                time.sleep(0.2)
+        check("start also serves the dashboard", ("<h1>issuelooper" in page, "Needs you" in page), (True, True))
+        r = run(repo, env, "dashboard")
+        check("`dashboard` prints its URL", r.stdout.strip(), f"http://127.0.0.1:{port}/")
         r = run(repo, env, "status")
         check(
             "status names both",
@@ -207,9 +227,9 @@ def test_broker_host() -> None:
     finally:
         r = run(repo, env, "stop")
     check(
-        "stop stops both",
-        ("supervisor stopped" in r.stdout, "monitor stopped" in r.stdout),
-        (True, True),
+        "stop stops all three",
+        ("supervisor stopped" in r.stdout, "monitor stopped" in r.stdout, "dashboard stopped" in r.stdout),
+        (True, True, True),
     )
     r = run(repo, env, "status")
     check(

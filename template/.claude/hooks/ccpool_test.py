@@ -676,6 +676,37 @@ def test_monitor_feed_through_herdr() -> None:
                 os.environ[k] = v
 
 
+def test_state_for_the_dashboard() -> None:
+    st = state(
+        [iss(1, []), iss(2, ["stage:triage", "P1"]), iss(3, ["stage:owner"], title="pick a color"),
+         iss(4, ["stage:pr", "hold:monitor"]), iss(5, ["ux:proposed"])],
+        prs=[pr(9, 4), pr(10, 4, mergeable="CONFLICTING")],
+    )
+    q = ccpool.queue_snapshot(st)
+    check("counts per stage, holds and proposals", q["stages"],
+          {"untriaged": 1, "stage:triage": 1, "stage:owner": 1, "stage:pr": 1, "hold:monitor": 1, "ux:proposed": 1})
+    check("the owner's decisions are listed", [(o["number"], o["title"]) for o in q["owner"]], [(3, "pick a color")])
+    check("pull requests by mergeability", q["prs"], {"MERGEABLE": 1, "CONFLICTING": 1})
+    h = Rig(st)
+    started = h.step()
+    data = json.loads((h.pool.cfg.logdir / "state.json").read_text())
+    check("state.json carries the queue and the running sessions",
+          (data["queue"]["open"], sorted(x["number"] for x in data["sessions"] if x["role"] == "worker")),
+          (5, [2]))
+    check("a queue record is logged when the counts change", kinds(h).count("queue"), 1)
+    h.step()
+    check("and not again while they stay", kinds(h).count("queue"), 1)
+    w = next(w for w in h.pool.sessions.values() if w.unit.role == "worker")
+    (w.dir).mkdir(parents=True, exist_ok=True)
+    (w.dir / "session.jsonl").write_text(json.dumps(
+        {"event": "result", "result": {"usage": {"input_tokens": 7, "output_tokens": 3}}}) + "\n")
+    h.finish(w.unit.key)
+    end = [json.loads(x) for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+           if json.loads(x)["kind"] == "end"][-1]
+    check("the end record names the issue and the tokens",
+          (end["number"], end["usage"]["input"], end["usage"]["output"], end["cli"]), (2, 7, 3, "agy"))
+
+
 def test_deploy_safety_net() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-netdeploy-"))
     st = state([iss(1, ["stage:pr"])], prs=[pr(5, 1, mergeable="CONFLICTING")], main="f" * 40)

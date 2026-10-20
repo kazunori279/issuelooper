@@ -19,6 +19,10 @@ model = ""                   # CCROLE_MODEL: the model for every role; empty = t
 host = "herdr"               # POOL_MONITOR_HOST: "herdr" (the monitor and aides in herdr panes you talk to)
                              # or "broker" (a headless monitor reached with `issuelooper say`)
 
+[dashboard]
+enabled = true               # ISSUELOOPER_DASHBOARD: `issuelooper start` also serves the dashboard on 127.0.0.1
+port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried; the next free one up to +9 is used
+
 [sweep]
 command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
 slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time

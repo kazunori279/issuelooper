@@ -95,6 +95,20 @@ class Cli:
     def init_model(self, e: dict) -> str:
         return str(e.get("model") or "")
 
+    def usage(self, events: list[dict]) -> dict:
+        """Tokens over every turn of the stream (a resume adds turns), and the cost in
+        USD when the CLI reports one (None when it does not)."""
+        raise NotImplementedError
+
+    def last_tool(self, events: list[dict]) -> str:
+        """The newest tool call in the stream, as "<tool> <its main argument>", or ''."""
+        for e in reversed(events):
+            r = self.read(e)
+            for step in reversed(r.get("steps") or []):
+                if step.get("type") == "tool":
+                    return f"{step.get('tool') or ''} {step.get('text') or ''}".strip()
+        return ""
+
     def model_stalled(self, events: list[dict]) -> bool:
         """The last event is a finished step and no tool is running: if nothing comes
         next for a while, the model went silent."""
@@ -151,6 +165,30 @@ class Agy(Cli):
     def init_model(self, e):
         init = e.get("init") if isinstance(e.get("init"), dict) else {}
         return str(init.get("model") or e.get("model") or "")
+
+    def usage(self, events):
+        # agy reports tokens in each result and no price.
+        out = {"input": 0, "output": 0, "thinking": 0, "cache_read": 0, "turns": 0, "cost_usd": None}
+        for e in events:
+            r = e.get("result") if e.get("event") == "result" else None
+            if not isinstance(r, dict):
+                continue
+            u = r.get("usage") or {}
+            out["turns"] += 1
+            out["input"] += int(u.get("input_tokens") or 0)
+            out["output"] += int(u.get("output_tokens") or 0)
+            out["thinking"] += int(u.get("thinking_tokens") or 0)
+            out["cache_read"] += int(u.get("cache_read_tokens") or 0)
+        return out
+
+    def last_tool(self, events):
+        # A running tool shows as an ACTIVE step, which read() leaves out.
+        for e in reversed(events):
+            s = e.get("step_update") if e.get("event") == "step_update" else None
+            if isinstance(s, dict) and s.get("step_type") == "tool":
+                c = self._condense(s)
+                return f"{c.get('tool') or ''} {c.get('text') or ''}".strip()
+        return ""
 
     def is_result(self, e):
         return e.get("event") == "result"
@@ -335,6 +373,21 @@ class Claude(Cli):
 
     def user_message(self, text):
         return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def usage(self, events):
+        # Claude Code puts its own cost estimate in each result (total_cost_usd).
+        out = {"input": 0, "output": 0, "thinking": 0, "cache_read": 0, "turns": 0, "cost_usd": None}
+        for e in events:
+            if e.get("type") != "result":
+                continue
+            u = e.get("usage") or {}
+            out["turns"] += 1
+            out["input"] += int(u.get("input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
+            out["output"] += int(u.get("output_tokens") or 0)
+            out["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+            if e.get("total_cost_usd") is not None:
+                out["cost_usd"] = round((out["cost_usd"] or 0) + float(e["total_cost_usd"]), 6)
+        return out
 
     def read(self, e):
         kind = e.get("type")

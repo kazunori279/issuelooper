@@ -357,6 +357,33 @@ def normalize(data: dict) -> dict:
     }
 
 
+STAGES = ("stage:triage", "stage:ready", "stage:doing", "stage:pr", "stage:live", "stage:owner")
+
+
+def queue_snapshot(st: dict) -> dict:
+    """The queue as counts per stage, for state.json and the dashboard (which never asks
+    GitHub itself): open issues by stage, holds, the owner's open decisions, and the
+    open pull requests by what GitHub says about merging them."""
+    counts = collections.Counter()
+    owner = []
+    for i in st["open"]:
+        labels = set(i["labels"])
+        stage = next((x for x in STAGES if x in labels), "")
+        if "ux:proposed" in labels:
+            counts["ux:proposed"] += 1
+        elif stage:
+            counts[stage] += 1
+        else:
+            counts["untriaged"] += 1
+        for hold in ("on hold", "hold:monitor"):
+            if hold in labels:
+                counts[hold] += 1
+        if stage == "stage:owner":
+            owner.append({"number": i["number"], "title": i["title"], "updated": i["updated"]})
+    prs = collections.Counter(p["mergeable"] for p in st["prs"])
+    return {"open": len(st["open"]), "stages": dict(counts), "owner": owner, "prs": dict(prs)}
+
+
 def fetch(cfg: Config) -> dict:
     repo = (
         cfg.repo
@@ -823,6 +850,15 @@ def tester_prompt(u: Unit, port: int, timeout: str) -> str:
 # --- the supervisor -------------------------------------------------------------
 
 
+def review_reason(head: str) -> str:
+    """The review gate's reason for its verdict on HEAD, from its record ('' if none)."""
+    d = pathlib.Path(os.environ.get("REVIEW_DIR", "") or "/tmp/issuelooper-review")
+    try:
+        return str(json.loads((d / f"{head}.json").read_text()).get("reason") or "")[:300]
+    except (OSError, ValueError):
+        return ""
+
+
 class BrokerLink:
     """The supervisor's link to a monitor hosted by broker.py (the headless launch)."""
 
@@ -1257,6 +1293,7 @@ class Session(threading.Thread):
         )
         self.note(f"review gate exit {r.returncode}: {(r.stdout + r.stderr).strip()[-600:]}")
         if r.returncode == 1:
+            self.pool.log("handback", pr=pr, issue=n, by="review", reason=review_reason(head))
             return "rejected by the review gate (handed back)"
         if r.returncode != 0:
             return f"failed (review gate exit {r.returncode})"
@@ -1289,6 +1326,9 @@ class Session(threading.Thread):
                     self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
                     return "failed (gate 0: shared checkout)"
                 self.hand_back(pr, n, "**Merge gates: refused.** Not merged.\n\n" + reason[:2500])
+                gate = re.search(r"(?i)\bgate\s*(\d)", reason)
+                self.pool.log("handback", pr=pr, issue=n, by=f"gate {gate.group(1)}" if gate else "gates",
+                              reason=reason.strip().splitlines()[0][:200] if reason.strip() else "")
                 return "refused by the merge gates (handed back)"
             m = self.gh("pr", "merge", str(pr), "--squash", "--delete-branch", "--match-head-commit", head)
             self.note(f"gh pr merge exit {m.returncode}: {(m.stdout + m.stderr).strip()[-400:]}")
@@ -1563,6 +1603,8 @@ class Pool:
         self.last_fetch = 0.0
         self.last_sent = 0.0
         self._herdr = None  # herdr_link.Monitor, made on first use
+        self.pending_since = 0.0  # when the oldest unsent monitor update was queued
+        self.last_queue: dict = {}  # the queue counts last logged
         self.monitor_state = ""  # the monitor's last state seen by feed()
         self.crashes: collections.Counter = collections.Counter()
         self.deploying = False
@@ -1758,13 +1800,20 @@ class Pool:
                 )
         if outcome.startswith("quota error"):
             self.quota_seen(u.role)
+        extra = {}
+        if (w.dir / "session.jsonl").exists():
+            extra["usage"] = w.cli.usage(w.events())
+            extra["cli"] = w.cli.name
         self.log(
             "end",
             session=w.seq,
             role=u.role,
+            unit_kind=u.kind,
+            number=u.number,
             unit=u.key,
             outcome=outcome,
             seconds=round(time.time() - w.started),
+            **extra,
         )
         self.wake.set()
 
@@ -2010,6 +2059,10 @@ class Pool:
         self.prev = st
         self.deploy_check(st, now)
         self.feed(st, now)
+        if not self.events:
+            self.pending_since = 0.0
+        elif not self.pending_since:
+            self.pending_since = now
         state = {
             "t": now,
             "signature": signature(st),
@@ -2019,7 +2072,22 @@ class Pool:
             "due_not_started": [u.key for u in due if u not in started],
             "stuck": [u.key for u in stuck],
             "paused": self.book.paused,
+            "queue": queue_snapshot(st),
+            "sessions": [
+                {"seq": w.seq, "role": w.unit.role, "kind": w.unit.kind, "number": w.unit.number,
+                 "unit": w.unit.key, "started": w.started, "dir": str(w.dir),
+                 "timeout_s": seconds(self.cfg.timeouts[w.unit.role]) if w.unit.role in self.cfg.timeouts else 0,
+                 "cli": w.cli.name}
+                for w in list(self.sessions.values())
+            ],
+            "feed_pending": len(self.events),
+            "feed_pending_since": self.pending_since,
         }
+        q = state["queue"]
+        brief = {"open": q["open"], **q["stages"], "prs": sum(q["prs"].values())}
+        if brief != self.last_queue:
+            self.last_queue = brief
+            self.log("queue", **brief)
         (self.cfg.logdir / "state.json").write_text(json.dumps(state, indent=1))
         return started
 

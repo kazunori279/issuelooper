@@ -99,7 +99,7 @@ agent session you talk to directly in herdr panes.
 │ from the supervisor arrive here         │ questions, filing issues     │
 ├─────────────────────────────────────────┤                              │
 │ status: `issuelooper watch`             ├──────────────────────────────┤
-│ sessions running, waiting, stuck        │ aide2: `issuelooper aide`    │
+│ the dashboard, in the terminal          │ aide2: `issuelooper aide`    │
 └─────────────────────────────────────────┴──────────────────────────────┘
 ```
 
@@ -160,9 +160,33 @@ To see what waits for you: `gh issue list --label stage:owner`.
 
 ### Check what is going on
 
+`issuelooper start` also serves a dashboard on `http://127.0.0.1:8780/` (the next
+free port if that one is taken; `issuelooper dashboard` prints the URL). It
+refreshes every 15 seconds and shows, from the top:
+
+- **Health**: the supervisor, when it last read GitHub, the monitor's state, any
+  quota pause, `main` and the deployed commit.
+- **Needs you**: decisions waiting at `stage:owner`, stuck work, an issue whose
+  sessions failed twice in a row, a failed deploy, a monitor at a prompt or gone,
+  GitHub read errors, updates piling up for the monitor. Each line says what to do.
+- **Agents**: every running session with its issue or PR, time against its
+  timeout, seconds since its last output, the command it is running, and a link to
+  its log; then the monitor and the aides.
+- **Queue**: open issues per stage, holds, the owner's decisions, open PRs.
+- **Progress** for the last hour and day: merges, hand-backs and why, issue cycle
+  time, how sessions ended, tokens per role, and cost where the agent CLI reports
+  one (Claude Code does; agy reports tokens only).
+- **Over time**: agents at work by role, and open issues against merges per hour.
+- **Recent**: the supervisor's last 30 events in plain words.
+
+The status pane in herdr (`issuelooper watch`) shows the same in the terminal. The
+dashboard reads only `.issuelooper/run/` and never calls GitHub; it listens on
+127.0.0.1 only, so reach it from another machine with `ssh -L 8780:127.0.0.1:8780`.
+Turn it off with `[dashboard] enabled = false`.
+
 | To see | Look at |
 |---|---|
-| Sessions running, waiting, stuck | the status pane, or `issuelooper status` |
+| Sessions running, waiting, stuck | the dashboard, the status pane, or `issuelooper status` |
 | What the supervisor would start next | `issuelooper plan` |
 | The queue | GitHub labels: `gh issue list --label stage:doing` (in progress), `stage:pr` (PR open), `stage:owner` (your decision) |
 | What one session did | `.issuelooper/run/pool/<seq>-<role>-<unit>/`: `prompt.txt`, `session.log` (readable), `session.jsonl` (raw) |
@@ -171,7 +195,7 @@ To see what waits for you: `gh issue list --label stage:owner`.
 ### Stop and restart
 
 `issuelooper stop` stops the supervisor (and the worker, merger and tester
-sessions it runs) and closes the monitor's pane; aides stay open with their
+sessions it runs) and the dashboard, and closes the monitor's pane; aides stay open with their
 conversations. `issuelooper stop --all` closes the aides too. `issuelooper start`
 starts everything again; the backlog lives on GitHub, so nothing is lost.
 
@@ -223,7 +247,7 @@ tester, reviewer) costs a small fraction of running everything on it.
 ```
 install.sh                     install or upgrade into a repository
 template/                      what install.sh copies
-  .claude/hooks/               supervisor, guard, claims, sweep, review gate, herdr link, headless monitor host, launcher (+ tests)
+  .claude/hooks/               supervisor, guard, claims, sweep, review gate, herdr link, headless monitor host, dashboard, launcher (+ tests)
   .claude/skills/issuelooper-* what each role's agent reads
   .agents/                     the same hooks, skills and rules for agy
   .githooks/                   keep sessions out of .claude/ and off main

@@ -37,6 +37,8 @@ KEYS = {
     ("agents", "cli"): "CCROLE_CLI",
     ("agents", "model"): "CCROLE_MODEL",
     ("monitor", "host"): "POOL_MONITOR_HOST",
+    ("dashboard", "enabled"): "ISSUELOOPER_DASHBOARD",
+    ("dashboard", "port"): "ISSUELOOPER_DASHBOARD_PORT",
     ("sweep", "command"): "SWEEP_COMMAND",
     ("sweep", "slots"): "SWEEP_SLOTS",
     ("sweep", "record_dir"): "SWEEP_RECORD_DIR",
