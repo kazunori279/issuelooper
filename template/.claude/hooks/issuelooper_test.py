@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The `issuelooper` launcher, end to end in a scratch repository with a fake gh and a
-fake agy on PATH: prerequisites, start, status, say, stop. Run: `python3 issuelooper_test.py`.
+fake agy on PATH: prerequisites, start, status, say, stop, for the headless broker host and
+for the herdr host (with a fake herdr). Run: `python3 issuelooper_test.py`.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ def setup():
     )
     (repo / ".issuelooper").mkdir()
     (repo / ".issuelooper" / "config.toml").write_text(
-        '[agents]\ncli = "agy"\n\n[env]\nPOOL_POLL_S = "1"\n'
+        '[agents]\ncli = "agy"\n\n[monitor]\nhost = "broker"\n\n[env]\nPOOL_POLL_S = "1"\n'
     )
     (repo / ".issuelooper" / "project.md").write_text("# Project\n")
     (repo / ".gitignore").write_text(".issuelooper/run/\n")
@@ -92,7 +93,7 @@ def setup():
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("CCROLE", "POOL_", "ISSUELOOPER", "SHARED_REPO"))
+        if not k.startswith(("CCROLE", "POOL_", "ISSUELOOPER", "SHARED_REPO", "HERDR_"))
         and k != "CC_ROLE"
     }
     env.update(
@@ -115,7 +116,7 @@ def run(repo, env, *args, timeout=120):
     )
 
 
-def test_launcher() -> None:
+def test_broker_host() -> None:
     d, repo, env = setup()
     (repo / "dirty.txt").write_text("x")
     r = run(repo, env, "start")
@@ -216,6 +217,111 @@ def test_launcher() -> None:
         ("supervisor: not running" in r.stdout, "monitor: not running" in r.stdout),
         (True, True),
     )
+
+
+# herdr, faked: a session with panes; `pane run` of ccrole.sh puts an idle agent in the
+# pane; every prompt is recorded. State lives in $FAKE_HERDR_STATE.
+FAKE_HERDR = r"""#!/usr/bin/env python3
+import json, os, sys
+path = os.environ["FAKE_HERDR_STATE"]
+try:
+    st = json.load(open(path))
+except (OSError, ValueError):
+    st = {"n": 0, "panes": {}, "prompts": [], "runs": [], "closed": []}
+args = sys.argv[1:]
+out = {}
+def new_pane():
+    st["n"] += 1
+    p = f"w1:p{st['n']}"
+    st["panes"][p] = {"agent": None}
+    return p
+if args[:2] == ["tab", "create"]:
+    out = {"tab": {"tab_id": "w1:t9"}, "root_pane": {"pane_id": new_pane()}}
+elif args[:2] == ["pane", "split"]:
+    out = {"pane": {"pane_id": new_pane()}}
+elif args[:2] == ["pane", "run"]:
+    st["runs"].append([args[2], args[3]])
+    if "ccrole.sh" in args[3]:
+        st["panes"][args[2]]["agent"] = {"agent_status": "idle", "role": args[3].split()[-1]}
+elif args[:2] == ["pane", "close"]:
+    st["closed"].append(args[2])
+    st["panes"].pop(args[2], None)
+elif args[:2] == ["agent", "get"]:
+    t = args[2]
+    pane = st["panes"].get(t) or next((v for v in st["panes"].values() if (v.get("agent") or {}).get("name") == t), None)
+    if not pane or not pane.get("agent"):
+        sys.stderr.write(json.dumps({"error": {"message": "no agent"}}))
+        sys.exit(1)
+    out = {"agent": pane["agent"]}
+elif args[:2] == ["agent", "rename"]:
+    st["panes"][args[2]]["agent"]["name"] = args[3]
+    out = {"agent": st["panes"][args[2]]["agent"]}
+elif args[:2] == ["agent", "prompt"]:
+    st["prompts"].append([args[2], args[3]])
+elif args[:2] == ["agent", "read"]:
+    json.dump(st, open(path, "w"))
+    print("> ")
+    sys.exit(0)
+json.dump(st, open(path, "w"))
+print(json.dumps({"result": out}))
+"""
+
+
+def test_herdr_host() -> None:
+    d, repo, env = setup()
+    cfg = repo / ".issuelooper" / "config.toml"
+    cfg.write_text(cfg.read_text().replace('host = "broker"', 'host = "herdr"'))
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "herdr", cwd=repo)
+    (d / "bin" / "herdr").write_text(FAKE_HERDR)
+    (d / "bin" / "herdr").chmod(0o755)
+    statefile = d / "herdr.json"
+    env.update(FAKE_HERDR_STATE=str(statefile), POOL_HERDR_QUIET_S="0.1", POOL_MONITOR_MIN_GAP_S="0")
+
+    r = run(repo, env, "start")
+    check("outside herdr, start says how to open it",
+          (r.returncode, "run `issuelooper start` from a herdr pane" in r.stderr), (1, True))
+
+    henv = dict(env, HERDR_ENV="1", HERDR_SOCKET_PATH=str(d / "herdr.sock"), HERDR_SESSION="t",
+                HERDR_WORKSPACE_ID="w1")
+    r = run(repo, henv, "start")
+    try:
+        check("start succeeds inside herdr", (r.returncode, r.stderr), (0, ""))
+        st = json.loads(statefile.read_text())
+        rec = json.loads((repo / ".issuelooper" / "run" / "herdr.json").read_text())
+        check("the run dir records the session and panes",
+              (rec["socket"], rec["monitor_name"], rec["aides"]),
+              (str(d / "herdr.sock"), "repo-monitor", ["w1:p2"]))
+        roles = {p: (v.get("agent") or {}).get("role") for p, v in st["panes"].items()}
+        check("monitor and aide started through ccrole.sh in their panes",
+              (roles.get("w1:p1"), roles.get("w1:p2")), ("monitor", "aide"))
+        check("the status pane runs watch", any(c.endswith(" watch") for _, c in st["runs"]), True)
+        check("the monitor got the kickoff first",
+              st["prompts"][0], ["repo-monitor", "Use the issuelooper-shared skill, then work as the monitor "
+                                 "per the issuelooper-monitor skill. Run its pass over the open queue now."])
+        for _ in range(100):
+            st = json.loads(statefile.read_text())
+            if any("Pool update" in t for _, t in st["prompts"]):
+                break
+            time.sleep(0.2)
+        check("the supervisor's feed reaches the monitor's pane",
+              [p for p, t in st["prompts"] if "Pool update" in t][:1], ["w1:p1"])
+        r = run(repo, henv, "say", "hello there")
+        st = json.loads(statefile.read_text())
+        check("say prompts the monitor", (r.returncode, st["prompts"][-1]), (0, ["w1:p1", "hello there"]))
+        r = run(repo, dict(env, HERDR_ENV=""), "status")
+        check("status works from a plain terminal, through the recorded socket",
+              ("supervisor: running" in r.stdout, "monitor: idle (repo-monitor" in r.stdout), (True, True))
+        r = run(repo, henv, "aide")
+        rec = json.loads((repo / ".issuelooper" / "run" / "herdr.json").read_text())
+        check("aide opens a second aide", (r.returncode, "repo-aide2" in r.stdout, len(rec["aides"])), (0, True, 2))
+        check("the checkout stays clean",
+              subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout, "")
+    finally:
+        r = run(repo, henv, "stop", "--all")
+    st = json.loads(statefile.read_text())
+    check("stop --all stops the supervisor and closes every pane it opened",
+          ("supervisor stopped" in r.stdout, sorted(st["closed"])),
+          (True, ["w1:p1", "w1:p2", "w1:p3", "w1:p4"]))
 
 
 def main() -> int:

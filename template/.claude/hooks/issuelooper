@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # issuelooper: run this repository's issue loop.
 #
-#   issuelooper start        check the prerequisites, start the monitor, send it its
-#                            kickoff, then start the supervisor (ccpool.py) in the background
-#   issuelooper stop         stop the supervisor (and its sessions) and the monitor
-#   issuelooper status       what is running, the monitor's state, the supervisor's view
-#   issuelooper say "TEXT"   send the monitor a message and wait for its answer
-#   issuelooper plan         print the units the supervisor would start now
+#   issuelooper start          check the prerequisites, open the monitor and an aide, send
+#                              the monitor its kickoff, start the supervisor (ccpool.py)
+#   issuelooper aide [N]       open another aide (an ad-hoc session: research, filing, comments)
+#   issuelooper say "TEXT"     send the monitor a message (--wait: wait and print its answer)
+#   issuelooper status         what is running, the monitor's and aides' state, the supervisor's view
+#   issuelooper watch [SECS]   status, refreshed every SECS seconds (default 10)
+#   issuelooper attach         open the herdr session the loop runs in (from a plain terminal)
+#   issuelooper plan           print the units the supervisor would start now
+#   issuelooper stop [--all]   stop the supervisor and the monitor (--all: the aides too)
+#
+# With `[monitor] host = "herdr"` (the default) the monitor and the aides are interactive
+# agent sessions in panes of a herdr tab named "issuelooper": you talk to each one in its
+# pane, and the supervisor sends the monitor its queue updates there. Run `start` from a
+# herdr pane. With host = "broker" the monitor is a headless session and `say` is the
+# only way to reach it (for servers and CI).
 #
 # Settings come from .issuelooper/config.toml (an exported variable wins). What the
 # agents need to know about the project is in .issuelooper/project.md. The monitor's
@@ -34,11 +43,41 @@ eval "$(python3 "$HERE/config.py" env)"
 RUN="${ISSUELOOPER_RUN:-$ROOT/.issuelooper/run}"
 export ISSUELOOPER_RUN="$RUN"
 export POOL_LOGDIR="${POOL_LOGDIR:-$RUN/pool}"
-export POOL_BROKER_SOCK="${POOL_BROKER_SOCK:-$RUN/broker.sock}"
+HOST="${POOL_MONITOR_HOST:-herdr}"
+case "$HOST" in herdr|broker) ;; *) die "[monitor] host is '$HOST': use herdr or broker" ;; esac
+HERDR_REC="$RUN/herdr.json"
+LINK="$HERE/herdr_link.py"
 
 DEFAULT_KICKOFF="Use the issuelooper-shared skill, then work as the monitor per the issuelooper-monitor skill. Run its pass over the open queue now."
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# One field of herdr.json ('' when absent).
+rec() { python3 -c 'import json,sys
+try: v = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+except (OSError, ValueError): v = ""
+print(" ".join(v) if isinstance(v, list) else v)' "$HERDR_REC" "$1"; }
+
+# Set fields of herdr.json: rec_set key=value ... (aides=a,b for a list).
+rec_set() { python3 - "$HERDR_REC" "$@" <<'PY'
+import json, sys
+path, pairs = sys.argv[1], sys.argv[2:]
+try:
+    rec = json.load(open(path))
+except (OSError, ValueError):
+    rec = {}
+for kv in pairs:
+    k, v = kv.split("=", 1)
+    rec[k] = [x for x in v.split(",") if x] if k == "aides" else v
+json.dump(rec, open(path, "w"), indent=2)
+PY
+}
+
+# Outside herdr, commands reach the loop's session through the socket start recorded.
+if [ "$HOST" = herdr ] && [ -z "${HERDR_SOCKET_PATH:-}" ] && [ -f "$HERDR_REC" ]; then
+  sock="$(rec socket)"
+  [ -n "$sock" ] && export HERDR_SOCKET_PATH="$sock"
+fi
 
 prerequisites() {
   local bad=0 cli role
@@ -48,20 +87,29 @@ prerequisites() {
   elif ! gh auth status >/dev/null 2>&1; then
     warn "gh is not signed in: run \`gh auth login\`"; bad=1
   fi
-  for cli in $(python3 "$HERE/agent_cli.py" clis worker merger tester monitor); do
+  for cli in $(python3 "$HERE/agent_cli.py" clis worker merger tester monitor aide); do
     case "$cli" in
       agy|claude) ;;
       *) warn "unknown agent CLI '$cli' in CCROLE_CLI or CCROLE_<ROLE>_CLI: use agy or claude"; bad=1; continue ;;
     esac
     if ! command -v "$cli" >/dev/null 2>&1; then
       roles=""
-      for role in worker merger tester monitor; do
+      for role in worker merger tester monitor aide; do
         [ "$(python3 "$HERE/agent_cli.py" cli "$role")" = "$cli" ] && roles="$roles $role"
       done
       warn "'$cli' is not on PATH (used by:$roles); install it or set [agents] cli in .issuelooper/config.toml"
       bad=1
     fi
   done
+  if [ "$HOST" = herdr ]; then
+    command -v herdr >/dev/null 2>&1 || { warn "herdr is not on PATH (or set [monitor] host = \"broker\")"; bad=1; }
+    [ "${HERDR_ENV:-}" = 1 ] || {
+      warn "run \`issuelooper start\` from a herdr pane: \`herdr --session $(basename "$ROOT")\`, then"
+      warn "  .claude/hooks/issuelooper start"
+      warn "(or set [monitor] host = \"broker\" in .issuelooper/config.toml for a headless monitor)"
+      bad=1
+    }
+  fi
   case "$RUN/" in
     "$ROOT"/*)
       git -C "$ROOT" check-ignore -q "$RUN/x" ||
@@ -77,23 +125,94 @@ prerequisites() {
   [ "$bad" = 0 ] || die "fix the above, then run \`issuelooper start\` again"
 }
 
+# The environment of every pane the loop opens: the roles' sessions read these.
+pane_env() {
+  printf '%s\n' "SHARED_REPO_PATH=$ROOT" "ISSUELOOPER_RUN=$RUN" "POOL_LOGDIR=$POOL_LOGDIR" \
+    "PYTHONDONTWRITEBYTECODE=1"
+}
+
+start_supervisor() {
+  local launch=()
+  command -v setsid >/dev/null 2>&1 && launch=(setsid)
+  ( cd "$ROOT" && exec ${launch[@]+"${launch[@]}"} env "$@" python3 "$HERE/ccpool.py" run >>"$RUN/pool.out" 2>&1 </dev/null ) &
+  echo $! > "$RUN/pool.pid"
+  sleep 1
+  alive "$RUN/pool.pid" || die "the supervisor exited at once; see $RUN/pool.out"
+}
+
+kickoff_text() {
+  if [ -f "$ROOT/.issuelooper/monitor_kickoff.md" ]; then cat "$ROOT/.issuelooper/monitor_kickoff.md"
+  else printf '%s' "$DEFAULT_KICKOFF"; fi
+}
+
+start_herdr() {
+  local envs=() e tab mon aide status_pane mname aname
+  while IFS= read -r e; do envs+=("$e"); done < <(pane_env)
+  # One tab for the loop: the monitor (left), an aide (right), status (bottom left).
+  read -r tab mon < <(python3 "$LINK" tab "${HERDR_WORKSPACE_ID:-}" "$ROOT" issuelooper "${envs[@]}") ||
+    die "could not open a herdr tab"
+  aide="$(python3 "$LINK" split "$mon" right "$ROOT" - "${envs[@]}")" || die "could not split the tab"
+  status_pane="$(python3 "$LINK" split "$mon" down "$ROOT" - "${envs[@]}")" || die "could not split the tab"
+  mname="$(python3 "$LINK" name "$ROOT" monitor)"
+  aname="$(python3 "$LINK" name "$ROOT" aide 1)"
+  rec_set "session=${HERDR_SESSION:-}" "socket=${HERDR_SOCKET_PATH:-}" "tab=$tab" \
+    "monitor=$mon" "monitor_name=$mname" "status_pane=$status_pane" "aides=$aide"
+  echo "starting the monitor in pane $mon ($mname) ..."
+  python3 "$LINK" start-role monitor "$mname" "$mon" >/dev/null || die "the monitor did not start; see pane $mon"
+  python3 "$LINK" prompt "$mname" "$(kickoff_text)" || die "could not send the monitor its kickoff"
+  echo "starting an aide in pane $aide ($aname) ..."
+  python3 "$LINK" start-role aide "$aname" "$aide" >/dev/null || warn "the aide did not start; see pane $aide"
+  start_supervisor POOL_HERDR_MONITOR="$mon" HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-}"
+  python3 "$LINK" run "$status_pane" "$(printf '%q' "$HERE/issuelooper") watch" || true
+  echo "issuelooper is running for $ROOT in the herdr tab \"issuelooper\""
+  echo "  monitor ($mname): talk to it in its pane; queue updates from the supervisor arrive there too"
+  echo "  aide ($aname): research, questions, filing issues; \`issuelooper aide\` opens another"
+  echo "  supervisor: $RUN/pool.out, sessions under $POOL_LOGDIR/"
+}
+
+start_broker() {
+  export POOL_BROKER_SOCK="${POOL_BROKER_SOCK:-$RUN/broker.sock}"
+  python3 "$HERE/monitorctl.py" start --run "$RUN" >/dev/null
+  python3 "$HERE/monitorctl.py" say --run "$RUN" --tag kickoff --no-wait "$(kickoff_text)" >/dev/null
+  start_supervisor POOL_BROKER_SOCK="$POOL_BROKER_SOCK"
+  echo "issuelooper is running for $ROOT (headless monitor)"
+  echo "  monitor:    \`issuelooper say \"...\"\`, log $RUN/logs/"
+  echo "  supervisor: $RUN/pool.out, sessions under $POOL_LOGDIR/"
+}
+
 cmd_start() {
   alive "$RUN/pool.pid" && die "already running (supervisor pid $(cat "$RUN/pool.pid")); \`issuelooper stop\` first"
   prerequisites
   mkdir -p "$RUN/logs" "$POOL_LOGDIR"
-  python3 "$HERE/monitorctl.py" start --run "$RUN" >/dev/null
-  local kickoff="$DEFAULT_KICKOFF"
-  [ -f "$ROOT/.issuelooper/monitor_kickoff.md" ] && kickoff="$(cat "$ROOT/.issuelooper/monitor_kickoff.md")"
-  python3 "$HERE/monitorctl.py" say --run "$RUN" --tag kickoff --no-wait "$kickoff" >/dev/null
-  local launch=()
-  command -v setsid >/dev/null 2>&1 && launch=(setsid)
-  ( cd "$ROOT" && exec ${launch[@]+"${launch[@]}"} python3 "$HERE/ccpool.py" run >>"$RUN/pool.out" 2>&1 </dev/null ) &
-  echo $! > "$RUN/pool.pid"
-  sleep 1
-  alive "$RUN/pool.pid" || die "the supervisor exited at once; see $RUN/pool.out"
-  echo "issuelooper is running for $ROOT"
-  echo "  monitor:    \`issuelooper say \"...\"\`, log $RUN/logs/"
-  echo "  supervisor: $RUN/pool.out, sessions under $POOL_LOGDIR/"
+  rm -f "$HERDR_REC"
+  if [ "$HOST" = herdr ]; then start_herdr; else start_broker; fi
+}
+
+cmd_aide() {
+  [ "$HOST" = herdr ] || die "aides need herdr; with host = \"broker\" run \`.claude/hooks/ccrole.sh aide\` in a terminal"
+  [ -f "$HERDR_REC" ] || die "the loop is not running in herdr; \`issuelooper start\` first"
+  local aides n last pane name e envs=()
+  aides="$(rec aides)"
+  n="${1:-$(( $(wc -w <<<"$aides") + 1 ))}"
+  last="${aides##* }"; [ -n "$last" ] || last="$(rec monitor)"
+  while IFS= read -r e; do envs+=("$e"); done < <(pane_env)
+  pane="$(python3 "$LINK" split "$last" down "$ROOT" - "${envs[@]}")" || die "could not open a pane"
+  name="$(python3 "$LINK" name "$ROOT" aide "$n")"
+  python3 "$LINK" start-role aide "$name" "$pane" >/dev/null || die "the aide did not start; see pane $pane"
+  rec_set "aides=$(tr ' ' ',' <<<"$aides"),$pane"
+  echo "aide $name is ready in pane $pane"
+}
+
+cmd_say() {
+  local wait=0
+  [ "${1:-}" = "--wait" ] && { wait=1; shift; }
+  [ $# -gt 0 ] || die 'usage: issuelooper say [--wait] "TEXT"'
+  if [ "$HOST" = broker ]; then
+    exec python3 "$HERE/monitorctl.py" say --run "$RUN" "$*"
+  fi
+  [ -f "$HERDR_REC" ] || die "the loop is not running; \`issuelooper start\` first"
+  if [ "$wait" = 1 ]; then exec python3 "$LINK" prompt "$(rec monitor)" "$*" --wait; fi
+  python3 "$LINK" prompt "$(rec monitor)" "$*" && echo "sent to $(rec monitor_name); its answer is in its pane"
 }
 
 cmd_stop() {
@@ -106,6 +225,14 @@ cmd_stop() {
     echo "supervisor stopped"
   fi
   rm -f "$RUN/pool.pid"
+  if [ -f "$HERDR_REC" ]; then
+    local p panes
+    panes="$(rec monitor) $(rec status_pane)"
+    [ "${1:-}" = "--all" ] && panes="$panes $(rec aides)"
+    for p in $panes; do python3 "$LINK" close "$p"; done
+    echo "monitor closed$([ "${1:-}" = "--all" ] && echo ", aides closed" || echo "; aides left open (stop --all closes them)")"
+    [ "${1:-}" = "--all" ] && rm -f "$HERDR_REC"
+  fi
   if [ -S "$RUN/broker.sock" ] && python3 "$HERE/monitorctl.py" stop --run "$RUN" >/dev/null 2>&1; then
     echo "monitor stopped"
   elif alive "$RUN/broker.pid"; then
@@ -117,17 +244,27 @@ cmd_stop() {
 cmd_status() {
   if alive "$RUN/pool.pid"; then echo "supervisor: running (pid $(cat "$RUN/pool.pid"))"
   else echo "supervisor: not running"; fi
-  local st=""
-  [ -S "$RUN/broker.sock" ] && st="$(python3 "$HERE/monitorctl.py" status --run "$RUN" 2>/dev/null || true)"
-  if [ -n "$st" ]; then
-    python3 - "$st" <<'PY'
+  if [ "$HOST" = herdr ]; then
+    if [ -f "$HERDR_REC" ]; then
+      echo "monitor: $(python3 "$LINK" status "$(rec monitor)") ($(rec monitor_name), pane $(rec monitor), herdr session ${HERDR_SESSION:-$(rec session)})"
+      local p
+      for p in $(rec aides); do echo "aide: $(python3 "$LINK" status "$p") (pane $p)"; done
+    else
+      echo "monitor: not running"
+    fi
+  else
+    local st=""
+    [ -S "$RUN/broker.sock" ] && st="$(python3 "$HERE/monitorctl.py" status --run "$RUN" 2>/dev/null || true)"
+    if [ -n "$st" ]; then
+      python3 - "$st" <<'PY'
 import json, sys
 s = json.loads(sys.argv[1])
 state = "busy" if s["busy"] else "idle"
 print(f"monitor: running on {s['cli']}, turn {s['done']} of {s['sent']}, {state}, restarts {s['restarts']}")
 PY
-  else
-    echo "monitor: not running"
+    else
+      echo "monitor: not running"
+    fi
   fi
   if [ -f "$POOL_LOGDIR/state.json" ]; then
     python3 - "$POOL_LOGDIR/state.json" <<'PY'
@@ -145,15 +282,41 @@ PY
   fi
 }
 
+cmd_watch() {
+  local secs="${1:-10}"
+  while true; do
+    printf '\033[H\033[2J'
+    date '+%H:%M:%S'
+    cmd_status 2>&1 || true
+    if [ -f "$POOL_LOGDIR/pool.jsonl" ]; then
+      echo; echo "recent:"
+      tail -n 8 "$POOL_LOGDIR/pool.jsonl" | python3 -c 'import json, sys, time
+for line in sys.stdin:
+    try: r = json.loads(line)
+    except ValueError: continue
+    rest = " ".join(f"{k}={v}" for k, v in r.items() if k not in ("t", "kind"))
+    print(time.strftime("%H:%M", time.localtime(r.get("t", 0))), r.get("kind", ""), rest[:110])'
+    fi
+    sleep "$secs"
+  done
+}
+
+cmd_attach() {
+  [ "$HOST" = herdr ] || die "attach is for the herdr host"
+  [ "${HERDR_ENV:-}" = 1 ] && die "you are already inside herdr; open the \"issuelooper\" tab"
+  local s; s="$(rec session)"
+  [ -n "$s" ] || die "no herdr session recorded; \`issuelooper start\` from a herdr pane first"
+  exec herdr session attach "$s"
+}
+
 case "${1:-}" in
   start) cmd_start ;;
-  stop) cmd_stop ;;
+  stop) shift; cmd_stop "$@" ;;
   status) cmd_status ;;
-  say)
-    shift
-    [ $# -gt 0 ] || die 'usage: issuelooper say "TEXT"'
-    exec python3 "$HERE/monitorctl.py" say --run "$RUN" "$*"
-    ;;
+  watch) shift; cmd_watch "$@" ;;
+  aide) shift; cmd_aide "$@" ;;
+  say) shift; cmd_say "$@" ;;
+  attach) cmd_attach ;;
   plan)
     shift
     cd "$ROOT"
@@ -162,5 +325,5 @@ case "${1:-}" in
   ""|-h|--help|help)
     awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
     ;;
-  *) die "unknown command '$1' (start, stop, status, say, plan)" ;;
+  *) die "unknown command '$1' (start, aide, say, status, watch, attach, plan, stop)" ;;
 esac

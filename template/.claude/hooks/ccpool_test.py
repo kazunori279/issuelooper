@@ -598,6 +598,84 @@ def test_monitor_feed_only_when_idle() -> None:
     srv.server_close()
 
 
+FAKE_HERDR = r"""#!/usr/bin/env python3
+import json, os, sys
+path = os.environ["FAKE_HERDR_STATE"]
+st = json.load(open(path))
+args = sys.argv[1:]
+if args[:2] == ["agent", "get"]:
+    if st["status"] == "gone":
+        sys.stderr.write(json.dumps({"error": {"message": "no agent in pane"}}))
+        sys.exit(1)
+    print(json.dumps({"result": {"agent": {"agent_status": st["status"], "pane_id": args[2]}}}))
+elif args[:2] == ["agent", "read"]:
+    snaps = st.get("snaps") or ["> "]
+    print(snaps.pop(0) if len(snaps) > 1 else snaps[0])
+    st["snaps"] = snaps
+elif args[:2] == ["agent", "prompt"]:
+    st["prompts"].append({"target": args[2], "text": args[3]})
+    print(json.dumps({"result": {}}))
+json.dump(st, open(path, "w"))
+"""
+
+
+def kinds(h) -> list[str]:
+    path = h.pool.cfg.logdir / "pool.jsonl"
+    return [json.loads(x)["kind"] for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_monitor_feed_through_herdr() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-herdr-"))
+    fake = d / "herdr"
+    fake.write_text(FAKE_HERDR)
+    fake.chmod(0o755)
+    statefile = d / "state.json"
+
+    def set_state(**kw):
+        cur = json.loads(statefile.read_text()) if statefile.exists() else {"prompts": []}
+        cur.update(kw)
+        statefile.write_text(json.dumps(cur))
+
+    def prompts():
+        return json.loads(statefile.read_text())["prompts"]
+
+    old = {k: os.environ.get(k) for k in ("HERDR_BIN", "FAKE_HERDR_STATE")}
+    os.environ.update(HERDR_BIN=str(fake), FAKE_HERDR_STATE=str(statefile))
+    try:
+        set_state(status="working")
+        h = Rig(state([iss(1, ["stage:triage"])]), herdr_monitor="w1:p1", herdr_quiet_s=0.01,
+                broker_sock="/nonexistent.sock")
+        h.step()
+        h.st = state([iss(1, ["stage:triage"]), iss(2, [], title="new bug")])
+        h.step()
+        check("herdr wins over the broker socket; a working monitor gets nothing", prompts(), [])
+        set_state(status="idle", snaps=["> half-typed", "> half-typed more"])
+        h.step()
+        check("idle, but the owner is typing in the pane: nothing yet", prompts(), [])
+        set_state(snaps=["> "])
+        h.step()
+        sent = prompts()
+        check("idle and quiet: one prompt to the monitor's pane",
+              [(m["target"], "new issue #2: new bug" in m["text"]) for m in sent], [("w1:p1", True)])
+        set_state(status="blocked")
+        h.st = state([iss(2, [], title="new bug")], [closed(1)])
+        h.step()
+        check("a monitor at a question dialog gets nothing", len(prompts()), 1)
+        check("and the pool log says so", "monitor_blocked" in kinds(h), True)
+        set_state(status="gone")
+        h.step()
+        check("an exited monitor is logged too", "monitor_gone" in kinds(h), True)
+        set_state(status="done")
+        h.step()
+        check("back to idle (done): the queued events go out", len(prompts()), 2)
+        check("nothing was lost", "#1 closed" in prompts()[-1]["text"], True)
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
 def test_deploy_safety_net() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-netdeploy-"))
     st = state([iss(1, ["stage:pr"])], prs=[pr(5, 1, mergeable="CONFLICTING")], main="f" * 40)

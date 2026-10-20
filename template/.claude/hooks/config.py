@@ -36,6 +36,7 @@ ROLES = ("worker", "merger", "tester", "monitor", "reviewer", "aide")
 KEYS = {
     ("agents", "cli"): "CCROLE_CLI",
     ("agents", "model"): "CCROLE_MODEL",
+    ("monitor", "host"): "POOL_MONITOR_HOST",
     ("sweep", "command"): "SWEEP_COMMAND",
     ("sweep", "slots"): "SWEEP_SLOTS",
     ("sweep", "record_dir"): "SWEEP_RECORD_DIR",

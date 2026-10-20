@@ -125,6 +125,7 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import agent_cli  # noqa: E402
+import herdr_link  # noqa: E402
 import claim as claimlib  # noqa: E402
 import config  # noqa: E402
 
@@ -210,6 +211,8 @@ class Config:
     live: bool = False
     ux: bool = False
     broker_sock: str = ""
+    herdr_monitor: str = ""
+    herdr_quiet_s: float = 3
     feed_file: str = ""
     monitor_min_gap_s: float = 60
     deploy_grace_s: float = 300
@@ -268,6 +271,8 @@ class Config:
             ux=env_flag("POOL_UX"),
             spec=env_flag("POOL_SPEC"),
             broker_sock=e("POOL_BROKER_SOCK", ""),
+            herdr_monitor=e("POOL_HERDR_MONITOR", "").strip(),
+            herdr_quiet_s=float(e("POOL_HERDR_QUIET_S", "") or 3),
             feed_file=e("POOL_MONITOR_FEED", ""),
             monitor_min_gap_s=float(e("POOL_MONITOR_MIN_GAP_S", "60")),
             deploy_grace_s=float(e("POOL_DEPLOY_GRACE_S", "300")),
@@ -816,6 +821,19 @@ def tester_prompt(u: Unit, port: int, timeout: str) -> str:
 
 
 # --- the supervisor -------------------------------------------------------------
+
+
+class BrokerLink:
+    """The supervisor's link to a monitor hosted by broker.py (the headless launch)."""
+
+    def __init__(self, sock: str):
+        self.sock = sock
+
+    def status(self) -> dict:
+        return broker_call(self.sock, cmd="status")
+
+    def say(self, text: str) -> dict:
+        return broker_call(self.sock, cmd="say", text=text, tag="pool_feed")
 
 
 def broker_call(sock: str, **req) -> dict:
@@ -1544,6 +1562,8 @@ class Pool:
         self.idle_flagged = False
         self.last_fetch = 0.0
         self.last_sent = 0.0
+        self._herdr = None  # herdr_link.Monitor, made on first use
+        self.monitor_state = ""  # the monitor's last state seen by feed()
         self.crashes: collections.Counter = collections.Counter()
         self.deploying = False
         self.merge_lock = threading.Lock()
@@ -1908,18 +1928,33 @@ class Pool:
             f"Pool log: {self.cfg.logdir}/pool.jsonl, state: {self.cfg.logdir}/state.json."
         )
 
+    def monitor_link(self):
+        """How queue updates reach the monitor: a herdr pane (POOL_HERDR_MONITOR, the
+        default launch) or the broker's socket (POOL_BROKER_SOCK); None when neither."""
+        if self.cfg.herdr_monitor:
+            if self._herdr is None:
+                self._herdr = herdr_link.Monitor(self.cfg.herdr_monitor, self.cfg.herdr_quiet_s)
+            return self._herdr
+        if self.cfg.broker_sock:
+            return BrokerLink(self.cfg.broker_sock)
+        return None
+
     def feed(self, st: dict, now: float):
-        if (
-            not self.cfg.broker_sock
-            or not self.events
-            or now - self.last_sent < self.cfg.monitor_min_gap_s
-        ):
+        link = self.monitor_link()
+        if link is None or not self.events or now - self.last_sent < self.cfg.monitor_min_gap_s:
             return
         try:
-            status = broker_call(self.cfg.broker_sock, cmd="status")
-        except (OSError, ValueError) as exc:
+            status = link.status()
+        except (OSError, ValueError, herdr_link.HerdrError) as exc:
             self.log("feed_error", error=str(exc))
             return
+        state = status.get("state", "")
+        if state != self.monitor_state:
+            self.monitor_state = state
+            if state in ("blocked", "gone"):
+                # A question dialog or an exited agent: the owner has to look, and until
+                # then the updates pile up here.
+                self.log("monitor_" + state, target=self.cfg.herdr_monitor)
         if status.get("busy") or int(status.get("done") or 0) < 1:
             return
         header = ""
@@ -1934,10 +1969,10 @@ class Pool:
         text = header + "\n\nSince the last message:\n" + "\n".join(f"- {e}" for e in lines)
         text += "\n\n" + self.summary(st)
         try:
-            r = broker_call(self.cfg.broker_sock, cmd="say", text=text, tag="pool_feed")
+            r = link.say(text)
             self.last_sent = now
             self.log("feed", turn=r.get("turn"), events=len(lines))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, herdr_link.HerdrError) as exc:
             with self.lock:
                 self.events = lines + self.events
             self.log("feed_error", error=str(exc))
