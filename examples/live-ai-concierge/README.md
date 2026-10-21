@@ -10,7 +10,7 @@ the page.
 You start from a working first slice (the layout, scripted mode, the weather card)
 and 54 seed issues. The loop builds the rest: live mode on the real model, the other
 cards, settings, history, profiles and memory. Its testers check live issues against
-the real model, walk the app as users would every 25 minutes, and check it against
+the real model, walk the app as users would, one run after another, and check it against
 the spec when the workers run out of issues, and what they file becomes the next
 work.
 
@@ -60,6 +60,9 @@ as `UX: ...` issues; no one has to accept them first.
 - Cost: in the benchmark, every role on Gemini 4 Argon cost about $570 of model
   usage at Vertex list prices over 12 hours with 16 sessions, so plan on roughly
   half that for six hours.
+- Model quota: 16 sessions on one model reach its tokens-per-minute quota now and
+  then (52 times in our six-hour run); the supervisor waits each one out, but a
+  higher quota makes the run faster.
 
 ## 1. Create the repository (10 minutes)
 
@@ -91,21 +94,26 @@ issues at once.
 
 ## 3. What happens
 
-- **The first hour:** 16 workers take the issues by priority. In our test run of
-  this sample, 30 of the 54 seed issues closed in the first hour: most of the cards,
-  the bugs, settings and docs, all in scripted mode. Live mode is built in stages
-  (typed text through ADK in #1, then the model's voice, the microphone, voice input,
-  and the live tools for the cards). #1 is the largest single step: in our run its
-  first worker timed out at 45 minutes, and the next one carried on from the saved
-  work. The other live issues wait for it. Each `needs:live` issue merges with
-  `Refs #N` and closes after a tester's live check against the real model.
-- **UX runs from the start:** the first one walked the starting app 10 minutes in,
-  scored it 28 of 100 and filed five `UX: ...` issues (starter chips missing on a
-  phone, raw JSON in a card, a message lost while disconnected); three were fixed
-  within the hour. Every 25 minutes another run files what it finds, and these
-  become a growing share of the work.
+In our six-hour test run of this sample (every role on `gemini-4-argon-high`, an
+owner who only answered questions):
+
+- **The first hour:** 16 workers take the issues by priority; 27 of the 54 seed
+  issues closed in the first hour, most of them in scripted mode. Live mode is built
+  in stages (typed text through ADK in #1, then the model's voice, the microphone,
+  voice input, and the live tools for the cards); #1 merged after about half an
+  hour, and the other live issues wait for it. Each `needs:live` issue merges with
+  `Refs #N` and closes after a tester's live check against the real model (15 of
+  15 passed on the first try).
+- **UX runs from the start:** the first one walked the starting app 7 minutes in and
+  filed five issues. Each run takes 20 minutes to an hour, so one is almost always
+  going; nine runs filed 32 issues, which became a growing share of the work.
+- **By the end:** all 54 seed issues closed in 5 hours 10 minutes (P0 in 4 hours 35
+  minutes), with 81 merges and 39 deploys. The tester scored the final app 68 of 100:
+  every journey worked, including barge-in, reconnects, Japanese and profiles; the
+  maps in the places and route cards were still drawn without the Google map.
 - **When the workers run out of issues:** extra UX runs and spec checks, one
-  requirement at a time, make the next work.
+  requirement at a time, make the next work. With 16 sessions that did not happen
+  within six hours.
 
 Every merge is deployed: <http://localhost:8000/> runs `main` in scripted mode (try
 the starter chips), and <http://localhost:8001/> in live mode when `.env` is set.
