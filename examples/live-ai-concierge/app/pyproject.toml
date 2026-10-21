@@ -1,0 +1,36 @@
+[project]
+name = "concierge"
+version = "0.1.0"
+description = "Live AI Concierge"
+requires-python = ">=3.13"
+dependencies = [
+  "google-adk==2.8.0",
+  "fastapi>=0.141",
+  "uvicorn[standard]>=0.52",
+  "python-dotenv>=1.1",
+]
+
+[project.scripts]
+concierge = "concierge.main:run"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-playwright>=0.7",
+  "playwright==1.62.0",
+  "httpx>=0.28",
+  "ruff>=0.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/concierge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

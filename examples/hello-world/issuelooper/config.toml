@@ -1,0 +1,63 @@
+# issuelooper settings for the hello-world sample (textstats, a small Python CLI).
+#
+# Each key sets the environment variable named beside it, unless that variable is
+# already exported (the environment wins). `python3 .claude/hooks/config.py check`
+# lists what this file sets and any key it does not recognize.
+
+[agents]
+cli = "agy"                  # CCROLE_CLI: the agent CLI for every role, "agy" or "claude"
+model = "gemini-4-argon-high"   # CCROLE_MODEL: the model for every role; empty = the CLI's default
+
+# One role on another CLI or model: [agents.<role>] with cli and/or model.
+# Roles: worker, merger, tester, monitor, reviewer, aide.
+# [agents.monitor]
+# cli = "claude"
+# [agents.reviewer]
+# model = "..."
+
+[monitor]
+host = "herdr"               # POOL_MONITOR_HOST: "herdr" (the monitor and aides in herdr panes you talk to)
+                             # or "broker" (a headless monitor reached with `issuelooper say`)
+
+[dashboard]
+enabled = true               # ISSUELOOPER_DASHBOARD: `issuelooper start` also serves the dashboard on 127.0.0.1
+port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried; the next free one up to +9 is used
+
+[sweep]
+command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
+slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time
+
+[deploy]
+command = ""                 # POOL_DEPLOY_CMD: run from the shared checkout after main moves; empty = no deploys
+
+[live]
+enabled = false              # POOL_LIVE: needs:live issues get a tester's live check after their merge
+
+[ux]
+enabled = false              # POOL_UX: a tester walks the deployed app as a user and files findings
+gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many minutes
+idle_gap_minutes = 10        # POOL_UX_IDLE_GAP_MIN: while no worker or merger has work, another UX run after this many minutes
+
+[spec]
+enabled = false              # POOL_SPEC: while no worker or merger has work, a tester checks the app against the spec
+gap_minutes = 45             # POOL_SPEC_GAP_MIN: at most one spec check per this many minutes
+
+[review]
+enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
+rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project
+production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these skips the review
+# fixtures = ["tests/fixtures/**/*.json"]   # REVIEW_FIXTURES: fixture files whose values in production code are flagged for the reviewer
+
+[pool]
+max_sessions = 4             # POOL_MAX_WORKERS: agent sessions running at once, every role together
+worker_timeout = "20m"       # POOL_TIMEOUT_WORKER
+merger_timeout = "20m"       # POOL_TIMEOUT_MERGER
+tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
+tester_port_base = 8021      # TST_PORT: the first port handed to a tester
+
+[guard]
+secret_urls = []             # GUARD_SECRET_URLS: URL paths whose response holds a secret; fetching them unfiltered is refused
+
+# Any other variable, passed through as written.
+[env]
+# POOL_POLL_S = "15"

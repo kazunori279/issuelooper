@@ -1,0 +1,733 @@
+{
+ "turns": [
+  {
+   "match": "weather in kyoto",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Let me check Kyoto."
+    },
+    {
+     "type": "tool_call",
+     "name": "weather",
+     "args": {
+      "location": "Kyoto",
+      "lang": "en"
+     },
+     "result": {
+      "location": "Kyoto",
+      "local_time": "18:15",
+      "lang": "en",
+      "current": {
+       "temp_c": 20.4,
+       "feels_like_c": 19.1,
+       "condition": "clear",
+       "is_day": false,
+       "wind_kmh": 6,
+       "humidity": 60
+      },
+      "hourly": [
+       {
+        "time": "18:00",
+        "temp_c": 20.4,
+        "condition": "clear"
+       },
+       {
+        "time": "19:00",
+        "temp_c": 19.7,
+        "condition": "clear"
+       },
+       {
+        "time": "20:00",
+        "temp_c": 19.0,
+        "condition": "clear"
+       },
+       {
+        "time": "21:00",
+        "temp_c": 18.3,
+        "condition": "clear"
+       },
+       {
+        "time": "22:00",
+        "temp_c": 17.6,
+        "condition": "clear"
+       },
+       {
+        "time": "23:00",
+        "temp_c": 16.9,
+        "condition": "clear"
+       },
+       {
+        "time": "00:00",
+        "temp_c": 16.2,
+        "condition": "clear"
+       },
+       {
+        "time": "01:00",
+        "temp_c": 15.5,
+        "condition": "clear"
+       },
+       {
+        "time": "02:00",
+        "temp_c": 14.8,
+        "condition": "clear"
+       },
+       {
+        "time": "03:00",
+        "temp_c": 14.1,
+        "condition": "clear"
+       },
+       {
+        "time": "04:00",
+        "temp_c": 13.4,
+        "condition": "clear"
+       },
+       {
+        "time": "05:00",
+        "temp_c": 12.7,
+        "condition": "clear"
+       }
+      ],
+      "daily": [
+       {
+        "date": "2026-10-07",
+        "high_c": 23.4,
+        "low_c": 16.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-08",
+        "high_c": 24.4,
+        "low_c": 17.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-09",
+        "high_c": 25.4,
+        "low_c": 18.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-10",
+        "high_c": 26.4,
+        "low_c": 19.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-11",
+        "high_c": 27.4,
+        "low_c": 20.4,
+        "condition": "clear"
+       }
+      ],
+      "sunrise": "05:56",
+      "sunset": "17:33"
+     },
+     "delay_ms": 1500
+    },
+    {
+     "type": "transcript",
+     "text": " It is 20 degrees in Kyoto."
+    },
+    {
+     "type": "audio",
+     "ms": 1500
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "京都の天気",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "weather",
+     "args": {
+      "location": "京都",
+      "lang": "ja"
+     },
+     "result": {
+      "location": "京都",
+      "local_time": "18:15",
+      "lang": "ja",
+      "current": {
+       "temp_c": 20.4,
+       "feels_like_c": 19.1,
+       "condition": "clear",
+       "is_day": false,
+       "wind_kmh": 6,
+       "humidity": 60
+      },
+      "hourly": [
+       {
+        "time": "18:00",
+        "temp_c": 20.4,
+        "condition": "clear"
+       },
+       {
+        "time": "19:00",
+        "temp_c": 19.7,
+        "condition": "clear"
+       },
+       {
+        "time": "20:00",
+        "temp_c": 19.0,
+        "condition": "clear"
+       },
+       {
+        "time": "21:00",
+        "temp_c": 18.3,
+        "condition": "clear"
+       },
+       {
+        "time": "22:00",
+        "temp_c": 17.6,
+        "condition": "clear"
+       },
+       {
+        "time": "23:00",
+        "temp_c": 16.9,
+        "condition": "clear"
+       },
+       {
+        "time": "00:00",
+        "temp_c": 16.2,
+        "condition": "clear"
+       },
+       {
+        "time": "01:00",
+        "temp_c": 15.5,
+        "condition": "clear"
+       },
+       {
+        "time": "02:00",
+        "temp_c": 14.8,
+        "condition": "clear"
+       },
+       {
+        "time": "03:00",
+        "temp_c": 14.1,
+        "condition": "clear"
+       },
+       {
+        "time": "04:00",
+        "temp_c": 13.4,
+        "condition": "clear"
+       },
+       {
+        "time": "05:00",
+        "temp_c": 12.7,
+        "condition": "clear"
+       }
+      ],
+      "daily": [
+       {
+        "date": "2026-10-07",
+        "high_c": 23.4,
+        "low_c": 16.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-08",
+        "high_c": 24.4,
+        "low_c": 17.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-09",
+        "high_c": 25.4,
+        "low_c": 18.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-10",
+        "high_c": 26.4,
+        "low_c": 19.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-11",
+        "high_c": 27.4,
+        "low_c": 20.4,
+        "condition": "clear"
+       }
+      ],
+      "sunrise": "05:56",
+      "sunset": "17:33"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "京都は20度です。"
+    },
+    {
+     "type": "audio",
+     "ms": 800
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "search the web",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "web_search",
+     "args": {
+      "query": "james webb telescope",
+      "lang": "en"
+     },
+     "result": {
+      "query": "james webb telescope",
+      "lang": "en",
+      "queries": [
+       "james webb telescope",
+       "james webb telescope 2026"
+      ],
+      "answer_markdown": "## Webb finds water near a black hole\n\nThis is **important** news about james webb telescope.\n\n- First point\n- Second point\n- Third point\n\n[Read more](https://www.nasa.gov/webb)",
+      "sources": [
+       {
+        "title": "NASA",
+        "url": "https://www.nasa.gov/webb",
+        "domain": "nasa.gov"
+       },
+       {
+        "title": "ESA Webb",
+        "url": "https://esawebb.org/news",
+        "domain": "esawebb.org"
+       },
+       {
+        "title": "Space.com",
+        "url": "https://www.space.com/jwst",
+        "domain": "space.com"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here is what I found."
+    },
+    {
+     "type": "audio",
+     "ms": 600
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "near shibuya station",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_search",
+     "args": {
+      "query": "ramen",
+      "lang": "en"
+     },
+     "result": {
+      "query": "ramen near shibuya station",
+      "lang": "en",
+      "places": [
+       {
+        "name": "Ichiran Shibuya",
+        "address": "1-2-3 Example-cho",
+        "lat": 35.661,
+        "lng": 139.7006,
+        "rating": 4.0
+       },
+       {
+        "name": "Afuri Ebisu",
+        "address": "2-2-3 Example-cho",
+        "lat": 35.6467,
+        "lng": 139.7101,
+        "rating": 4.1
+       },
+       {
+        "name": "Kikanbo Kanda",
+        "address": "3-2-3 Example-cho",
+        "lat": 35.6929,
+        "lng": 139.77,
+        "rating": 4.2
+       },
+       {
+        "name": "Fuunji",
+        "address": "4-2-3 Example-cho",
+        "lat": 35.6872,
+        "lng": 139.697,
+        "rating": 4.3
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "I found 4 places."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "how do i get",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_route",
+     "args": {
+      "origin": "Tokyo Station",
+      "destination": "Asakusa",
+      "mode": "transit",
+      "lang": "en"
+     },
+     "result": {
+      "origin": "Tokyo Station",
+      "destination": "Asakusa",
+      "mode": "transit",
+      "lang": "en",
+      "duration_min": 24,
+      "distance_km": 6.3,
+      "steps": [
+       {
+        "instruction": "Walk to Ginza Line"
+       },
+       {
+        "instruction": "Take Ginza Line to Asakusa"
+       },
+       {
+        "instruction": "Exit 1"
+       }
+      ],
+      "polyline": "o~wxEkgatYs`AwVgaAoU{fAcQnPgaA_Dwt@"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "It takes about 24 minutes."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "everything about",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "place_info",
+     "args": {
+      "place": "Kinkaku-ji",
+      "lang": "en"
+     },
+     "result": {
+      "place": "Kinkaku-ji (full)",
+      "lang": "en",
+      "summary_markdown": "**Kinkaku-ji** is a famous landmark.\n\n- Built long ago\n- Very popular",
+      "sources": [
+       {
+        "title": "NASA",
+        "url": "https://www.nasa.gov/webb",
+        "domain": "nasa.gov"
+       },
+       {
+        "title": "ESA Webb",
+        "url": "https://esawebb.org/news",
+        "domain": "esawebb.org"
+       }
+      ],
+      "photos": [
+       {
+        "url": "https://picsum.photos/seed/fullKyoto0/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/fullKyoto1/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/fullKyoto2/600/400",
+        "domain": "picsum.photos"
+       }
+      ],
+      "video": {
+       "video_id": "Ege9aCKcATA",
+       "title": "Full tour"
+      },
+      "location": {
+       "lat": 35.0394,
+       "lng": 135.7292,
+       "address": "1 Kinkakujicho, Kita Ward, Kyoto"
+      }
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here is everything."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "tell me about",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "place_info",
+     "args": {
+      "place": "Kinkaku-ji",
+      "lang": "en"
+     },
+     "result": {
+      "place": "Kinkaku-ji",
+      "lang": "en",
+      "summary_markdown": "**Kinkaku-ji** is a famous landmark.\n\n- Built long ago\n- Very popular",
+      "sources": [
+       {
+        "title": "NASA",
+        "url": "https://www.nasa.gov/webb",
+        "domain": "nasa.gov"
+       },
+       {
+        "title": "ESA Webb",
+        "url": "https://esawebb.org/news",
+        "domain": "esawebb.org"
+       }
+      ],
+      "photos": [
+       {
+        "url": "https://picsum.photos/seed/Kinkaku-ji0/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/Kinkaku-ji1/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/Kinkaku-ji2/600/400",
+        "domain": "picsum.photos"
+       }
+      ],
+      "video": {
+       "video_id": "Ege9aCKcATA",
+       "title": "Kinkaku-ji in 4K"
+      },
+      "location": {
+       "lat": 35.0394,
+       "lng": 135.7292,
+       "address": "1 Kinkakujicho, Kita Ward, Kyoto"
+      }
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Kinkaku-ji is worth a visit."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "pictures of",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "image_search",
+     "args": {
+      "query": "mount fuji",
+      "lang": "en"
+     },
+     "result": {
+      "query": "mount fuji",
+      "lang": "en",
+      "images": [
+       {
+        "url": "https://picsum.photos/seed/mountfuji0/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/mountfuji0/300/200",
+        "domain": "site0.example.com",
+        "title": "mount fuji 0"
+       },
+       {
+        "url": "https://picsum.photos/seed/mountfuji1/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/mountfuji1/300/200",
+        "domain": "site1.example.com",
+        "title": "mount fuji 1"
+       },
+       {
+        "url": "https://picsum.photos/seed/mountfuji2/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/mountfuji2/300/200",
+        "domain": "site2.example.com",
+        "title": "mount fuji 2"
+       },
+       {
+        "url": "https://picsum.photos/seed/mountfuji3/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/mountfuji3/300/200",
+        "domain": "site3.example.com",
+        "title": "mount fuji 3"
+       },
+       {
+        "url": "https://picsum.photos/seed/mountfuji4/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/mountfuji4/300/200",
+        "domain": "site4.example.com",
+        "title": "mount fuji 4"
+       },
+       {
+        "url": "https://picsum.photos/seed/mountfuji5/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/mountfuji5/300/200",
+        "domain": "site5.example.com",
+        "title": "mount fuji 5"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here are some pictures."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "video",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "youtube_search",
+     "args": {
+      "query": "how to make sushi",
+      "lang": "en"
+     },
+     "result": {
+      "query": "how to make sushi",
+      "lang": "en",
+      "videos": [
+       {
+        "video_id": "yGG01tj9wi4",
+        "title": "Sushi at home: the basics"
+       },
+       {
+        "video_id": "mi8NwUqf7nM",
+        "title": "Knife skills for nigiri"
+       },
+       {
+        "video_id": "FKEjHIl0nmA",
+        "title": "Making sushi rice"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here is a video."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "long story",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Once upon a time,"
+    },
+    {
+     "type": "audio",
+     "ms": 6000
+    },
+    {
+     "type": "transcript",
+     "text": " and that is the end of the story.",
+     "delay_ms": 200
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "remember that",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "remember",
+     "args": {
+      "topic": "diet",
+      "fact": "The user is vegetarian."
+     },
+     "result": {
+      "ok": true
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Got it."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "actually",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "remember",
+     "args": {
+      "topic": "DIET",
+      "fact": "The user eats fish now."
+     },
+     "result": {
+      "ok": true
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Updated."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "hello",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Hello! How can I help?"
+    },
+    {
+     "type": "audio",
+     "ms": 500
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  }
+ ],
+ "fallback": [
+  {
+   "type": "transcript",
+   "text": "Sorry, I have no script for that."
+  },
+  {
+   "type": "turn_complete"
+  }
+ ]
+}

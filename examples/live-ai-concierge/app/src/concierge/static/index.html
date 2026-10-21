@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live AI Concierge</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header id="top-bar">
+      <div class="brand">
+        <span class="brand-icon">✨</span>
+        <span class="brand-title">Live AI Concierge</span>
+      </div>
+      <div class="top-bar-controls">
+        <div id="clock">--:--</div>
+        <button id="volume-button" class="top-bar-btn" data-testid="volume-button" aria-label="Volume">
+          🔊
+        </button>
+        <button id="settings-button" class="top-bar-btn" data-testid="settings-button" aria-label="Settings">
+          ⚙️
+        </button>
+        <div id="status" class="status-pill" data-testid="status" data-state="connecting">
+          <span class="status-dot"></span>
+          <span class="status-text">Connecting</span>
+        </div>
+      </div>
+    </header>
+
+    <main id="app-body">
+      <section id="feed-pane">
+        <div id="feed" data-testid="feed"></div>
+        <div id="composer">
+          <button id="composer-mic" data-testid="composer-mic" aria-label="Microphone">
+            🎙️
+          </button>
+          <input
+            id="composer-input"
+            data-testid="composer-input"
+            type="text"
+            placeholder="Type instead…"
+            autocomplete="off"
+          />
+          <button id="composer-send" data-testid="composer-send" disabled aria-label="Send">
+            ↑
+          </button>
+        </div>
+      </section>
+
+      <section id="cards-pane" data-testid="cards">
+        <div id="starters" data-testid="starters">
+          <div class="starters-header">Try asking about:</div>
+          <div class="starters-chips">
+            <button
+              class="starter-chip"
+              data-testid="starter-chip"
+              data-prompt="What's the weather in Kyoto?"
+            >
+              🌤️ Weather in Kyoto
+            </button>
+            <button
+              class="starter-chip"
+              data-testid="starter-chip"
+              data-prompt="Search the web for James Webb telescope"
+            >
+              🔍 Search the web
+            </button>
+            <button
+              class="starter-chip"
+              data-testid="starter-chip"
+              data-prompt="Find ramen near Shibuya station"
+            >
+              🍜 Ramen near Shibuya
+            </button>
+            <button
+              class="starter-chip"
+              data-testid="starter-chip"
+              data-prompt="How do I get from Tokyo Station to Asakusa?"
+            >
+              🗺️ Route to Asakusa
+            </button>
+            <button
+              class="starter-chip"
+              data-testid="starter-chip"
+              data-prompt="Show me a video about sushi"
+            >
+              🎬 Video on sushi
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>

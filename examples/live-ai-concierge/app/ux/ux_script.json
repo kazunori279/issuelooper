@@ -1,0 +1,1356 @@
+{
+ "turns": [
+  {
+   "match": "weather in sapporo",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Let me check Sapporo."
+    },
+    {
+     "type": "tool_call",
+     "name": "weather",
+     "args": {
+      "location": "Sapporo",
+      "lang": "en"
+     },
+     "result": {
+      "location": "Sapporo",
+      "local_time": "18:15",
+      "lang": "en",
+      "current": {
+       "temp_c": -3.6,
+       "feels_like_c": -8.2,
+       "condition": "snow",
+       "is_day": false,
+       "wind_kmh": 6,
+       "humidity": 60
+      },
+      "hourly": [
+       {
+        "time": "18:00",
+        "temp_c": -3.6,
+        "condition": "snow"
+       },
+       {
+        "time": "19:00",
+        "temp_c": -4.3,
+        "condition": "snow"
+       },
+       {
+        "time": "20:00",
+        "temp_c": -5.0,
+        "condition": "snow"
+       },
+       {
+        "time": "21:00",
+        "temp_c": -5.7,
+        "condition": "snow"
+       },
+       {
+        "time": "22:00",
+        "temp_c": -6.4,
+        "condition": "snow"
+       },
+       {
+        "time": "23:00",
+        "temp_c": -7.1,
+        "condition": "snow"
+       },
+       {
+        "time": "00:00",
+        "temp_c": -7.8,
+        "condition": "snow"
+       },
+       {
+        "time": "01:00",
+        "temp_c": -8.5,
+        "condition": "snow"
+       },
+       {
+        "time": "02:00",
+        "temp_c": -9.2,
+        "condition": "snow"
+       },
+       {
+        "time": "03:00",
+        "temp_c": -9.9,
+        "condition": "snow"
+       },
+       {
+        "time": "04:00",
+        "temp_c": -10.6,
+        "condition": "snow"
+       },
+       {
+        "time": "05:00",
+        "temp_c": -11.3,
+        "condition": "snow"
+       }
+      ],
+      "daily": [
+       {
+        "date": "2026-10-07",
+        "high_c": -0.6,
+        "low_c": -7.6,
+        "condition": "snow"
+       },
+       {
+        "date": "2026-10-08",
+        "high_c": 0.4,
+        "low_c": -6.6,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-09",
+        "high_c": 1.4,
+        "low_c": -5.6,
+        "condition": "snow"
+       },
+       {
+        "date": "2026-10-10",
+        "high_c": 2.4,
+        "low_c": -4.6,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-11",
+        "high_c": 3.4,
+        "low_c": -3.6,
+        "condition": "snow"
+       }
+      ],
+      "sunrise": "06:41",
+      "sunset": "16:12"
+     },
+     "delay_ms": 1500
+    },
+    {
+     "type": "transcript",
+     "text": " It is -4 degrees in Sapporo."
+    },
+    {
+     "type": "audio",
+     "ms": 1500
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "札幌の天気",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "weather",
+     "args": {
+      "location": "札幌",
+      "lang": "ja"
+     },
+     "result": {
+      "location": "札幌",
+      "local_time": "18:15",
+      "lang": "ja",
+      "current": {
+       "temp_c": -3.6,
+       "feels_like_c": -8.2,
+       "condition": "snow",
+       "is_day": false,
+       "wind_kmh": 6,
+       "humidity": 60
+      },
+      "hourly": [
+       {
+        "time": "18:00",
+        "temp_c": -3.6,
+        "condition": "snow"
+       },
+       {
+        "time": "19:00",
+        "temp_c": -4.3,
+        "condition": "snow"
+       },
+       {
+        "time": "20:00",
+        "temp_c": -5.0,
+        "condition": "snow"
+       },
+       {
+        "time": "21:00",
+        "temp_c": -5.7,
+        "condition": "snow"
+       },
+       {
+        "time": "22:00",
+        "temp_c": -6.4,
+        "condition": "snow"
+       },
+       {
+        "time": "23:00",
+        "temp_c": -7.1,
+        "condition": "snow"
+       },
+       {
+        "time": "00:00",
+        "temp_c": -7.8,
+        "condition": "snow"
+       },
+       {
+        "time": "01:00",
+        "temp_c": -8.5,
+        "condition": "snow"
+       },
+       {
+        "time": "02:00",
+        "temp_c": -9.2,
+        "condition": "snow"
+       },
+       {
+        "time": "03:00",
+        "temp_c": -9.9,
+        "condition": "snow"
+       },
+       {
+        "time": "04:00",
+        "temp_c": -10.6,
+        "condition": "snow"
+       },
+       {
+        "time": "05:00",
+        "temp_c": -11.3,
+        "condition": "snow"
+       }
+      ],
+      "daily": [
+       {
+        "date": "2026-10-07",
+        "high_c": -0.6,
+        "low_c": -7.6,
+        "condition": "snow"
+       },
+       {
+        "date": "2026-10-08",
+        "high_c": 0.4,
+        "low_c": -6.6,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-09",
+        "high_c": 1.4,
+        "low_c": -5.6,
+        "condition": "snow"
+       },
+       {
+        "date": "2026-10-10",
+        "high_c": 2.4,
+        "low_c": -4.6,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-11",
+        "high_c": 3.4,
+        "low_c": -3.6,
+        "condition": "snow"
+       }
+      ],
+      "sunrise": "06:41",
+      "sunset": "16:12"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "札幌は-4度です。"
+    },
+    {
+     "type": "audio",
+     "ms": 800
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "look up",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "web_search",
+     "args": {
+      "query": "electric ferry",
+      "lang": "en"
+     },
+     "result": {
+      "query": "electric ferry",
+      "lang": "en",
+      "queries": [
+       "electric ferry",
+       "electric ferry 2026"
+      ],
+      "answer_markdown": "## Norway launches the largest electric ferry\n\nThis is **important** news about electric ferry.\n\n- First point\n- Second point\n- Third point\n\n[Read more](https://www.reuters.com/ferry)",
+      "sources": [
+       {
+        "title": "Reuters",
+        "url": "https://www.reuters.com/ferry",
+        "domain": "reuters.com"
+       },
+       {
+        "title": "Electrek",
+        "url": "https://electrek.co/ferry",
+        "domain": "electrek.co"
+       },
+       {
+        "title": "BBC",
+        "url": "https://www.bbc.com/news/ferry",
+        "domain": "bbc.com"
+       },
+       {
+        "title": "NRK",
+        "url": "https://www.nrk.no/ferje",
+        "domain": "nrk.no"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "These are the top results."
+    },
+    {
+     "type": "audio",
+     "ms": 600
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "near osaka castle",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_search",
+     "args": {
+      "query": "okonomiyaki",
+      "lang": "en"
+     },
+     "result": {
+      "query": "okonomiyaki near osaka castle",
+      "lang": "en",
+      "places": [
+       {
+        "name": "Okonomiyaki Mizuno",
+        "address": "1-2-3 Otemae",
+        "lat": 34.6873,
+        "lng": 135.523,
+        "rating": 4.0
+       },
+       {
+        "name": "Kushikatsu Daruma",
+        "address": "2-2-3 Otemae",
+        "lat": 34.6862,
+        "lng": 135.5248,
+        "rating": 4.1
+       },
+       {
+        "name": "Takoyaki Wanaka",
+        "address": "3-2-3 Otemae",
+        "lat": 34.6851,
+        "lng": 135.5262,
+        "rating": 4.2
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "I found 3 places."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "directions to",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_route",
+     "args": {
+      "origin": "Kyoto Station",
+      "destination": "Fushimi Inari",
+      "mode": "walk",
+      "lang": "en"
+     },
+     "result": {
+      "origin": "Kyoto Station",
+      "destination": "Fushimi Inari",
+      "mode": "walk",
+      "lang": "en",
+      "duration_min": 41,
+      "distance_km": 3.1,
+      "steps": [
+       {
+        "instruction": "Head south on Karasuma"
+       },
+       {
+        "instruction": "Turn left at Tofukuji"
+       },
+       {
+        "instruction": "Continue to the shrine gate"
+       },
+       {
+        "instruction": "Arrive"
+       }
+      ],
+      "polyline": "gdptEokr{X~\\o_@zY{|@n_@nAnZ~C"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "It takes about 41 minutes."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "full guide to",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "place_info",
+     "args": {
+      "place": "Himeji Castle",
+      "lang": "en"
+     },
+     "result": {
+      "place": "Himeji Castle (full)",
+      "lang": "en",
+      "summary_markdown": "**Himeji Castle** is a famous landmark.\n\n- Built long ago\n- Very popular",
+      "sources": [
+       {
+        "title": "Reuters",
+        "url": "https://www.reuters.com/ferry",
+        "domain": "reuters.com"
+       },
+       {
+        "title": "Electrek",
+        "url": "https://electrek.co/ferry",
+        "domain": "electrek.co"
+       }
+      ],
+      "photos": [
+       {
+        "url": "https://picsum.photos/seed/fullSapporo0/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/fullSapporo1/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/fullSapporo2/600/400",
+        "domain": "picsum.photos"
+       }
+      ],
+      "video": {
+       "video_id": "rUYvEQQJcbw",
+       "title": "Himeji Castle walking tour"
+      },
+      "location": {
+       "lat": 34.8394,
+       "lng": 134.6939,
+       "address": "68 Honmachi, Himeji, Hyogo"
+      }
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "This is the full guide."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "know about",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "place_info",
+     "args": {
+      "place": "Himeji Castle",
+      "lang": "en"
+     },
+     "result": {
+      "place": "Himeji Castle",
+      "lang": "en",
+      "summary_markdown": "**Himeji Castle** is a famous landmark.\n\n- Built long ago\n- Very popular",
+      "sources": [
+       {
+        "title": "Reuters",
+        "url": "https://www.reuters.com/ferry",
+        "domain": "reuters.com"
+       },
+       {
+        "title": "Electrek",
+        "url": "https://electrek.co/ferry",
+        "domain": "electrek.co"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Himeji Castle is worth a visit."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "photos of",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "image_search",
+     "args": {
+      "query": "aurora borealis",
+      "lang": "en"
+     },
+     "result": {
+      "query": "aurora borealis",
+      "lang": "en",
+      "images": [
+       {
+        "url": "https://picsum.photos/seed/auroraborealis0/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/auroraborealis0/300/200",
+        "domain": "img0.aurora.test",
+        "title": "aurora borealis 0"
+       },
+       {
+        "url": "https://picsum.photos/seed/auroraborealis1/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/auroraborealis1/300/200",
+        "domain": "img1.aurora.test",
+        "title": "aurora borealis 1"
+       },
+       {
+        "url": "https://picsum.photos/seed/auroraborealis2/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/auroraborealis2/300/200",
+        "domain": "img2.aurora.test",
+        "title": "aurora borealis 2"
+       },
+       {
+        "url": "https://picsum.photos/seed/auroraborealis3/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/auroraborealis3/300/200",
+        "domain": "img3.aurora.test",
+        "title": "aurora borealis 3"
+       },
+       {
+        "url": "https://picsum.photos/seed/auroraborealis4/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/auroraborealis4/300/200",
+        "domain": "img4.aurora.test",
+        "title": "aurora borealis 4"
+       },
+       {
+        "url": "https://picsum.photos/seed/auroraborealis5/800/600",
+        "thumbnail_url": "https://picsum.photos/seed/auroraborealis5/300/200",
+        "domain": "img5.aurora.test",
+        "title": "aurora borealis 5"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Take a look at these photos."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "youtube",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "youtube_search",
+     "args": {
+      "query": "learn to juggle",
+      "lang": "en"
+     },
+     "result": {
+      "query": "learn to juggle",
+      "lang": "en",
+      "videos": [
+       {
+        "video_id": "dRRLJdOJxpQ",
+        "title": "Juggling 3 balls in 10 minutes"
+       },
+       {
+        "video_id": "sTv39hHsJHs",
+        "title": "Common juggling mistakes"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "These lessons should help."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "bedtime tale",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Long ago, by the sea,"
+    },
+    {
+     "type": "audio",
+     "ms": 6000
+    },
+    {
+     "type": "transcript",
+     "text": " and the lighthouse kept its light on.",
+     "delay_ms": 200
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "keep in mind",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "remember",
+     "args": {
+      "topic": "Allergy",
+      "fact": "The user is allergic to peanuts."
+     },
+     "result": {
+      "ok": true
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Noted."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "correction",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "remember",
+     "args": {
+      "topic": "aLLERGY",
+      "fact": "The user is allergic to shellfish."
+     },
+     "result": {
+      "ok": true
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Fixed, thanks."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "hello",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Good evening! What can I do for you?"
+    },
+    {
+     "type": "audio",
+     "ms": 500
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "weather in kyoto",
+   "events": [
+    {
+     "type": "transcript",
+     "text": "Let me check Kyoto."
+    },
+    {
+     "type": "tool_call",
+     "name": "weather",
+     "args": {
+      "location": "Kyoto",
+      "lang": "en"
+     },
+     "result": {
+      "location": "Kyoto",
+      "local_time": "18:15",
+      "lang": "en",
+      "current": {
+       "temp_c": 20.4,
+       "feels_like_c": 19.1,
+       "condition": "clear",
+       "is_day": false,
+       "wind_kmh": 6,
+       "humidity": 60
+      },
+      "hourly": [
+       {
+        "time": "18:00",
+        "temp_c": 20.4,
+        "condition": "clear"
+       },
+       {
+        "time": "19:00",
+        "temp_c": 19.7,
+        "condition": "clear"
+       },
+       {
+        "time": "20:00",
+        "temp_c": 19.0,
+        "condition": "clear"
+       },
+       {
+        "time": "21:00",
+        "temp_c": 18.3,
+        "condition": "clear"
+       },
+       {
+        "time": "22:00",
+        "temp_c": 17.6,
+        "condition": "clear"
+       },
+       {
+        "time": "23:00",
+        "temp_c": 16.9,
+        "condition": "clear"
+       },
+       {
+        "time": "00:00",
+        "temp_c": 16.2,
+        "condition": "clear"
+       },
+       {
+        "time": "01:00",
+        "temp_c": 15.5,
+        "condition": "clear"
+       },
+       {
+        "time": "02:00",
+        "temp_c": 14.8,
+        "condition": "clear"
+       },
+       {
+        "time": "03:00",
+        "temp_c": 14.1,
+        "condition": "clear"
+       },
+       {
+        "time": "04:00",
+        "temp_c": 13.4,
+        "condition": "clear"
+       },
+       {
+        "time": "05:00",
+        "temp_c": 12.7,
+        "condition": "clear"
+       }
+      ],
+      "daily": [
+       {
+        "date": "2026-10-07",
+        "high_c": 23.4,
+        "low_c": 16.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-08",
+        "high_c": 24.4,
+        "low_c": 17.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-09",
+        "high_c": 25.4,
+        "low_c": 18.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-10",
+        "high_c": 26.4,
+        "low_c": 19.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-11",
+        "high_c": 27.4,
+        "low_c": 20.4,
+        "condition": "clear"
+       }
+      ],
+      "sunrise": "05:56",
+      "sunset": "17:33"
+     },
+     "delay_ms": 1500
+    },
+    {
+     "type": "transcript",
+     "text": " It is 20 degrees in Kyoto."
+    },
+    {
+     "type": "audio",
+     "ms": 1500
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "京都の天気",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "weather",
+     "args": {
+      "location": "京都",
+      "lang": "ja"
+     },
+     "result": {
+      "location": "京都",
+      "local_time": "18:15",
+      "lang": "ja",
+      "current": {
+       "temp_c": 20.4,
+       "feels_like_c": 19.1,
+       "condition": "clear",
+       "is_day": false,
+       "wind_kmh": 6,
+       "humidity": 60
+      },
+      "hourly": [
+       {
+        "time": "18:00",
+        "temp_c": 20.4,
+        "condition": "clear"
+       },
+       {
+        "time": "19:00",
+        "temp_c": 19.7,
+        "condition": "clear"
+       },
+       {
+        "time": "20:00",
+        "temp_c": 19.0,
+        "condition": "clear"
+       },
+       {
+        "time": "21:00",
+        "temp_c": 18.3,
+        "condition": "clear"
+       },
+       {
+        "time": "22:00",
+        "temp_c": 17.6,
+        "condition": "clear"
+       },
+       {
+        "time": "23:00",
+        "temp_c": 16.9,
+        "condition": "clear"
+       },
+       {
+        "time": "00:00",
+        "temp_c": 16.2,
+        "condition": "clear"
+       },
+       {
+        "time": "01:00",
+        "temp_c": 15.5,
+        "condition": "clear"
+       },
+       {
+        "time": "02:00",
+        "temp_c": 14.8,
+        "condition": "clear"
+       },
+       {
+        "time": "03:00",
+        "temp_c": 14.1,
+        "condition": "clear"
+       },
+       {
+        "time": "04:00",
+        "temp_c": 13.4,
+        "condition": "clear"
+       },
+       {
+        "time": "05:00",
+        "temp_c": 12.7,
+        "condition": "clear"
+       }
+      ],
+      "daily": [
+       {
+        "date": "2026-10-07",
+        "high_c": 23.4,
+        "low_c": 16.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-08",
+        "high_c": 24.4,
+        "low_c": 17.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-09",
+        "high_c": 25.4,
+        "low_c": 18.4,
+        "condition": "clear"
+       },
+       {
+        "date": "2026-10-10",
+        "high_c": 26.4,
+        "low_c": 19.4,
+        "condition": "partly_cloudy"
+       },
+       {
+        "date": "2026-10-11",
+        "high_c": 27.4,
+        "low_c": 20.4,
+        "condition": "clear"
+       }
+      ],
+      "sunrise": "05:56",
+      "sunset": "17:33"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "京都は20度です。"
+    },
+    {
+     "type": "audio",
+     "ms": 800
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "search the web",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "web_search",
+     "args": {
+      "query": "james webb telescope",
+      "lang": "en"
+     },
+     "result": {
+      "query": "james webb telescope",
+      "lang": "en",
+      "queries": [
+       "james webb telescope",
+       "james webb telescope 2026"
+      ],
+      "answer_markdown": "## Webb finds water near a black hole\n\nThis is **important** news about james webb telescope.\n\n- First point\n- Second point\n- Third point\n\n[Read more](https://www.nasa.gov/webb)",
+      "sources": [
+       {
+        "title": "NASA",
+        "url": "https://www.nasa.gov/webb",
+        "domain": "nasa.gov"
+       },
+       {
+        "title": "ESA Webb",
+        "url": "https://esawebb.org/news",
+        "domain": "esawebb.org"
+       },
+       {
+        "title": "Space.com",
+        "url": "https://www.space.com/jwst",
+        "domain": "space.com"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here is what I found."
+    },
+    {
+     "type": "audio",
+     "ms": 600
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "near shibuya station",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_search",
+     "args": {
+      "query": "ramen",
+      "lang": "en"
+     },
+     "result": {
+      "query": "ramen near shibuya station",
+      "lang": "en",
+      "places": [
+       {
+        "name": "Ichiran Shibuya",
+        "address": "1-2-3 Example-cho",
+        "lat": 35.661,
+        "lng": 139.7006,
+        "rating": 4.0
+       },
+       {
+        "name": "Afuri Ebisu",
+        "address": "2-2-3 Example-cho",
+        "lat": 35.6467,
+        "lng": 139.7101,
+        "rating": 4.1
+       },
+       {
+        "name": "Kikanbo Kanda",
+        "address": "3-2-3 Example-cho",
+        "lat": 35.6929,
+        "lng": 139.77,
+        "rating": 4.2
+       },
+       {
+        "name": "Fuunji",
+        "address": "4-2-3 Example-cho",
+        "lat": 35.6872,
+        "lng": 139.697,
+        "rating": 4.3
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "I found 4 places."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "how do i get",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_route",
+     "args": {
+      "origin": "Tokyo Station",
+      "destination": "Asakusa",
+      "mode": "transit",
+      "lang": "en"
+     },
+     "result": {
+      "origin": "Tokyo Station",
+      "destination": "Asakusa",
+      "mode": "transit",
+      "lang": "en",
+      "duration_min": 24,
+      "distance_km": 6.3,
+      "steps": [
+       {
+        "instruction": "Walk to Ginza Line"
+       },
+       {
+        "instruction": "Take Ginza Line to Asakusa"
+       },
+       {
+        "instruction": "Exit 1"
+       }
+      ],
+      "polyline": "o~wxEkgatYs`AwVgaAoU{fAcQnPgaA_Dwt@"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "It takes about 24 minutes."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "video",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "youtube_search",
+     "args": {
+      "query": "how to make sushi",
+      "lang": "en"
+     },
+     "result": {
+      "query": "how to make sushi",
+      "lang": "en",
+      "videos": [
+       {
+        "video_id": "yGG01tj9wi4",
+        "title": "Sushi at home: the basics"
+       },
+       {
+        "video_id": "mi8NwUqf7nM",
+        "title": "Knife skills for nigiri"
+       },
+       {
+        "video_id": "FKEjHIl0nmA",
+        "title": "Making sushi rice"
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here is a video."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "大阪城の近く",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_search",
+     "args": {
+      "query": "お好み焼き",
+      "lang": "ja"
+     },
+     "result": {
+      "query": "大阪城の近くのお好み焼き",
+      "lang": "ja",
+      "places": [
+       {
+        "name": "お好み焼 美津の",
+        "address": "大阪市中央区大手前1-2-3",
+        "lat": 34.68,
+        "lng": 135.52,
+        "rating": 4.1
+       },
+       {
+        "name": "串かつだるま",
+        "address": "大阪市中央区大手前2-2-3",
+        "lat": 34.685,
+        "lng": 135.525,
+        "rating": 4.2
+       },
+       {
+        "name": "たこ焼わなか",
+        "address": "大阪市中央区大手前3-2-3",
+        "lat": 34.69,
+        "lng": 135.53,
+        "rating": 4.3
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "大阪城の近くで3件見つかりました。"
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "伏見稲荷への行き方",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_route",
+     "args": {
+      "origin": "京都駅",
+      "destination": "伏見稲荷大社",
+      "mode": "walk",
+      "lang": "ja"
+     },
+     "result": {
+      "origin": "京都駅",
+      "destination": "伏見稲荷大社",
+      "mode": "walk",
+      "lang": "ja",
+      "duration_min": 41,
+      "distance_km": 3.1,
+      "steps": [
+       {
+        "instruction": "烏丸通を南へ進む"
+       },
+       {
+        "instruction": "東福寺で左折"
+       },
+       {
+        "instruction": "鳥居まで直進"
+       },
+       {
+        "instruction": "到着"
+       }
+      ],
+      "polyline": "gdptEokr{X~\\o_@zY{|@n_@nAnZ~C"
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "歩いて約41分です。"
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "姫路城について",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "place_info",
+     "args": {
+      "place": "姫路城",
+      "lang": "ja"
+     },
+     "result": {
+      "place": "姫路城",
+      "lang": "ja",
+      "summary_markdown": "**姫路城**は世界遺産の城です。\n\n- 白鷺城とも呼ばれる\n- 1609年に現在の姿に",
+      "sources": [
+       {
+        "title": "姫路市",
+        "url": "https://www.city.himeji.lg.jp/castle/",
+        "domain": "city.himeji.lg.jp"
+       }
+      ],
+      "photos": [
+       {
+        "url": "https://picsum.photos/seed/himejija0/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/himejija1/600/400",
+        "domain": "picsum.photos"
+       },
+       {
+        "url": "https://picsum.photos/seed/himejija2/600/400",
+        "domain": "picsum.photos"
+       }
+      ],
+      "video": {
+       "video_id": "rUYvEQQJcbw",
+       "title": "姫路城 散策ツアー"
+      },
+      "location": {
+       "lat": 34.8394,
+       "lng": 134.6939,
+       "address": "兵庫県姫路市本町68"
+      }
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "姫路城は一度は訪れたい名所です。"
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  },
+  {
+   "match": "near here",
+   "events": [
+    {
+     "type": "tool_call",
+     "name": "maps_search",
+     "args": {
+      "query": "sushi",
+      "lang": "en"
+     },
+     "result": {
+      "query": "sushi near Otaru",
+      "lang": "en",
+      "places": [
+       {
+        "name": "Masazushi",
+        "address": "1-4-5 Hanazono, Otaru, Hokkaido",
+        "lat": 43.1928,
+        "lng": 140.9947,
+        "rating": 4.2
+       },
+       {
+        "name": "Isezushi",
+        "address": "2-4-5 Hanazono, Otaru, Hokkaido",
+        "lat": 43.196,
+        "lng": 141.0012,
+        "rating": 4.3
+       },
+       {
+        "name": "Otaru Masa",
+        "address": "3-4-5 Hanazono, Otaru, Hokkaido",
+        "lat": 43.199,
+        "lng": 141.0055,
+        "rating": 4.4
+       }
+      ]
+     }
+    },
+    {
+     "type": "transcript",
+     "text": "Here are three sushi places close to you."
+    },
+    {
+     "type": "turn_complete"
+    }
+   ]
+  }
+ ],
+ "fallback": [
+  {
+   "type": "transcript",
+   "text": "Sorry, I have no script for that."
+  },
+  {
+   "type": "turn_complete"
+  }
+ ]
+}

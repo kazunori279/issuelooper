@@ -71,6 +71,22 @@ extra UX runs and, if enabled, spec checks.
 - Linux. macOS is not verified yet ([#1](https://github.com/kazunori279/issuelooper/issues/1)).
   Worktrees and scratch files go under `/tmp`.
 
+## Try a sample
+
+[`examples/`](examples/) has two samples that one command turns into a repository of
+your own, with issuelooper installed and a seed backlog filed:
+
+- [`hello-world`](examples/hello-world/): a small Python CLI and six issues; see the
+  loop work in 15-30 minutes.
+- [`live-ai-concierge`](examples/live-ai-concierge/): the voice and text concierge
+  the framework was developed and benchmarked on, from a first slice to the full spec
+  in about six hours, with UX checks for the testers.
+
+```bash
+git clone https://github.com/kazunori279/issuelooper
+issuelooper/examples/create.sh hello-world <you>/textstats-demo
+```
+
 ## Quick start
 
 ```bash
@@ -216,8 +232,8 @@ Everything project-specific lives in `.issuelooper/` in your repository:
 | `review_rules.md` | Project rules the reviewer enforces on top of its two built-in checks. |
 | `monitor_kickoff.md` | Optional: the monitor's first message, for example the priorities of a seed backlog. |
 
-[`examples/live-ai-concierge/`](examples/live-ai-concierge/) has the files of the
-project the framework was developed on.
+The samples' `issuelooper/` directories ([`hello-world`](examples/hello-world/issuelooper/),
+[`live-ai-concierge`](examples/live-ai-concierge/issuelooper/)) are filled-in examples of these files.
 
 ## Agent CLIs
 
@@ -252,7 +268,7 @@ template/                      what install.sh copies
   .agents/                     the same hooks, skills and rules for agy
   .githooks/                   keep sessions out of .claude/ and off main
   .issuelooper/                config and project templates
-examples/                      configuration of real projects
+examples/                      samples: an app, its configuration and a seed backlog each; create.sh
 ```
 
 Tests: `for t in template/.claude/hooks/*_test.py; do python3 "$t"; done`.
