@@ -1401,6 +1401,31 @@ def run_rebase(test_only: bool, append_src: bool = False):
     )
 
 
+def test_stop_lets_sessions_release_their_claims() -> None:
+    """`issuelooper stop` kills the sessions; each must still save its work and put its
+    claim back, without a failed attempt, before the supervisor exits. Otherwise a
+    restart finds the issues at stage:doing until their claims go stale."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stop-"))
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)
+    done: list[bool] = []
+
+    def wrap_up() -> None:
+        time.sleep(0.5)
+        done.append(True)
+
+    t = threading.Thread(target=wrap_up, daemon=True)
+    t.start()
+    pool.sessions["wrk:1"] = t
+    pool.stopping = True
+    pool.drain(timeout=10)
+    check("the supervisor waits for a killed session's wrap-up", done, [True])
+    check(
+        "a stop is not a failed attempt",
+        "stopped with the supervisor".startswith(ccpool.NOT_A_FAILURE),
+        True,
+    )
+
+
 def test_supervisor_rebase() -> None:
     outcome, pushed, swept, pool = run_rebase(test_only=True)
     check(

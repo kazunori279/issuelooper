@@ -1039,6 +1039,10 @@ SESSION = (
 )
 
 
+# Session outcomes that put the claim back without counting a failed attempt.
+NOT_A_FAILURE = ("startup crash", "quota error", "stopped with the supervisor")
+
+
 class Session(threading.Thread):
     def __init__(self, pool: "Pool", unit: Unit, seq: int):
         super().__init__(daemon=True, name=f"{unit.role}-{seq}")
@@ -1377,7 +1381,11 @@ class Session(threading.Thread):
 
         rc, elapsed, timed_out = self.session(prompt, env)
 
-        if rc != 0 and self.ended_on_quota():
+        if self.pool.stopping:
+            # The owner stopped the loop: the claim goes back without a failed attempt,
+            # so the next start picks the issue up at once instead of after CLAIM_STALE_MIN.
+            outcome = "stopped with the supervisor"
+        elif rc != 0 and self.ended_on_quota():
             # Not the agent's failure: the claim goes back without a failed attempt, and
             # the pool holds new starts for a while (Pool.finished).
             outcome = f"quota error (exit {rc})"
@@ -1401,7 +1409,7 @@ class Session(threading.Thread):
                 "--loop",
                 str(self.seq),
             ]
-            if outcome.startswith(("startup crash", "quota error")):
+            if outcome.startswith(NOT_A_FAILURE):
                 args.append("--no-fail")
             if outcome != "ok":
                 args += ["--reason", f"the worker session {outcome}"]
@@ -2365,6 +2373,15 @@ class Pool:
             except Exception as exc:  # noqa: BLE001 - a failed poll is not a change
                 self.log("poll_error", error=str(exc)[:300])
                 self.last_fetch = time.time()
+        self.drain()
+
+    def drain(self, timeout: float = 60.0):
+        """After stop(): wait for the killed sessions to save their work and release
+        their claims. They are daemon threads, so without this the process exits under
+        them and their issues stay at stage:doing until the claims go stale."""
+        deadline = time.time() + timeout
+        for w in list(self.sessions.values()):
+            w.join(timeout=max(0.0, deadline - time.time()))
 
     def stop(self, *_):
         self.stopping = True
