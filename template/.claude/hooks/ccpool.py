@@ -1458,7 +1458,9 @@ class Session(threading.Thread):
         next poll, which sees it CONFLICTING and starts a merger session."""
         u = self.unit
         pr, n, head = u.number, u.info["issue"], u.info["head"]
-        env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr))
+        # POOL_AUTO_MERGE: the guard leaves a head behind main to merged_check (gate 7 is
+        # for merger sessions).
+        env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr), POOL_AUTO_MERGE="1")
         # A head swept on an older main says nothing about the merged result: one PR
         # moved an import, another (swept before it) still used it, GitHub saw no
         # conflict, and main stopped starting. A rebase and full sweep per merge would

@@ -1800,6 +1800,19 @@ def test_merger_merges_only_a_head_on_current_main() -> None:
         git("rebase", "-q", "origin/main")
         check("rebased onto it: nothing behind", guard.commits_behind_main(git("rev-parse", "HEAD")), 0)
         check("an unknown head is fail-open", guard.commits_behind_main("f" * 40), 0)
+        for env, want in (({"CC_ROLE": "merger", "POOL_UNIT": "mrg:11@a@b"}, True),
+                          ({"CC_ROLE": "merger", "POOL_UNIT": "merge:11@a@b"}, False),
+                          ({"CC_ROLE": "merger", "POOL_AUTO_MERGE": "1"}, False),
+                          ({"CC_ROLE": "worker"}, False)):
+            saved = {k: os.environ.get(k) for k in ("CC_ROLE", "POOL_UNIT", "POOL_AUTO_MERGE")}
+            for k in saved:
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            check(f"gate 7 applies to merger sessions only: {env}", guard.merger_session(), want)
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
     finally:
         os.environ["SHARED_REPO_PATH"] = old or ""
 

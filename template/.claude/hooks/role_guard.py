@@ -1155,6 +1155,17 @@ def check_shared_checkout_clean() -> None:
         pass
 
 
+def merger_session() -> bool:
+    """A merger agent session, not the supervisor's own merge: both run the gates with
+    CC_ROLE=merger, but the supervisor checks a head behind main merged with main
+    instead (its units are `merge:...`; a merger session's are `mrg:...`)."""
+    if os.environ.get("CC_ROLE", "").strip().lower() != "merger":
+        return False
+    if os.environ.get("POOL_AUTO_MERGE") == "1":
+        return False
+    return not os.environ.get("POOL_UNIT", "").startswith("merge:")
+
+
 def commits_behind_main(head_sha: str) -> int:
     """How many commits origin/main has that the head lacks, after fetching main into
     the shared checkout (worktrees share its objects, so a merger's head is there).
@@ -1280,7 +1291,7 @@ def check_pr_merge(command: str) -> None:
             )
 
         # Gate 7: a merger merges only a head that contains the current main.
-        if os.environ.get("CC_ROLE", "").strip().lower() == "merger":
+        if merger_session():
             behind = commits_behind_main(head_sha)
             if behind:
                 block(
