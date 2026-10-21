@@ -70,3 +70,5 @@ protected_paths = []         # GUARD_PROTECTED_PATHS: the owner's files (such as
 # Any other variable, passed through as written.
 [env]
 # POOL_POLL_S = "15"
+UV_FROZEN = "1"              # uv never rewrites uv.lock (an index setting on the machine would otherwise
+                             # leave the shared checkout dirty, and nothing merges then)
