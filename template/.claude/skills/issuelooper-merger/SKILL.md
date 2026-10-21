@@ -69,10 +69,9 @@ gh issue comment $N --body "<!-- merger -->
 Merged PR #$P after resolving the conflict with main (<one line on what both sides kept>)."
 ```
 
-Run the label edit in the very next command after the merge. If `main` moved
-since your rebase, the guard refuses the merge (gate 7: your sweep never saw the
-new `main`), and GitHub refuses it when the PR conflicts again: either way, repeat
-from step 2, up to three rounds; then say so on the PR and stop. The supervisor deploys, if
+Run the label edit in the very next command after the merge. If GitHub refuses
+the merge because `main` moved and the PR conflicts again, repeat from step 2,
+up to three rounds; then say so on the PR and stop. The supervisor deploys, if
 the project deploys.
 
 ## 5. Hand back

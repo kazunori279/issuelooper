@@ -271,13 +271,15 @@ class Config:
     guard_cmd: str = f"{sys.executable} {HERE / 'role_guard.py'}"
 
     def wrap_s(self) -> float:
-        """When a worker gets its wrap-up turn: POOL_WORKER_WRAP_S, but no later than
-        three quarters of the worker timeout, so a short timeout still leaves time to
-        save the work (20 minutes wraps up at 15)."""
+        """When a worker gets its wrap-up turn: POOL_WORKER_WRAP_S, unless the worker
+        timeout comes first; then at three quarters of the timeout, so the work can
+        still be saved (a 20-minute timeout wraps up at 15)."""
         if not self.worker_wrap_s:
             return 0.0
-        timeout = self.timeouts.get("worker")
-        return min(self.worker_wrap_s, 0.75 * seconds(timeout)) if timeout else self.worker_wrap_s
+        timeout = seconds(self.timeouts["worker"]) if self.timeouts.get("worker") else 0
+        if timeout and self.worker_wrap_s >= timeout:
+            return 0.75 * timeout
+        return self.worker_wrap_s
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -1458,9 +1460,7 @@ class Session(threading.Thread):
         next poll, which sees it CONFLICTING and starts a merger session."""
         u = self.unit
         pr, n, head = u.number, u.info["issue"], u.info["head"]
-        # POOL_AUTO_MERGE: the guard leaves a head behind main to merged_check (gate 7 is
-        # for merger sessions).
-        env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr), POOL_AUTO_MERGE="1")
+        env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr))
         # A head swept on an older main says nothing about the merged result: one PR
         # moved an import, another (swept before it) still used it, GitHub saw no
         # conflict, and main stopped starting. A rebase and full sweep per merge would

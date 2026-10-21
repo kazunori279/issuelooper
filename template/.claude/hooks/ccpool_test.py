@@ -1707,8 +1707,8 @@ def test_wrap_up_fits_the_timeout() -> None:
     first, and the prompt promised a wrap-up it would never get."""
     cfg = ccpool.Config(timeouts={**ccpool.Config().timeouts, "worker": "20m"})
     check("a short timeout wraps up at three quarters of it", cfg.wrap_s(), 900.0)
-    cfg = ccpool.Config(timeouts={**ccpool.Config().timeouts, "worker": "60m"})
-    check("a long one keeps POOL_WORKER_WRAP_S", cfg.wrap_s(), cfg.worker_wrap_s)
+    cfg = ccpool.Config(timeouts={**ccpool.Config().timeouts, "worker": "45m"})
+    check("one longer than POOL_WORKER_WRAP_S keeps it (35 of 45 minutes)", cfg.wrap_s(), cfg.worker_wrap_s)
     check("off stays off", ccpool.Config(worker_wrap_s=0).wrap_s(), 0.0)
 
 
