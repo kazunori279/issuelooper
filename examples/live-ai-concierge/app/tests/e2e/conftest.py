@@ -43,3 +43,11 @@ def server_url(tmp_path_factory):
     yield url
     proc.terminate()
     proc.wait(timeout=10)
+
+
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args):
+    # No sound server for the browser: Chromium then plays to a silent device whose clock
+    # runs, so playback ends on time. Through a real sound server (PipeWire, say) an idle
+    # sink can hold the clock and `onended` never fires.
+    return {**browser_type_launch_args, "env": {**os.environ, "PULSE_SERVER": "unix:/nonexistent"}}

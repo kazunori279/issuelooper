@@ -705,7 +705,10 @@ def main():
                 "--use-fake-ui-for-media-stream",
                 "--use-fake-device-for-media-stream",
                 "--autoplay-policy=no-user-gesture-required",
-            ]
+            ],
+            # No sound server: playback goes to a silent device whose clock runs, so the
+            # app's speaking state ends on time (a real sound server can hold it).
+            env={**os.environ, "PULSE_SERVER": "unix:/nonexistent"},
         )
         try:
             (live if a.live else scripted)(browser, rec, a.out, a.port)

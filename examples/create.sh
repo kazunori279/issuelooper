@@ -63,7 +63,8 @@ git -C "$dir" push -q origin main
 
 if [ -x "$S/after_create.sh" ]; then
   say "prepare the app"
-  (cd "$dir" && "$S/after_create.sh")
+  (cd "$dir" && "$S/after_create.sh") || die "after_create.sh failed in $dir; fix it, then file the backlog with:
+  python3 $HERE/seed_issues.py $S/backlog.md --repo $slug"
 fi
 
 say "seed backlog"

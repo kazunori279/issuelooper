@@ -38,6 +38,8 @@ never run `make run` or `make scripted`.
 
 A short Playwright script (`uv run python <script>`), screenshots at 1280×800
 and 390×844, `timezone_id="Asia/Tokyo"`.
+Launch Chromium with `env={**os.environ, "PULSE_SERVER": "unix:/nonexistent"}`:
+through a real sound server, playback can stall and the status stays `speaking`.
 
 ## Spec check
 
