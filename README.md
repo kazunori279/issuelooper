@@ -50,14 +50,30 @@ that every write carries the role's marker. A pull request merges only when:
 | 3 | A test that failed before the fix passes after it (`Fail-before: <file> N -> M`), or a stated waiver. |
 | 4 | An issue whose acceptance needs the live environment is not closed by the merge. |
 | 5 | The reviewer passed this head. |
+| 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty). |
+
+Each gate checks the PR's head, and a head swept on an older `main` says nothing
+about the merged result: two PRs that do not conflict can still break `main`
+together (one moves an import the other still uses). With `[sweep] fast_command`
+set, the supervisor merges a PR whose head is behind `main` with the current
+`main` in a worktree before the gates and runs that quick check there (the app
+imports, the unit tests pass). A failure hands the PR back, unless `main` alone
+fails the check too, in which case nobody is blamed and the gates decide.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
 worker, model quota errors are waited out with backoff, silent sessions are
-resumed (sooner for models that step quickly), conflicting PRs that only add
-lines are rebased without an agent, and a file that keeps conflicting gets an
-issue to split it. When workers run out of issues, testers make the next work:
-extra UX runs and, if enabled, spec checks.
+resumed (sooner for models that step quickly; a reply that stops mid-stream counts
+too), and a session's clocks stand still while the agent CLI retries a failed model
+call (agy). Conflicting PRs that only add lines are rebased without an agent (once
+per head; a head whose rebase failed goes to a merger), a file that keeps
+conflicting gets an issue to split it, and a deploy that lost a race with another
+`git fetch` is tried again. Issues blocked by an open issue (a `Blocked by:` line
+or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the
+files that name the issue's backticked names and requirement ids (`[spec]
+id_pattern`), so it reads less to find its way. When workers run out of issues,
+testers make the next work: extra UX runs (never two at once) and, if enabled,
+spec checks.
 
 ## Requirements
 
@@ -154,7 +170,9 @@ When a decision is yours (what the product should do, a test that contradicts
 the spec), the monitor moves the issue to `stage:owner` and ends its reply with
 the question. Answer with a comment on the issue: the supervisor tells the
 monitor, which acts on it. An issue the workers failed three times also waits at
-`stage:owner`; any comment from you resets its attempts.
+`stage:owner`; any comment from you resets its attempts. So does an issue that
+failed its live check twice: the monitor lists what each fix changed and what each
+check saw, and asks whether the acceptance holds as written.
 
 To see what waits for you: `gh issue list --label stage:owner`.
 
@@ -211,7 +229,7 @@ Everything project-specific lives in `.issuelooper/` in your repository:
 
 | File | What it holds |
 |---|---|
-| `config.toml` | Agent CLI and model per role, where the monitor runs (herdr or headless), the sweep command, the deploy command, live checks, UX runs and spec checks on or off, review settings, pool limits. Each key maps to an environment variable, and an exported variable wins. `python3 .claude/hooks/config.py check` shows the result. |
+| `config.toml` | Agent CLI and model per role, where the monitor runs (herdr or headless), the sweep command and the quick merged-tree check, the deploy command, live checks, UX runs and spec checks on or off, review settings, pool limits, the owner's protected paths. Each key maps to an environment variable, and an exported variable wins. `python3 .claude/hooks/config.py check` shows the result. |
 | `project.md` | What agents cannot guess: how to set up a worktree, where a new test goes, how to run the app on a given port, where the spec is, live mode, secrets. Every session reads it. |
 | `review_rules.md` | Project rules the reviewer enforces on top of its two built-in checks. |
 | `monitor_kickoff.md` | Optional: the monitor's first message, for example the priorities of a seed backlog. |

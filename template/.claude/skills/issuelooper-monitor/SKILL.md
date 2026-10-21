@@ -49,7 +49,10 @@ time; answer them first. A message that needs nothing from you gets one line.
    behavior was right, so clear `stage:live` and close the issue. Without the
    line, hand it back: swap `stage:live` for `stage:triage` with a comment
    saying what the tester saw. If the tester says the rig cannot reach it,
-   decide (remove `needs:live` and close, or ask the owner).
+   decide (remove `needs:live` and close, or ask the owner). When this is the
+   issue's second failed live check, do not hand it back again: move it to
+   `stage:owner` with one comment listing what each fix changed and what each
+   check saw, and ask the owner whether the acceptance holds as written.
 5. **Act on stuck or failed work.** Retries, claim timeouts, hand-backs, review
    or merge-gate refusals, sweep waits and stuck units are operational: decide
    them yourself (re-scope the issue body, split it, re-queue it, hold it) and

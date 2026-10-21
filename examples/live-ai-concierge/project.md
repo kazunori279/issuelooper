@@ -8,6 +8,11 @@ The Live AI Concierge: FastAPI and vanilla JS in `src/concierge/` (`main.py`,
 never pip; the `data-testid` hooks of REQUIREMENTS §12; never hard-code values
 from `spec/fixtures/script.json` (the app is evaluated with another script).
 
+`spec/` is the owner's: merge gate 6 refuses a pull request that changes anything
+under it. A test that needs other scripted turns starts the app with its own
+script under `tests/` (`CONCIERGE_SCRIPT=tests/...`); a spec that looks wrong is a
+comment on the issue for the owner.
+
 ## Worktree setup
 
 `uv sync --frozen -q`
