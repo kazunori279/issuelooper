@@ -150,6 +150,20 @@ def test_agy_stream() -> None:
     )
     check("not while a tool runs", AGY.model_stalled([init, agy_step("ACTIVE")]), False)
     check(
+        "silent in the middle of a reply",
+        AGY.model_stalled([init, agy_step("ACTIVE", "agent_response")]),
+        True,
+    )
+    check(
+        "retrying a model call: the last step is an error_message",
+        (
+            AGY.in_model_retry([init, agy_step("DONE", "error_message")]),
+            AGY.in_model_retry([init, agy_step("DONE")]),
+            CLAUDE.in_model_retry([cl_init(), cl_text()]),
+        ),
+        (True, False, False),
+    )
+    check(
         "not after a result",
         AGY.model_stalled([init, {"event": "result", "result": {}}]),
         False,

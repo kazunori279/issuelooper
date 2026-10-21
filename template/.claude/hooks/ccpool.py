@@ -42,14 +42,15 @@ UNITS
   tester  (agent) with POOL_LIVE=1, one per stage:live issue each time it enters
           stage:live (the live check against the real services); with POOL_UX=1, a
           UX run at most every POOL_UX_GAP_MIN minutes, on the deployed sha (or on
-          main's head when there is no deploy command). When no worker or merger has
-          anything to do: another UX run once POOL_UX_IDLE_GAP_MIN passed since the
-          last, and with POOL_SPEC=1 a spec check (the app against the spec, one
+          main's head when there is no deploy command), never while another is
+          running. When no worker or merger has anything to do: another UX run once
+          POOL_UX_IDLE_GAP_MIN passed since the last, and with POOL_SPEC=1 a spec check (the app against the spec, one
           requirement at a time) every POOL_SPEC_GAP_MIN; what they file is the
           workers' next work. Each tester gets its own port.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
-monitor's; no unit is started for them. Issues labeled ux:proposed are proposals
+monitor's; no unit is started for them, and none for an issue with an open blocker
+(a `Blocked by:` line or a GitHub issue dependency). Issues labeled ux:proposed are proposals
 waiting for the owner: no unit and no triage. A reopened issue is an open issue
 like any other; its newest comments say why it came back.
 
@@ -73,7 +74,9 @@ times, each after a wait that doubles from POOL_QUOTA_WAIT_S up to
 POOL_QUOTA_WAIT_MAX_S; one that still ends on it is "quota error": no try spent and
 the claim released without a failed attempt. Every quota error also holds new
 agent sessions pool-wide for a doubling pause (quota_seen), reset when a session
-ends ok.
+ends ok. While the CLI itself retries a failed model call inside a turn (agy: the
+stream's last event is an error_message step), the session's clocks (timeout,
+wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session.
 
 CAPS (0 = unlimited)
 
@@ -86,9 +89,10 @@ DEPLOY
 
 With POOL_DEPLOY_CMD set, the supervisor deploys origin/main whenever it moved and
 that sha was not deployed or tried yet: it runs the command with `bash -c` in the
-shared checkout, with DEPLOY_SHA=<sha>, for at most POOL_DEPLOY_TIMEOUT_S. While a
-merger session is running it waits up to POOL_DEPLOY_GRACE_S, so one deploy carries
-both merges. Empty: no deploys.
+shared checkout, with DEPLOY_SHA=<sha>, for at most POOL_DEPLOY_TIMEOUT_S. A run
+that fails on git's "cannot lock ref" (another unit fetching into the same .git) is
+tried again after 5 s and 10 s. While a merger session is running it waits up to
+POOL_DEPLOY_GRACE_S, so one deploy carries both merges. Empty: no deploys.
 
 MONITOR
 
@@ -143,7 +147,8 @@ QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     open: issues(states: OPEN, first: 100) {
-      nodes { number title body updatedAt labels(first: 30) { nodes { name } } comments { totalCount } }
+      nodes { number title body updatedAt labels(first: 30) { nodes { name } } comments { totalCount }
+              issueDependenciesSummary { blockedBy } }
     }
     closed: issues(states: CLOSED, first: 60, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes { number title closedAt stateReason labels(first: 30) { nodes { name } } }
@@ -196,6 +201,9 @@ def ux_gap_s() -> float:
     return gap_s("POOL_UX_GAP", 25)
 
 
+DEPLOY_LOCK_PAUSE_S = 5  # deploy() retries a ref-lock failure after 5 s, then 10 s
+
+
 def quota_backoff(k: int, base: float, cap: float) -> float:
     """The wait before the k-th (1-based) resume after a quota error: base, 2x, 4x ..., capped."""
     return min(cap, base * 2 ** max(0, k - 1))
@@ -229,6 +237,9 @@ class Config:
     stall_s: float = 600
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
+    # The most a session's clocks stand still for the CLI's own retries of a model call;
+    # 20 min was not enough for a model whose calls kept failing for a while.
+    retry_pause_max_s: float = 2400
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     fast_check_s: float = 300
     stale_min: int = 60
@@ -244,7 +255,7 @@ class Config:
     split_per_window: int = 1
     split_lines: int = 900
     worker_wrap_s: float = 2100
-    worker_wrap_budget_s: float = 480
+    worker_wrap_budget_s: float = 720
     tst_port: int = 8021
     tst_port_step: int = 100
     ccrole: str = str(HERE / "ccrole.sh")
@@ -291,6 +302,7 @@ class Config:
             stall_s=float(e("POOL_STALL_S", "600")),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
+            retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
@@ -305,7 +317,8 @@ class Config:
             split_per_window=env_int("POOL_SPLIT_PER_WINDOW", 1),
             split_lines=env_int("POOL_SPLIT_LINES", 900),
             worker_wrap_s=float(e("POOL_WORKER_WRAP_S", "2100")),
-            worker_wrap_budget_s=float(e("POOL_WORKER_WRAP_BUDGET_S", "480")),
+            # 12 min: workers on slower models ran out of 8 before they had pushed.
+            worker_wrap_budget_s=float(e("POOL_WORKER_WRAP_BUDGET_S", "720")),
             tst_port=env_int("TST_PORT", 8021),
             tst_port_step=env_int("POOL_TESTER_PORT_STEP", 100),
             ccrole=e("POOL_CCROLE", str(HERE / "ccrole.sh")),
@@ -336,6 +349,8 @@ def normalize(data: dict) -> dict:
                 "updated": n.get("updatedAt", ""),
                 "labels": names(n),
                 "comments": (n.get("comments") or {}).get("totalCount", 0),
+                # open issues blocking this one through GitHub's own dependencies
+                "blocked_by": (n.get("issueDependenciesSummary") or {}).get("blockedBy", 0),
             }
             for n in r["open"]["nodes"]
         ],
@@ -421,7 +436,9 @@ def fetch(cfg: Config) -> dict:
 def signature(st: dict) -> str:
     """ccwake_sig.py's idea, for the whole queue: a hash of what the units read."""
     items = [f"main@{st['main']}"]
-    items += [f"o{i['number']}@{i['updated']}:{','.join(i['labels'])}" for i in st["open"]]
+    items += [
+        f"o{i['number']}@{i['updated']}:{','.join(i['labels'])}:{i.get('blocked_by', 0)}" for i in st["open"]
+    ]
     items += [f"c{i['number']}:{','.join(i['labels'])}" for i in st["closed"]]
     items += [f"p{p['number']}@{p['head']}:{p['mergeable']}" for p in st["prs"]]
     return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()[:16]
@@ -436,6 +453,11 @@ def pr_issue(pr: dict) -> int | None:
 
 
 def blocked(issue: dict, open_numbers: set[int]) -> bool:
+    """An open blocker, a GitHub dependency or a `Blocked by:` line. claim.py refuses
+    both too, but leaving the native ones to it started a unit per issue per poll that
+    it only refused."""
+    if issue.get("blocked_by"):
+        return True
     for m in claimlib.BLOCKED_LINE.finditer(issue.get("body") or ""):
         if any(int(x) in open_numbers for x in claimlib.NUM.findall(m.group(1))):
             return True
@@ -638,7 +660,10 @@ def plan(
     for k in set(book.unknown_since) - seen_prs:
         del book.unknown_since[k]
 
-    if cfg.ux and ux_sha and now - book.last_ux_t >= cfg.ux_gap_s:
+    # Never beside a running UX run: a slow run outlasts the gap, and the overlapping
+    # runs test the same app and file the same findings.
+    ux_running = any(u.kind == "ux" for u in book.running.values())
+    if cfg.ux and ux_sha and not ux_running and now - book.last_ux_t >= cfg.ux_gap_s:
         units.append(
             Unit(
                 "tester",
@@ -660,7 +685,8 @@ def plan(
     )
     if ux_sha and not busy:
         info = {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd)}
-        if cfg.ux and not any(u.kind == "ux" for u in units) and now - book.last_ux_t >= cfg.ux_idle_gap_s:
+        if (cfg.ux and not ux_running and not any(u.kind == "ux" for u in units)
+                and now - book.last_ux_t >= cfg.ux_idle_gap_s):
             units.append(Unit("tester", "ux", f"ux:{ux_sha[:12]}:idle{book.extra_runs}",
                               f"tst:ux:{ux_sha[:12]}", None, (2, 0, 0), {**info, "idle": True}))
         if cfg.spec and now - book.last_spec_t >= cfg.spec_gap_s:
@@ -988,7 +1014,9 @@ class Session(threading.Thread):
         # The CLI's own limit (agy's print timeout) is the hard deadline; the soft one
         # ends a session that is past its timeout and has gone quiet.
         soft, hard = start + seconds(timeout), start + seconds(timeout) + 900
-        cmd = base + cli.first_turn(prompt, hard - start)
+        # The CLI's own limit leaves room for the clocks to stand still (below); the
+        # supervisor enforces the rest.
+        cmd = base + cli.first_turn(prompt, hard - start + cfg.retry_pause_max_s)
         with open(self.dir / "wrapper.err", "w") as err:
             self.proc = subprocess.Popen(
                 cmd,
@@ -1008,6 +1036,10 @@ class Session(threading.Thread):
             # ended with nothing saved.
             wrap_at = start + cfg.worker_wrap_s if role == "worker" and cfg.worker_wrap_s else None
             wrapped = False
+            # Time the CLI spent retrying a failed model call inside a turn. Most worker
+            # timeouts on one model were sessions waiting there; the clocks stop for it,
+            # so the work gets its full budget.
+            paused, tick = 0.0, time.time()
 
             def resume(conv: str, why: str, text: str = "", budget: float = 0) -> None:
                 nonlocal resumes
@@ -1019,7 +1051,7 @@ class Session(threading.Thread):
                         "Continue the task from where you stopped."
                     ),
                     conv,
-                    budget or max(60, hard - time.time()),
+                    (budget or max(60, hard - time.time())) + cfg.retry_pause_max_s - paused,
                 )
                 with open(self.dir / "resumes.log", "a") as rl:
                     rl.write(f"{time.time():.0f} resume {resumes} conversation {conv} ({why})\n")
@@ -1031,6 +1063,15 @@ class Session(threading.Thread):
                 try:
                     rc = self.proc.wait(timeout=15)
                 except subprocess.TimeoutExpired:
+                    now = time.time()
+                    step, tick = now - tick, now
+                    retrying = paused < cfg.retry_pause_max_s and self.in_model_retry()
+                    if retrying:
+                        add = min(step, cfg.retry_pause_max_s - paused)
+                        paused += add
+                        soft, hard = soft + add, hard + add
+                        if wrap_at and not wrapped:
+                            wrap_at += add
                     quiet = self.quiet_s()
                     if time.time() > hard + 300 or (time.time() > soft and quiet > 300):
                         self.kill()
@@ -1051,8 +1092,9 @@ class Session(threading.Thread):
                             continue
                     # The model went silent after a step finished (no tool is running):
                     # workers have stopped for half an hour right after a test run
-                    # printed its result, until they timed out.
-                    stall_s = self.stall_after(cfg)
+                    # printed its result, until they timed out. The CLI waiting between
+                    # its own retries is not a stall (until the pause cap).
+                    stall_s = 0 if retrying else self.stall_after(cfg)
                     conv = self.model_stalled(stall_s) if stall_s else None
                     if conv and stall_k < 2 and hard - time.time() > 120:
                         stall_k += 1
@@ -1086,12 +1128,15 @@ class Session(threading.Thread):
                         resume(conv, f"exited with {rc}, quota resume {quota_k} after {wait:.0f} s")
                         rc = None
         elapsed = time.time() - start
+        if paused:
+            with open(self.dir / "resumes.log", "a") as rl:
+                rl.write(f"{time.time():.0f} clocks paused {paused:.0f} s in the CLI's model-call retries\n")
         try:
             errtext = (self.dir / "session.err").read_text(errors="replace")
         except OSError:
             errtext = ""
         timed_out = (rc == 124 or bool(cli.timeout_text and cli.timeout_text in errtext)
-                     or elapsed >= seconds(timeout) + 900)
+                     or elapsed >= seconds(timeout) + 900 + paused)
         return rc, elapsed, timed_out
 
     def events(self) -> list[dict]:
@@ -1129,6 +1174,10 @@ class Session(threading.Thread):
             return None
         events = self.events()
         return self.cli.session_id(events) if self.cli.model_stalled(events) else None
+
+    def in_model_retry(self) -> bool:
+        """Whether the CLI is retrying a failed model call inside the turn (agent_cli)."""
+        return self.cli.in_model_retry(self.events())
 
     def quota_stalled(self, quiet: float = 60):
         """The session id when the stream's last event is a result that ended on a
@@ -1965,14 +2014,21 @@ class Pool:
         root = repo_root()
         subprocess.run(["git", "-C", str(root), "fetch", "-q", "origin", "main"],
                        capture_output=True, timeout=300)
-        try:
-            r = subprocess.run(
-                ["bash", "-c", self.cfg.deploy_cmd], cwd=root, env=dict(os.environ, DEPLOY_SHA=sha),
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=self.cfg.deploy_timeout_s,
-            )
-            ok, out = r.returncode == 0, (r.stdout + r.stderr)[-1500:]
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            ok, out = False, str(exc)
+        # A deploy command that fetches shares the .git that worktrees and other units
+        # fetch into; a concurrent fetch fails it with "cannot lock ref", and production
+        # stays a merge behind until main moves again. Try again after a pause.
+        for attempt in range(3):
+            try:
+                r = subprocess.run(
+                    ["bash", "-c", self.cfg.deploy_cmd], cwd=root, env=dict(os.environ, DEPLOY_SHA=sha),
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=self.cfg.deploy_timeout_s,
+                )
+                ok, out = r.returncode == 0, (r.stdout + r.stderr)[-1500:]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                ok, out = False, str(exc)
+            if ok or "cannot lock ref" not in out:
+                break
+            time.sleep(DEPLOY_LOCK_PAUSE_S * (attempt + 1))
         with open(self.cfg.logdir / "deploy.log", "a") as f:
             f.write(f"--- {time.strftime('%H:%M:%S')} {sha[:12]} ok={ok}\n{out}\n")
         with open(self.cfg.logdir / "deploys.jsonl", "a") as f:
@@ -1983,8 +2039,11 @@ class Pool:
                 self.own_deployed = sha
         self.log("deployed" if ok else "deploy_failed", sha=sha[:12])
         if not ok:
+            # Not tried again for this sha: until main moves, production stays on the
+            # last good deploy, and main may be broken.
             self.event(
-                f"deploy of {sha[:12]} FAILED (see {self.cfg.logdir}/deploy.log): "
+                f"deploy of {sha[:12]} FAILED, so production stays on "
+                f"{(self.own_deployed or 'nothing deployed yet')[:12]} (see {self.cfg.logdir}/deploy.log): "
                 f"{out.strip().splitlines()[-1] if out.strip() else ''}"
             )
         self.wake.set()

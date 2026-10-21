@@ -200,11 +200,13 @@ def test_what_is_not_claimable() -> None:
             iss(4, ["stage:doing", "P0"], updated="2099-01-01T00:00:00Z"),
             iss(5, ["stage:owner", "P1"]),
             iss(6, ["stage:triage", "P2"], body="Blocked by: #99"),
+            {**iss(7, ["stage:triage", "P0"]), "blocked_by": 1},  # a GitHub dependency
         ]
     )
     h = Rig(st)
     check(
-        "held, blocked, in flight and owner issues start nothing; a closed blocker does not block",
+        "held, blocked (a line or a GitHub dependency), in flight and owner issues start nothing; "
+        "a closed blocker does not block",
         keys(h.step()),
         ["wrk:6@2026-10-09T10:00:00Z"],
     )
@@ -501,6 +503,7 @@ def test_normalize_graphql() -> None:
                             "labels": {
                                 "nodes": [{"name": "stage:triage"}, {"name": "P1"}]
                             },
+                            "issueDependenciesSummary": {"blockedBy": 2},
                         }
                     ]
                 },
@@ -540,6 +543,9 @@ def test_normalize_graphql() -> None:
         7,
     )
     check("normalize: main", st["main"], "m")
+    check("normalize: open GitHub blockers", st["open"][0]["blocked_by"], 2)
+    moved = {**st, "open": [{**st["open"][0], "blocked_by": 0}]}
+    check("a blocker closing moves the signature", ccpool.signature(st) != ccpool.signature(moved), True)
 
 
 class FakeBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -758,6 +764,30 @@ def test_deploy_safety_net() -> None:
     )
 
 
+def test_deploy_retries_a_ref_lock() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-lockdeploy-"))
+    # Fails once with git's ref-lock error, then deploys.
+    cmd = (f"echo try >> {d}/calls; if [ $(wc -l < {d}/calls) -lt 2 ]; then "
+           "echo \"error: cannot lock ref 'refs/remotes/origin/main': is at a but expected b\" >&2; exit 1; fi; "
+           "echo deployed")
+    pause = ccpool.DEPLOY_LOCK_PAUSE_S
+    ccpool.DEPLOY_LOCK_PAUSE_S = 0
+    try:
+        h = Rig(state(main="e" * 40), deploy_cmd=cmd)
+        h.pool.deploying = True
+        h.pool.deploy("e" * 40)
+        check("a ref-lock failure is tried again", (d / "calls").read_text().count("try"), 2)
+        check("and the retry counts", h.pool.own_deployed, "e" * 40)
+        (d / "calls").write_text("")
+        h.pool.cfg.deploy_cmd = f"echo try >> {d}/calls; echo broken >&2; exit 1"
+        h.pool.deploy("c" * 40)
+        check("any other failure is not", (d / "calls").read_text().count("try"), 1)
+        check("and the monitor hears where production stays",
+              [e for e in h.pool.events if "FAILED" in e and "production stays on eeeeeeeeeeee" in e].__len__(), 1)
+    finally:
+        ccpool.DEPLOY_LOCK_PAUSE_S = pause
+
+
 def test_live_rechecked_on_each_entry() -> None:
     """A re-entry into stage:live after a hand-back or a reopen gets a new check (a key
     of live:{n} alone ran once per supervisor)."""
@@ -961,6 +991,11 @@ def test_idle_pool_makes_tester_work() -> None:
     again = h.step(600)
     check("another idle UX run after POOL_UX_IDLE_GAP_MIN, the spec check waits",
           [u.kind for u in again], ["ux"])
+    h.st = state(main="c" * 40)  # a newer sha to test
+    check("no UX run while one is going, even on a newer sha, scheduled or idle",
+          [u.key for u in h.step(2000) if u.kind == "ux"], [])
+    h.finish(again[0].key)
+    check("one starts once it ended", [u.key for u in h.step(1) if u.kind == "ux"], [f"ux:{'c' * 12}"])
     spec = next(u for u in later if u.kind == "spec")
     text = ccpool.tester_prompt(spec, 8021, "60m")
     check("the spec check prompt", ("Spec check" in text, "at most five" in text, "does not deploy" in text),
@@ -1575,8 +1610,12 @@ if "--conversation" in args:
 print(json.dumps({"event": "init", "conversation_id": "conv-7"}), flush=True)
 step = sys.argv[0].endswith("busy")
 state = "ACTIVE" if step else "DONE"
-print(json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": state,
-      "step_type": "tool", "tool_name": "run_command"}}), flush=True)
+if sys.argv[0].endswith("midreply"):  # a reply that started and went quiet
+    print(json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": "ACTIVE",
+          "step_type": "agent_response", "text_delta": "Reproduced. Now the fix"}}), flush=True)
+else:
+    print(json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": state,
+          "step_type": "tool", "tool_name": "run_command"}}), flush=True)
 time.sleep(40 if step else 120)
 print(json.dumps({"event": "result", "result": {"response": "the long command ended"}}), flush=True)
 """
@@ -1627,6 +1666,8 @@ def test_silent_model_is_resumed() -> None:
     check("told why", "stopped responding" in calls[1][calls[1].index("--print") + 1], True)
     rc, timed_out, calls = stall_session("agy-busy")
     check("silent while a tool is running: left alone", (rc, len(calls)), (0, 1))
+    rc, timed_out, calls = stall_session("agy-midreply")
+    check("silent in the middle of a reply: resumed", (rc, timed_out, len(calls)), (0, False, 2))
     rc, timed_out, calls = stall_session("claude-silent", "claude")
     check("claude: silent after a tool result: resumed", (rc, timed_out, len(calls)), (0, False, 2))
     check("claude: in the same session, told why",
@@ -1643,7 +1684,7 @@ def test_worker_wrap_up() -> None:
     agy.chmod(0o755)
     pool = ccpool.Pool(
         ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"worker": "60m"},
-                      worker_wrap_s=1, worker_wrap_budget_s=90),
+                      worker_wrap_s=1, worker_wrap_budget_s=90, retry_pause_max_s=0),
         fetcher=state, spawn=False,
     )
     w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
@@ -1660,6 +1701,38 @@ def test_worker_wrap_up() -> None:
         ("conv-1", True, "90s"),
     )
     check("and ends cleanly well before its timeout", (rc, timed_out, time.time() - t0 < 60), (0, False, True))
+
+
+FAKE_AGY_RETRY = r"""#!/usr/bin/env python3
+import json, sys, time
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+print(json.dumps({"event": "init", "conversation_id": "conv-9"}), flush=True)
+print(json.dumps({"event": "step_update", "step_update": {"step_index": 4, "state": "DONE",
+      "step_type": "error_message", "duration_seconds": 0}}), flush=True)
+time.sleep(18)
+print(json.dumps({"event": "result", "result": {"response": "pushed after the retries"}}), flush=True)
+"""
+
+
+def test_clocks_stop_during_agy_retries() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-retry-"))
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_RETRY)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(
+        ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"worker": "60m"},
+                      worker_wrap_s=5, worker_wrap_budget_s=90, stall_s=2),
+        fetcher=state, spawn=False,
+    )
+    w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:6@x", "wrk:6", 6, (4,), {}), 1)
+    w.dir.mkdir(parents=True)
+    rc, _, timed_out = w.session("do issue 6", dict(os.environ))
+    calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+    check("agy retrying a model call: no wrap-up and no stall resume", (rc, timed_out, len(calls)), (0, False, 1))
+    check("agy's own print timeout has room for the pause",
+          calls[0][calls[0].index("--print-timeout") + 1], f"{3600 + 900 + 2400}s")
+    check("the pause is logged", "clocks paused" in (w.dir / "resumes.log").read_text(), True)
 
 
 def git_repo(d: pathlib.Path):
