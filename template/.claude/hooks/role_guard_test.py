@@ -1757,6 +1757,51 @@ def test_worker_git_boundaries() -> None:
     check("worker committing project files is allowed", verdict, "allow")
     verdict, _ = run("git push origin main", role="merger")
     check("the push rule is the worker's only (merger unchanged)", verdict, "allow")
+    verdict, _ = run('git push -u origin "HEAD:issue-5"\necho "PR against main next"', role="worker")
+    check("a command ends at a newline: `main` on the next line is not the push's", verdict, "allow")
+    verdict, _ = run("cd /tmp/wrk-3-12-wt\ngit push origin HEAD:main", role="worker")
+    check("a push to main on its own line is still refused", verdict, "refuse")
+
+
+def test_merger_merges_only_a_head_on_current_main() -> None:
+    """Gate 7. A merger rebased PR #11 and swept it green; the supervisor merged
+    another PR meanwhile, and the merger's merge broke main's tests."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("role_guard_mod", GUARD)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    d = pathlib.Path(tempfile.mkdtemp(prefix="role-guard-g7-"))
+    origin, repo = d / "origin.git", d / "repo"
+
+    def git(*args: str, cwd: pathlib.Path = repo) -> str:
+        return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True, capture_output=True)
+    for k, v in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
+        git("config", k, v)
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    git("push", "-q", "origin", "main")
+    git("checkout", "-q", "-b", "issue-5")
+    git("commit", "-q", "--allow-empty", "-m", "the fix, rebased on base")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "another PR merged meanwhile")
+    git("push", "-q", "origin", "main")
+    git("reset", "-q", "--hard", "HEAD~1")  # the shared checkout has not fetched it yet
+    old = os.environ.get("SHARED_REPO_PATH")
+    os.environ["SHARED_REPO_PATH"] = str(repo)
+    try:
+        check("a head behind the current main is counted (after a fetch)",
+              guard.commits_behind_main(head), 1)
+        git("checkout", "-q", "issue-5")
+        git("rebase", "-q", "origin/main")
+        check("rebased onto it: nothing behind", guard.commits_behind_main(git("rev-parse", "HEAD")), 0)
+        check("an unknown head is fail-open", guard.commits_behind_main("f" * 40), 0)
+    finally:
+        os.environ["SHARED_REPO_PATH"] = old or ""
 
 
 def test_worker_pr_create_is_gated_and_signed() -> None:

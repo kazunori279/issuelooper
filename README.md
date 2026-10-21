@@ -55,6 +55,7 @@ that every write carries the role's marker. A pull request merges only when:
 | 4 | An issue whose acceptance needs the live environment is not closed by the merge. |
 | 5 | The reviewer passed this head. |
 | 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty). |
+| 7 | A merger session merges only a head that contains the current `main` (the supervisor's own merges use the check below). |
 
 Each gate checks the PR's head, and a head swept on an older `main` says nothing
 about the merged result: two PRs that do not conflict can still break `main`

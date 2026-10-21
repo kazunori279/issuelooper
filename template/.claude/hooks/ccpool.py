@@ -270,6 +270,15 @@ class Config:
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
     guard_cmd: str = f"{sys.executable} {HERE / 'role_guard.py'}"
 
+    def wrap_s(self) -> float:
+        """When a worker gets its wrap-up turn: POOL_WORKER_WRAP_S, but no later than
+        three quarters of the worker timeout, so a short timeout still leaves time to
+        save the work (20 minutes wraps up at 15)."""
+        if not self.worker_wrap_s:
+            return 0.0
+        timeout = self.timeouts.get("worker")
+        return min(self.worker_wrap_s, 0.75 * seconds(timeout)) if timeout else self.worker_wrap_s
+
     @classmethod
     def from_env(cls) -> "Config":
         e = os.environ.get
@@ -1116,7 +1125,7 @@ class Session(threading.Thread):
             # conversation with a few minutes to commit and release: workers that ran
             # their full timeout were a quarter of all worker time, and most of them
             # ended with nothing saved.
-            wrap_at = start + cfg.worker_wrap_s if role == "worker" and cfg.worker_wrap_s else None
+            wrap_at = start + cfg.wrap_s() if role == "worker" and cfg.wrap_s() else None
             wrapped = False
             # Time the CLI spent retrying a failed model call inside a turn. Most worker
             # timeouts on one model were sessions waiting there; the clocks stop for it,
@@ -1370,7 +1379,7 @@ class Session(threading.Thread):
             except (OSError, subprocess.SubprocessError):
                 files = ""
             prompt = worker_prompt(claim, str(self.seq), cfg.timeouts["worker"], pool, wip,
-                                   cfg.live, int(cfg.worker_wrap_s // 60) or 35,
+                                   cfg.live, int(cfg.wrap_s() // 60) or 35,
                                    issue_text(thread) if thread else "", files)
         elif u.role == "merger":
             env.update(MERGE_PR=str(u.number))

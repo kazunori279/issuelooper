@@ -31,8 +31,9 @@ them all.
 ## #4 Add --json to print the counts as JSON
 meta: type:feature-request P2 | blocked_by: 2
 
-`uv run textstats --json FILE` prints one JSON object instead of the text lines:
-`{"lines": 2, "words": 5, "chars": 27}`. With `--top N` it also has `"top"`, a list of
+`uv run textstats --json FILE` prints one JSON object instead of the text lines,
+with every count the text output has: `{"lines": 2, "words": 5, "chars": 27}` today,
+and any count added later (such as sentences) under its own key. With `--top N` it also has `"top"`, a list of
 `{"word": ..., "count": ...}` in the same order as the text output.
 
 ## #5 A UTF-8 byte order mark is counted as a character

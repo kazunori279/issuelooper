@@ -53,7 +53,7 @@ say "GitHub repository $slug"
 gh repo create "$slug" "$visibility" --disable-wiki --source "$dir" --remote origin --push
 
 say "install issuelooper"
-"$ROOT/install.sh" "$dir" | sed '/^Next:/,$d'   # this script does the next steps
+"$ROOT/install.sh" "$dir" | sed -e '/^Next:/,$d' -e 's/ (not pushed)$//'   # this script pushes and does the next steps
 
 say "configure issuelooper for the $sample sample"
 cp "$S"/issuelooper/* "$dir/.issuelooper/"

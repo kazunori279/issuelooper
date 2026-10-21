@@ -1702,6 +1702,16 @@ def test_silent_model_is_resumed() -> None:
     check("claude: a tool_use with no result yet is left alone", (rc, len(calls)), (0, 1))
 
 
+def test_wrap_up_fits_the_timeout() -> None:
+    """With a 20-minute timeout a 35-minute wrap-up never came: the worker was killed
+    first, and the prompt promised a wrap-up it would never get."""
+    cfg = ccpool.Config(timeouts={**ccpool.Config().timeouts, "worker": "20m"})
+    check("a short timeout wraps up at three quarters of it", cfg.wrap_s(), 900.0)
+    cfg = ccpool.Config(timeouts={**ccpool.Config().timeouts, "worker": "60m"})
+    check("a long one keeps POOL_WORKER_WRAP_S", cfg.wrap_s(), cfg.worker_wrap_s)
+    check("off stays off", ccpool.Config(worker_wrap_s=0).wrap_s(), 0.0)
+
+
 def test_worker_wrap_up() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-wrap-"))
     agy = d / "ccrole"

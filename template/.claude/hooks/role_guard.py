@@ -97,12 +97,14 @@ ISSUE_EDIT_SEGMENT = re.compile(r"\bgh\s+issue\s+edit\b([^|;&]*)")
 REST_LABELS_TARGET = re.compile(r"/issues/(\d+)/labels\b")
 # A push whose refspec lands on main, in any spelling: `main`, `HEAD:main`,
 # `refs/heads/main`, `+main`. Pushing a branch named `issue-N-main` is not one.
-GIT_PUSH = re.compile(r"\bgit\b(?:\s+-C\s+\S+)?\s+push\b([^|;&]*)")
+# A command ends at a newline too: a push followed on the next line by `gh pr create
+# --base main` is not a push to main.
+GIT_PUSH = re.compile(r"\bgit\b(?:\s+-C\s+\S+)?\s+push\b([^|;&\n]*)")
 PUSH_TO_MAIN = re.compile(r"(?:^|\s)\+?(?:[^\s:]*:)?(?:refs/heads/)?main(?=\s|$)")
 # The worker commits in its worktree; .claude/, .agents/ and .issuelooper/ are the
 # owner's (the pre-commit hook refuses them too).
 GIT_FRAMEWORK_PATHS = re.compile(
-    r"\bgit\b[^|;&]*\b(?:add|commit|rm|mv|checkout|restore)\b[^|;&]*(?:^|[\s/])\.(?:claude|agents|issuelooper)(?:/|\s|$)"
+    r"\bgit\b[^|;&\n]*\b(?:add|commit|rm|mv|checkout|restore)\b[^|;&\n]*(?:^|[\s/])\.(?:claude|agents|issuelooper)(?:/|\s|$)"
 )
 NO_VERIFY = re.compile(r"\bgit\b[^|;&]*\b(?:commit|push)\b[^|;&]*--no-verify\b")
 
@@ -1153,6 +1155,23 @@ def check_shared_checkout_clean() -> None:
         pass
 
 
+def commits_behind_main(head_sha: str) -> int:
+    """How many commits origin/main has that the head lacks, after fetching main into
+    the shared checkout (worktrees share its objects, so a merger's head is there).
+    0 when unknown: no checkout, git fails, the head is not here. Fail-open."""
+    repo_dir = get_shared_repo_dir()
+    if not head_sha or not os.path.exists(repo_dir):
+        return 0
+    try:
+        subprocess.run(["git", "-C", repo_dir, "fetch", "-q", "origin", "main"],
+                       capture_output=True, timeout=30)
+        done = subprocess.run(["git", "-C", repo_dir, "rev-list", "--count", f"{head_sha}..origin/main"],
+                              capture_output=True, text=True, timeout=10)
+        return int(done.stdout.strip()) if done.returncode == 0 else 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0
+
+
 def check_pr_merge(command: str) -> None:
     """Pre-merge gates 0-6, in the order a refusal is cheapest to act on.
 
@@ -1181,6 +1200,11 @@ def check_pr_merge(command: str) -> None:
     written by review_gate.py). See review_gate_check.
 
     Gate 6: the PR changes nothing under $GUARD_PROTECTED_PATHS, the owner's files.
+
+    Gate 7 (merger sessions): the head contains the current origin/main. The sweep
+    and the review saw the head on the main it was rebased onto; when main moved
+    since, two changes that merge cleanly can still break main together. The
+    supervisor's own merges check such a head merged with main instead.
     """
     check_shared_checkout_clean()
     repo_match = REPO_FLAG.search(command)
@@ -1254,6 +1278,19 @@ def check_pr_merge(command: str) -> None:
                 "If the label is wrong — the acceptance really is checkable from a "
                 "test — say so on the issue. The monitor clears it; a merge does not."
             )
+
+        # Gate 7: a merger merges only a head that contains the current main.
+        if os.environ.get("CC_ROLE", "").strip().lower() == "merger":
+            behind = commits_behind_main(head_sha)
+            if behind:
+                block(
+                    f"{target}'s head `{head_sha[:12]}` is {behind} commit(s) behind origin/main: main "
+                    "moved after you rebased, so your sweep says nothing about the merged result. "
+                    "Two changes that merge cleanly can still break main together (one changes "
+                    "output another's test reads).\n\n"
+                    "Rebase onto origin/main again, resolve, run the sweep again "
+                    "(`sweep_locked.py --update-pr`), push, and merge the new head."
+                )
 
         # Gate 6: the protected paths are the owner's.
         protected = protected_paths()

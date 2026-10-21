@@ -3,7 +3,8 @@
 A first run of issuelooper in 15-30 minutes. The app is `textstats`, a small Python
 command-line tool that counts words and characters, with a deliberate bug. Six
 issues ask the loop to fix two bugs and add four features; you watch it work through
-them in parallel, talk to the monitor, and file an issue of your own.
+them in parallel (15-30 minutes), then talk to the monitor and file an issue of
+your own (about 15 more).
 
 ## Before you start
 
@@ -68,13 +69,14 @@ status view (bottom left), and the dashboard is at <http://127.0.0.1:8780/>.
 Follow it on the dashboard, in the status pane, or on GitHub (issues move from
 `stage:triage` to `stage:doing` to `stage:pr`, then close).
 
-## 4. Take part (5-10 minutes)
+## 4. Take part (about 15 minutes)
 
 - **Ask the monitor**, in its pane: "What has merged so far, and what is still
   open?"
 - **File an issue through the aide**, in its pane: "File an issue: add
   `--min-length N` to `--top`, so words shorter than N letters are skipped." The
-  aide files it at `stage:triage`; the monitor triages it and a worker picks it up.
+  aide files it at `stage:triage` with a priority, so a worker picks it up within
+  seconds; it ships in about 15 minutes.
 - **Try the result**: `git pull && uv run textstats README.md --top 3`.
 
 ## 5. Stop
