@@ -39,7 +39,7 @@ performed on 2026-10-21 with macOS 26.7 (arm64), Python 3.13.7 and Claude Code
 
 ## End-to-end result
 
-A private [validation repository](https://github.com/kazunori279/issuelooper-mac-e2e-20261021)
+A private validation repository (deleted after the run)
 used the hello-world app, `[agents] cli = "claude"`, `[monitor] host = "broker"`
 and `[pool] max_sessions = 3`, with review enabled and live/UX/spec testing disabled.
 The monitor triaged two issues and made the second depend on the first.
@@ -51,8 +51,8 @@ tests, swept each PR head, passed the real Claude reviewer and automatically mer
 
 | Issue | PR | Sweep | Merged (UTC) |
 |---|---|---|---|
-| Repeated whitespace counts | [#3](https://github.com/kazunori279/issuelooper-mac-e2e-20261021/pull/3) | 8 passed | 05:34:15 |
-| Initial UTF-8 byte order mark | [#4](https://github.com/kazunori279/issuelooper-mac-e2e-20261021/pull/4) | 15 passed | 05:35:39 |
+| Repeated whitespace counts | #3 | 8 passed | 05:34:15 |
+| Initial UTF-8 byte order mark | #4 | 15 passed | 05:35:39 |
 
 No worker, branch, PR or issue needed manual intervention during this final run.
 Both issues closed, the queue became empty and the validation loop was stopped.
