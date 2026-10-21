@@ -91,14 +91,19 @@ issues at once.
 
 ## 3. What happens
 
-- **First hour or two:** the minimum viable product. Live mode is built in stages
-  (typed text through ADK, the model's voice, the microphone, voice input), then the
-  web answer and places cards and their live tools, barge-in, reconnects, startup
-  checks. Each `needs:live` issue merges with `Refs #N` and closes after a tester's
-  live check against the real model.
-- **Then:** settings, the other cards and their live tools, history, profiles,
-  memory, localization, docs. From the first merges on, UX runs file what gets in a
-  user's way, and they become a growing share of the work.
+- **The first hour:** 16 workers take the issues by priority. In our test run of
+  this sample, 30 of the 54 seed issues closed in the first hour: most of the cards,
+  the bugs, settings and docs, all in scripted mode. Live mode is built in stages
+  (typed text through ADK in #1, then the model's voice, the microphone, voice input,
+  and the live tools for the cards). #1 is the largest single step: in our run its
+  first worker timed out at 45 minutes, and the next one carried on from the saved
+  work. The other live issues wait for it. Each `needs:live` issue merges with
+  `Refs #N` and closes after a tester's live check against the real model.
+- **UX runs from the start:** the first one walked the starting app 10 minutes in,
+  scored it 28 of 100 and filed five `UX: ...` issues (starter chips missing on a
+  phone, raw JSON in a card, a message lost while disconnected); three were fixed
+  within the hour. Every 25 minutes another run files what it finds, and these
+  become a growing share of the work.
 - **When the workers run out of issues:** extra UX runs and spec checks, one
   requirement at a time, make the next work.
 
