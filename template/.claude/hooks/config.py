@@ -51,6 +51,7 @@ KEYS = {
     ("ux", "idle_gap_minutes"): "POOL_UX_IDLE_GAP_MIN",
     ("spec", "enabled"): "POOL_SPEC",
     ("spec", "gap_minutes"): "POOL_SPEC_GAP_MIN",
+    ("spec", "id_pattern"): "POOL_MAP_ID_PATTERN",
     ("review", "enabled"): "REVIEW_GATE",
     ("review", "rules"): "REVIEW_RULES",
     ("review", "production_paths"): "REVIEW_PATHS",

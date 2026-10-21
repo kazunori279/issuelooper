@@ -1749,6 +1749,35 @@ def git_repo(d: pathlib.Path):
     return work, g
 
 
+def test_worker_prompt_carries_the_issue_and_a_file_map() -> None:
+    thread = {"body": "Add `forget-history` to settings (R-SET-7).", "comments": [
+        {"a": "bot", "b": "<!-- worker --> <!-- claim loop=3 token=t from=stage:triage --> Claimed by worker loop 3."},
+        *({"a": "owner", "b": f"note {i}"} for i in range(8)),
+    ]}
+    text = ccpool.issue_text(thread)
+    check("body and the newest comments, claim notices left out",
+          (text.startswith("Add `forget-history`"), "note 7" in text, "note 1" in text, "Claimed" in text,
+           "(2 older comments not shown)" in text), (True, True, False, False, True))
+    work, g = git_repo(pathlib.Path(tempfile.mkdtemp(prefix="ccpool-map-")))
+    for path, body in (("src/settings.js", "a\nconst b = 'forget-history';\n"),
+                       ("docs/REQUIREMENTS.md", "R-SET-7 Forget my history\n"),
+                       (".claude/hooks/x.py", "forget-history\n")):  # the framework's own files
+        (work / path).parent.mkdir(parents=True, exist_ok=True)
+        (work / path).write_text(body)
+    g("add", "-f", ".")
+    g("commit", "-qm", "x")
+    check("files that name the issue's backticked names, with lines",
+          ccpool.file_map(work, thread["body"], ref="main").splitlines(),
+          ["src/settings.js (2 lines): forget-history@2"])
+    m = ccpool.file_map(work, thread["body"], ref="main", id_pattern=r"\bR-[A-Z]+-\d+\b")
+    check("and the requirement ids the project's pattern matches", m.splitlines(),
+          ["docs/REQUIREMENTS.md (1 lines): R-SET-7@1", "src/settings.js (2 lines): forget-history@2"])
+    prompt = ccpool.worker_prompt({"issue": 5, "token": "t", "from": "stage:triage", "title": "x"},
+                                  "1", "45m", "u", issue=text, files=m)
+    check("both in the worker's prompt", ("Issue #5 as of the claim" in prompt, "    src/settings.js" in prompt),
+          (True, True))
+
+
 def test_merged_check_catches_a_semantic_conflict() -> None:
     """Main moved an import away, a PR swept on the older main still used it, and the
     two merged without a textual conflict."""

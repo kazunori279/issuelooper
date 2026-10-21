@@ -45,6 +45,8 @@ idle_gap_minutes = 10        # POOL_UX_IDLE_GAP_MIN: while no worker or merger h
 [spec]
 enabled = false              # POOL_SPEC: while no worker or merger has work, a tester checks the app against the spec
 gap_minutes = 45             # POOL_SPEC_GAP_MIN: at most one spec check per this many minutes
+id_pattern = ""              # POOL_MAP_ID_PATTERN: a regex for the spec's requirement ids (such as '\bREQ-\d+\b');
+                             # a worker's prompt lists the files that name the ids its issue mentions
 
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge

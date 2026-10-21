@@ -78,6 +78,10 @@ ends ok. While the CLI itself retries a failed model call inside a turn (agy: th
 stream's last event is an error_message step), the session's clocks (timeout,
 wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session.
 
+A worker's prompt quotes its issue (the body and the newest comments) and a map of
+the files on origin/main that name the issue's backticked names, and the spec's
+requirement ids when POOL_MAP_ID_PATTERN gives their form.
+
 CAPS (0 = unlimited)
 
   POOL_MAX_WORKERS caps agent sessions of every role together; POOL_CAP_WORKER,
@@ -242,6 +246,7 @@ class Config:
     retry_pause_max_s: float = 2400
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     fast_check_s: float = 300
+    map_id_pattern: str = ""  # a regex for the spec's requirement ids (the worker's file map)
     stale_min: int = 60
     auto_cap: int = 4
     ux_gap_s: float = 1500
@@ -305,6 +310,7 @@ class Config:
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
+            map_id_pattern=e("POOL_MAP_ID_PATTERN", "").strip(),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
@@ -742,8 +748,67 @@ def review_rules() -> str:
     return os.environ.get("REVIEW_RULES", "").strip() or ".issuelooper/review_rules.md"
 
 
+CLAIM_NOTICE = re.compile(r"^<!-- worker -->\s*<!-- (claim|release) loop=")
+ISSUE_BODY_MAX, ISSUE_COMMENTS, COMMENT_MAX = 4000, 6, 900
+
+
+def issue_text(thread: dict) -> str:
+    """The issue's body and its newest comments (claim and release notices left out),
+    for the worker's prompt: workers on some models reread the issue with `gh issue
+    view` several times a session."""
+    body = (thread.get("body") or "").strip()
+    out = [body[:ISSUE_BODY_MAX] + (" [...]" if len(body) > ISSUE_BODY_MAX else "")]
+    comments = [c for c in thread.get("comments") or [] if not CLAIM_NOTICE.match(c.get("b") or "")]
+    if len(comments) > ISSUE_COMMENTS:
+        out.append(f"--- ({len(comments) - ISSUE_COMMENTS} older comments not shown)")
+    for c in comments[-ISSUE_COMMENTS:]:
+        b = (c.get("b") or "").strip()
+        out.append(f"--- comment by {c.get('a') or '?'}:\n"
+                   + b[:COMMENT_MAX] + (" [...]" if len(b) > COMMENT_MAX else ""))
+    return "\n".join(out).strip()
+
+
+MAP_TOKEN = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./:-]{2,60})`")
+MAP_FILES, MAP_TOKENS = 8, 12
+# The framework's own files, never what an issue is about.
+MAP_EXCLUDE = (":!.claude", ":!.agents", ":!.issuelooper", ":!.githooks", ":!*.lock")
+
+
+def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern: str = "") -> str:
+    """Files on `ref` that mention the issue's backticked names (and the requirement ids
+    id_pattern matches), most names first: `path (lines): name@line, ...`. A starting
+    point for the worker: on some models workers read 39 files a session, half of them
+    rereads, and ran 8 searches."""
+    found = MAP_TOKEN.findall(text)
+    if id_pattern:
+        try:
+            found += [m.group(0) for m in re.finditer(id_pattern, text)]
+        except re.error:
+            pass
+    tokens = []
+    for t in found:
+        if t not in tokens and not t.startswith("http"):
+            tokens.append(t)
+    hits: dict[str, dict[str, int]] = {}
+    for t in tokens[:MAP_TOKENS]:
+        r = subprocess.run(["git", "-C", str(root), "grep", "-n", "-F", "--max-count=1", "-e", t, ref,
+                            "--", ".", *MAP_EXCLUDE], capture_output=True, text=True, timeout=30)
+        for line in r.stdout.splitlines():
+            parts = line.split(":", 3)  # ref:path:line:text
+            if len(parts) >= 3 and parts[2].isdigit():
+                hits.setdefault(parts[1], {}).setdefault(t, int(parts[2]))
+    rows = []
+    for path, names in sorted(hits.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:MAP_FILES]:
+        r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{path}"], capture_output=True,
+                           text=True, timeout=30)
+        n = r.stdout.count("\n") if r.returncode == 0 else "?"
+        rows.append(f"{path} ({n} lines): "
+                    + ", ".join(f"{t}@{ln}" for t, ln in sorted(names.items(), key=lambda x: x[1])))
+    return "\n".join(rows)
+
+
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
-                  wrap_min: int = 35) -> str:
+                  wrap_min: int = 35, issue: str = "", files: str = "") -> str:
     n, token = c["issue"], c["token"]
     live_text = ", labelled needs:live: write Refs #%s, not Fixes" % n if live and c.get("needs_live") else ""
     pr = c.get("pr") or {}
@@ -752,10 +817,10 @@ def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live:
     if pr:
         pr_text = (
             f"\n#{n} already has open pull request #{pr['number']} on branch {branch}; it came back\n"
-            "to the queue. Read the newest comments on the PR and on the issue (a review-gate or\n"
-            "merge-gate refusal, or a report that the change does not work), check out that branch\n"
-            "in your worktree, fix what they ask, re-sweep, push, and update the PR body (gh pr edit).\n"
-            "Do not open a second pull request.\n"
+            "to the queue. Read the newest comments on the PR (gh pr view --comments) and on the\n"
+            "issue (a review-gate or merge-gate refusal, or a report that the change does not work),\n"
+            "check out that branch in your worktree, fix what they ask, re-sweep, push, and update\n"
+            "the PR body (gh pr edit). Do not open a second pull request.\n"
         )
     elif wip:
         pr_text = (
@@ -764,6 +829,18 @@ def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live:
             f"(git worktree add -B {branch} <worktree> origin/{branch}), read what it did and the\n"
             f"release comment on #{n}, and continue from there instead of starting over. Rebase\n"
             "onto origin/main before the sweep.\n"
+        )
+    if issue:
+        pr_text += (
+            f"\nIssue #{n} as of the claim (body, then the newest comments; claim notices left\n"
+            "out). Work from this; run gh issue view only for a comment newer than the claim:\n\n"
+            + "\n".join("    " + ln for ln in issue.splitlines()) + "\n"
+        )
+    if files:
+        pr_text += (
+            "\nWhere the issue's names occur on origin/main (a text search for its backticked names\n"
+            "and requirement ids: a starting point, not a promise). Read these before searching:\n\n"
+            + "\n".join("    " + ln for ln in files.splitlines()) + "\n"
         )
     return f"""Use the issuelooper-worker skill and handle exactly one issue, then stop.
 
@@ -1279,9 +1356,17 @@ class Session(threading.Thread):
             if rc != 0 or not claim_file.exists():
                 return f"claim failed (exit {rc})"
             claim = json.loads(claim_file.read_text())
-            wip = "" if claim.get("pr") else self.wip_branch(int(claim["issue"]))
+            n = int(claim["issue"])
+            wip = "" if claim.get("pr") else self.wip_branch(n)
+            thread = self.issue_thread(n)
+            try:
+                files = file_map(repo_root(), (thread.get("body") or "") + "\n" + claim.get("title", ""),
+                                 id_pattern=cfg.map_id_pattern)
+            except (OSError, subprocess.SubprocessError):
+                files = ""
             prompt = worker_prompt(claim, str(self.seq), cfg.timeouts["worker"], pool, wip,
-                                   cfg.live, int(cfg.worker_wrap_s // 60) or 35)
+                                   cfg.live, int(cfg.worker_wrap_s // 60) or 35,
+                                   issue_text(thread) if thread else "", files)
         elif u.role == "merger":
             env.update(MERGE_PR=str(u.number))
             prompt = merger_prompt(u, cfg.timeouts["merger"])
@@ -1332,6 +1417,16 @@ class Session(threading.Thread):
             [self.pool.cfg.gh, *args], input=stdin, capture_output=True, text=True, timeout=120,
             cwd=repo_root(),
         )
+
+    def issue_thread(self, n: int) -> dict:
+        """{"body": ..., "comments": [{"a": author, "b": body}, ...]} or {} if gh fails."""
+        r = self.gh("issue", "view", str(n), "--json", "body,comments", "-q",
+                    "{body: .body, comments: [.comments[] | {a: .author.login, b: .body}]}")
+        try:
+            out = json.loads(r.stdout or "{}")
+        except ValueError:
+            return {}
+        return out if isinstance(out, dict) else {}
 
     def note(self, line: str):
         with open(self.dir / "auto.log", "a") as f:

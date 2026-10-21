@@ -24,6 +24,7 @@ idle_gap_minutes = 10
 [spec]
 enabled = true
 gap_minutes = 45
+id_pattern = '\bR-[A-Z]+-\d+\b|\bA-\d+\b'   # REQUIREMENTS.md and ACCEPTANCE.md ids
 
 [review]
 enabled = true
