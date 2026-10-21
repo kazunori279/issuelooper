@@ -275,9 +275,9 @@ def test_merges_one_per_pr() -> None:
     )
     h.st = state(st["open"], prs=st["prs"], main="c" * 40)
     check(
-        "main moving gives the PR a fresh attempt (and #12 a fresh rebase)",
+        "main moving gives the PR a fresh attempt; #12's head already failed a rebase, so a merger",
         sorted((u.kind, u.number) for u in h.step()),
-        [("merge", 11), ("rebase", 12)],
+        [("land", 12), ("merge", 11)],
     )
     check(
         "UNKNOWN for POOL_UNKNOWN_S: a merger session takes it",
@@ -1660,6 +1660,75 @@ def test_worker_wrap_up() -> None:
         ("conv-1", True, "90s"),
     )
     check("and ends cleanly well before its timeout", (rc, timed_out, time.time() - t0 < 60), (0, False, True))
+
+
+def git_repo(d: pathlib.Path):
+    """A bare origin and a clone of it in d; returns a git runner for the clone."""
+    origin, work = d / "origin.git", d / "work"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(work), *a], check=True, capture_output=True,
+                              text=True).stdout.strip()
+    g("config", "user.name", "t")
+    g("config", "user.email", "t@t")
+    return work, g
+
+
+def test_merged_check_catches_a_semantic_conflict() -> None:
+    """Main moved an import away, a PR swept on the older main still used it, and the
+    two merged without a textual conflict."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-merged-"))
+    work, g = git_repo(d)
+    (work / "pkg").mkdir()
+    (work / "pkg/__init__.py").write_text("")
+    (work / "pkg/main.py").write_text("from typing import Any\n\nX: Any = 1\n\n\n\n\n\ndef run():\n    pass\n")
+    g("add", ".")
+    g("commit", "-qm", "base")
+    g("push", "-q", "origin", "HEAD:main")
+    base = g("rev-parse", "HEAD")
+    g("checkout", "-qb", "issue-1")
+    with open(work / "pkg/main.py", "a") as f:
+        f.write("\n\ndef config() -> dict[str, Any]:\n    return {}\n")
+    g("commit", "-qam", "the PR uses Any")
+    g("push", "-q", "origin", "issue-1")
+    pr_head = g("rev-parse", "HEAD")
+    g("checkout", "-q", "main")
+    (work / "pkg/main.py").write_text("X = 1\n\n\n\n\n\n\n\ndef run():\n    pass\n")
+    g("commit", "-qam", "main moves the import away")
+    g("push", "-q", "origin", "HEAD:main")
+    g("reset", "-q", "--hard", base)  # this checkout has not fetched the new main yet
+    calls = d / "gh-calls"
+    gh = d / "gh"
+    gh.write_text(f"#!/bin/sh\necho \"$@\" >> {calls}\n")
+    gh.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh),
+                                     fast_check_cmd=f"{sys.executable} -c 'import pkg.main'"),
+                       fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("auto", "merge", "merge:1@x", "mrg:1", 1, (0, 1), {}), 1)
+    w.dir.mkdir(parents=True)
+    old = os.environ.get("SHARED_REPO_PATH")
+    os.environ["SHARED_REPO_PATH"] = str(work)
+    try:
+        check("a PR behind main (fetched first) is behind", w.behind_main(pr_head, "issue-1"), True)
+        out = w.merged_check(5, 1, pr_head, "issue-1", dict(os.environ))
+        check("a head that breaks main once merged is handed back", out, "breaks main once merged (handed back)")
+        check("with the error", "is not defined" in calls.read_text(), True)
+        main = g("rev-parse", "origin/main")
+        check("a head that contains main needs no check", w.merged_check(5, 1, main, "", dict(os.environ)), "")
+        pool.cfg.fast_check_cmd = "exit 1"
+        pool.main_checks.clear()
+        calls.write_text("")
+        check("main itself fails the check: nobody is blamed, the gates decide",
+              (w.merged_check(5, 1, pr_head, "issue-1", dict(os.environ)), calls.read_text()), ("", ""))
+        g("push", "-q", "-f", "origin", f"{base}:refs/heads/main")  # main back at the base
+        check("a head on the current main is not behind", w.behind_main(pr_head, "issue-1"), False)
+    finally:
+        if old is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old
 
 
 FAKE_CLAUDE_WRAP = r"""#!/usr/bin/env python3

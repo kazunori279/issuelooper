@@ -23,10 +23,13 @@ UNITS
           GitHub calls MERGEABLE. The review gate (review_gate.py) reads the diff,
           role_guard.py's merge gates run with CC_ROLE=merger, and the PR is
           squash-merged; a refusal hands the PR back to a worker (a refusal over
-          the sweep record is re-swept here first). rebase: a CONFLICTING PR is
-          first rebased here, once per head and main; when every conflict hunk, in
-          any text file, only adds lines on both sides, both are kept, the PR is
-          swept and pushed, and the next poll merges it. The conflicted files are
+          the sweep record is re-swept here first). With POOL_FAST_CHECK_CMD set, a
+          PR whose head is behind main is first merged with main in a worktree and
+          the command runs there: a failure hands the PR back, unless main alone
+          fails it too. rebase: a CONFLICTING PR is first rebased here, once per
+          head and main, and not again for a head whose rebase failed; when every
+          conflict hunk, in any text file, only adds lines on both sides, both are
+          kept, the PR is swept and pushed, and the next poll merges it. The conflicted files are
           counted: a source file that conflicts in POOL_SPLIT_AFTER PRs within
           POOL_SPLIT_WINDOW_S, or grows past POOL_SPLIT_LINES on main, gets an
           issue to split it (at most POOL_SPLIT_PER_WINDOW per window,
@@ -226,6 +229,8 @@ class Config:
     stall_s: float = 600
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
+    fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
+    fast_check_s: float = 300
     stale_min: int = 60
     auto_cap: int = 4
     ux_gap_s: float = 1500
@@ -286,6 +291,8 @@ class Config:
             stall_s=float(e("POOL_STALL_S", "600")),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
+            fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
+            fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
@@ -468,6 +475,7 @@ class Book:
         self.family_starts: collections.Counter = collections.Counter()
         self.clean: set[str] = set()  # keys whose session ended cleanly
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main) claim.py refused
+        self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.paused: dict[str, float] = {}  # role -> until (crash breaker)
         self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
         self.quota_streak = 0  # pauses in a row without a session ending ok
@@ -599,9 +607,11 @@ def plan(
             )
         elif state == "CONFLICTING" and (
             f"rebase:{pr['number']}@{pr['head'][:12]}@{main[:12]}" not in book.tries
-        ):
-            # Try the mechanical rebase first: conflicts only in test files, where both
-            # sides added lines, need no merger session.
+        ) and book.rebase_failed.get(pr["number"]) != pr["head"]:
+            # Try the mechanical rebase first: conflicts where both sides only added
+            # lines need no merger session. Once per head: a head whose rebase failed
+            # fails again on the next main (one PR was rebased six times, each with a
+            # red sweep, before a merger got it).
             units.append(
                 Unit(
                     "auto",
@@ -1287,6 +1297,15 @@ class Session(threading.Thread):
         u = self.unit
         pr, n, head = u.number, u.info["issue"], u.info["head"]
         env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr))
+        # A head swept on an older main says nothing about the merged result: one PR
+        # moved an import, another (swept before it) still used it, GitHub saw no
+        # conflict, and main stopped starting. A rebase and full sweep per merge would
+        # serialize the merges (most were behind main), so a quick check runs on the
+        # head merged with the current main instead.
+        if self.pool.cfg.fast_check_cmd:
+            held = self.merged_check(pr, n, head, u.info.get("branch") or "", env)
+            if held:
+                return held
         r = subprocess.run(
             [*shlex.split(self.pool.cfg.review_cmd), "--pr", str(pr)],
             env=env, cwd=repo_root(), capture_output=True, text=True, timeout=900,
@@ -1347,6 +1366,79 @@ class Session(threading.Thread):
         )
         self.note_large_files(pr)
         return "ok"
+
+    def fast_check(self, wt: str, env: dict) -> tuple[bool, str]:
+        """POOL_FAST_CHECK_CMD in a worktree: (passed, the tail of its output)."""
+        cfg = self.pool.cfg
+        try:
+            r = subprocess.run(["bash", "-c", cfg.fast_check_cmd], cwd=wt, env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=cfg.fast_check_s)
+        except subprocess.TimeoutExpired:
+            return False, f"the fast check timed out after {cfg.fast_check_s:.0f} s"
+        return r.returncode == 0, (r.stdout + r.stderr).strip()[-1500:]
+
+    def merged_check(self, pr: int, n: int, head: str, branch: str, env: dict) -> str:
+        """'' when the PR may go on to the gates: its head contains the current main, or
+        the head merged with the current main passes fast_check. Otherwise the unit's
+        outcome: handed back when the merge broke something. When main itself fails the
+        check, nothing is blamed and the gates decide."""
+        if not self.behind_main(head, branch):
+            return ""
+        root = str(repo_root())
+        main = self.git(root, "rev-parse", "origin/main").stdout.strip()
+        wt = f"/tmp/fresh-{pr}"
+        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        try:
+            if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
+                return ""  # cannot tell; the gates decide
+            m = self.git(wt, "-c", "user.name=ccpool", "-c", "user.email=ccpool@localhost",
+                         "merge", "-q", "--no-edit", main)
+            if m.returncode != 0:
+                self.git(wt, "merge", "--abort")
+                return "behind main with a conflict (the next poll sees it)"
+            ok, why = self.fast_check(wt, env)
+            self.note(f"merged-tree check on main {main[:12]}: {'ok' if ok else why[-400:]}")
+            if ok:
+                return ""
+            if not self.main_ok(main, env):
+                # Main fails too, so the check cannot blame this PR; holding every merge
+                # would also hold the fix.
+                self.note(f"main {main[:12]} fails the fast check itself; not blaming PR #{pr}")
+                return ""
+            self.hand_back(pr, n, (
+                "**Not merged: it breaks main once merged.** The supervisor merged this head with "
+                f"the current origin/main ({main[:8]}) and the result fails a quick check that "
+                "main alone passes:\n\n```\n" + why[-1500:] + "\n```\n\n"
+                "Rebase onto origin/main in your worktree, fix it, sweep again and push."))
+            self.pool.log("handback", pr=pr, issue=n, by="merged-tree check", reason=why.strip().splitlines()[-1][:200]
+                          if why.strip() else "")
+            return "breaks main once merged (handed back)"
+        finally:
+            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+
+    def main_ok(self, main: str, env: dict) -> bool:
+        """fast_check on main itself, once per sha."""
+        cache = self.pool.main_checks
+        if main not in cache:
+            root, wt = str(repo_root()), f"/tmp/fresh-main-{main[:12]}"
+            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+            try:
+                if self.git(root, "worktree", "add", "-q", "--detach", wt, main).returncode != 0:
+                    return True
+                cache[main] = self.fast_check(wt, env)[0]
+            finally:
+                subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        return cache[main]
+
+    def behind_main(self, head: str, branch: str) -> bool:
+        """Whether origin/main has commits the PR head lacks. Unknown counts as not behind."""
+        root = str(repo_root())
+        for attempt in range(3):  # other units fetch into the same .git (ref lock)
+            f = self.git(root, "fetch", "-q", "origin", "main", *([branch] if branch else []))
+            if f.returncode == 0:
+                break
+            time.sleep(2 + 2 * attempt)
+        return self.git(root, "merge-base", "--is-ancestor", "origin/main", head).returncode == 1
 
     def resweep(self, pr: int, branch: str, head: str, env: dict) -> bool:
         """Run the sweep at the PR's head in a worktree and update the PR body
@@ -1610,6 +1702,7 @@ class Pool:
         self.deploying = False
         self.merge_lock = threading.Lock()
         self.deploy_tried: set[str] = set()
+        self.main_checks: dict[str, bool] = {}  # main sha -> its fast check passed
         self.own_deployed = ""
         self.main_seen: dict[str, float] = {}
         self.stopping = False
@@ -1777,6 +1870,8 @@ class Pool:
                 b.family_starts[u.family] -= 1
                 updated = u.key.split("@", 1)[1] if "@" in u.key else ""
                 b.unclaimable[u.number] = (updated, (self.prev or {}).get("main", ""))
+            if u.kind == "rebase" and outcome.startswith(("left to a merger", "rebase stopped")):
+                b.rebase_failed[u.number] = u.info.get("head") or ""
             if outcome.startswith("startup crash"):
                 self.crashes[u.role] += 1
                 if self.crashes[u.role] >= self.cfg.crash_max:

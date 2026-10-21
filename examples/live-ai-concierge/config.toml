@@ -8,6 +8,7 @@ model = ""                   # the experiment pinned one model per role here
 [sweep]
 command = "make verify"      # ruff, pytest tests/unit, pytest-playwright tests/e2e
 slots = 4
+fast_command = "uv sync --frozen -q && uv run python -c 'import concierge.main' && uv run pytest -q -x -p no:cacheprovider tests/unit"
 
 [deploy]
 command = ""                 # set to the command that puts origin/main on your server
@@ -34,3 +35,4 @@ max_sessions = 16
 
 [guard]
 secret_urls = ["/api/config"]   # answers with the browser Maps key in the clear
+protected_paths = ["spec/"]     # the requirements, reference screenshots and the demo's script
