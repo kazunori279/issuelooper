@@ -42,7 +42,7 @@ your worktree, start the app in live mode on a free port, in the background, as
 *Live mode* in `.issuelooper/project.md` says (it names where the credentials
 come from), with its log at `/tmp/wrk-$K-$N-live.log`. Drive the issue's steps at
 least twice (in each language the issue concerns), read the screenshots and the
-server log, stop the server with `fuser -k <port>/tcp`, and remove any credential
+server log, stop the server with `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, and remove any credential
 link you made in the worktree before you commit. Say what the live environment
 did under *Checked on screen*. Never print the credentials or commit them.
 
@@ -122,7 +122,7 @@ screenshots under `/tmp/wrk-$K-$N-shots/`, before your change (on `origin/main`,
 from a `git stash` of your work or a second checkout) and after it, the last one
 showing the state the issue is about. Open them and compare: the symptom is gone,
 and nothing next to it broke (overlap, cut-off text, a control that moved). Fix
-what you see, then stop the server by its port (`fuser -k <port>/tcp`, never
+what you see, then stop the server by its port (`lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, never
 `pkill`). In the PR body under *Checked on screen*, list the steps you replayed,
 what the last screenshot shows, and its path.
 

@@ -31,7 +31,7 @@ apply. Keep it short: commands and paths, not prose.
      background, with any database or scratch files under /tmp. Say which mode
      needs no credentials. Never name a port the owner uses.
      Example:
-     `APP_DB=/tmp/<name>.db setsid uv run myapp --port <port> > /tmp/<name>-server.log 2>&1 < /dev/null &`
+     `APP_DB=/tmp/<name>.db nohup uv run myapp --port <port> > /tmp/<name>-server.log 2>&1 < /dev/null &`
      Ready when `curl -sf localhost:<port>/` answers. -->
 
 ## Look at a change on screen

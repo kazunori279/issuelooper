@@ -125,7 +125,7 @@ class AgyMonitor(unittest.TestCase):
         )
         log = self.fake_log()
         self.assertEqual(
-            log[0]["cwd"], str(self.root)
+            pathlib.Path(log[0]["cwd"]).resolve(), self.root.resolve()
         )  # the monitor works in the shared checkout
         want = (
             {"event": "user", "message": {"content": "first pass"}}

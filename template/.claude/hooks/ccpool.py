@@ -986,10 +986,11 @@ class BrokerLink:
 
 
 def broker_call(sock: str, **req) -> dict:
+    from broker_socket import socket_path
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(10)
     try:
-        s.connect(sock)
+        s.connect(str(socket_path(sock)))
         s.sendall((json.dumps(req) + "\n").encode())
         data = b""
         while not data.endswith(b"\n"):

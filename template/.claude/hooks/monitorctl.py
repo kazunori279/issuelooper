@@ -25,6 +25,7 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import config  # noqa: E402
+from broker_socket import socket_path  # noqa: E402
 
 
 def run_dir() -> pathlib.Path:
@@ -35,7 +36,7 @@ def run_dir() -> pathlib.Path:
 def call(run, quiet=False, **req):
     s = socket.socket(socket.AF_UNIX)
     try:
-        s.connect(str(pathlib.Path(run) / "broker.sock"))
+        s.connect(str(socket_path(pathlib.Path(run) / "broker.sock")))
     except (FileNotFoundError, ConnectionRefusedError):
         s.close()
         if quiet:

@@ -289,7 +289,7 @@ class Judge:
         return cmd
 
     def claude_cmd(self, text, images=()):
-        # Unverified: built from Claude Code's documented CLI flags, not run here.
+        # Checked with Claude Code 2.1.286 on macOS (plain and verbose JSON).
         # --disallowedTools is the documented way to deny tools in print mode (the
         # newer `--tools ""` is not in every version). The list goes in as one
         # comma-separated value, and -p comes last so the variadic option cannot

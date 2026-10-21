@@ -16,8 +16,8 @@ CCROLE_MODEL_<ROLE>, else CCROLE_MODEL, else none (the CLI picks). ccrole.sh app
 the same order and adds --model, --add-dir and --dangerously-skip-permissions, so the
 arguments built here leave those out.
 
-agy's format is in AGY_PROTOCOL.md. Claude Code's is implemented from its documented
-stream-json format and has not yet been checked against a live run:
+agy's format is in AGY_PROTOCOL.md. Claude Code's stream-json format has been
+checked against Claude Code 2.1.286 on macOS (see docs/macos-verification.md):
 
     {"type": "system", "subtype": "init", "session_id": ..., "model": ...}
     {"type": "assistant", "message": {"content": [{"type": "text", ...},
@@ -304,8 +304,7 @@ class Agy(Cli):
 
 
 class Claude(Cli):
-    """Claude Code. Not yet verified against a live run; built from its documented
-    stream-json format. It has no print timeout: the supervisor's timeouts apply."""
+    """Claude Code stream-json. It has no print timeout: supervisor timeouts apply."""
 
     name = "claude"
     prompt_flag = "-p"

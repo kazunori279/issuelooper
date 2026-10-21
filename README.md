@@ -88,8 +88,9 @@ spec checks.
   aides run in (or set `[monitor] host = "broker"` for a headless monitor).
 - A check suite that one command runs (`make verify`, say). The merge gates
   expect pytest for the per-issue tests.
-- Linux. macOS is not verified yet ([#1](https://github.com/kazunori279/issuelooper/issues/1)).
-  Worktrees and scratch files go under `/tmp`.
+- Linux or macOS. Worktrees and scratch files go under `/tmp`.
+  See [macOS validation](docs/macos-verification.md) for the tested environment
+  and remaining limits. Server examples also use `lsof`.
 
 ## Try a sample
 
@@ -263,9 +264,11 @@ The samples' `issuelooper/` directories ([`hello-world`](examples/hello-world/is
 
 `[agents] cli` picks the CLI for every role, and `[agents.<role>]` overrides one
 role (`worker`, `merger`, `tester`, `monitor`, `reviewer`, `aide`). The framework
-was developed and run at length on `agy`. Claude Code support follows Claude
-Code's documented CLI and `stream-json` output but has not yet run against a real
-`claude` ([#1](https://github.com/kazunori279/issuelooper/issues/1)).
+was developed and run at length on `agy`. Claude Code 2.1.286 has been validated
+on macOS with a headless monitor, workers, sweeps, the review gate and automatic
+merges. Session resume and the Bash role guard were also checked with the real CLI.
+See [the validation record](docs/macos-verification.md) for evidence and the
+remaining limits, including mixed-CLI runs and live stall/quota recovery.
 
 Most of the cost is workers. A stronger model for the judgment roles (monitor,
 tester, reviewer) costs a small fraction of running everything on it.

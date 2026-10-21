@@ -134,7 +134,14 @@ def test_broker_host() -> None:
         (1, True),
     )
     (repo / "dirty.txt").unlink()
-    r = run(repo, dict(env, CCROLE_MONITOR_CLI="claude"), "start")
+    # Keep this check independent of whether the developer has Claude installed.
+    missing_bin = d / "missing-bin"
+    missing_bin.mkdir()
+    for name in ("bash", "python3", "git", "dirname", "mkdir", "cat", "gh", "agy"):
+        source = shutil.which(name, path=env["PATH"])
+        if source:
+            (missing_bin / name).symlink_to(source)
+    r = run(repo, dict(env, PATH=str(missing_bin), CCROLE_MONITOR_CLI="claude"), "start")
     check(
         "a CLI that is not on PATH is named",
         (r.returncode, "'claude' is not on PATH (used by: monitor)" in r.stderr),
@@ -153,6 +160,8 @@ def test_broker_host() -> None:
             ),
             (True, True, True),
         )
+        pool_pid = int((run_dir / "pool.pid").read_text())
+        check("supervisor owns a detached session", os.getsid(pool_pid), pool_pid)
         log = []
         for _ in range(100):
             log = (

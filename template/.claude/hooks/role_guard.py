@@ -712,7 +712,7 @@ def kill_by_pattern_check(command: str) -> None:
             "`pkill` and `killall` match command lines, and this session's own command line "
             "contains its prompt, so a pattern that names your server can match, and kill, "
             "this session too.\n\n"
-            "Stop a server by its port or its PID instead: `fuser -k <port>/tcp`, or start it "
+            "Stop a server by its port or its PID instead: `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, or start it "
             "with `... & echo $! > /tmp/<name>.pid` and later `kill $(cat /tmp/<name>.pid)`."
         )
 

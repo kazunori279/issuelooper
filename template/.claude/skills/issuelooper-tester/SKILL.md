@@ -29,16 +29,16 @@ the commit you are testing, never from a working tree:
 SHA=<the commit>; T=/tmp/tst-$TST_PORT-tree
 rm -rf "$T" && mkdir -p "$T" && git -C "$SHARED_REPO_PATH" archive "$SHA" | tar -x -C "$T"
 cd "$T"                                               # then the worktree setup from .issuelooper/project.md
-fuser -k "$TST_PORT/tcp" 2>/dev/null; sleep 1        # whatever an earlier run left on your port
+lsof -tiTCP:"$TST_PORT" -sTCP:LISTEN | xargs kill 2>/dev/null; sleep 1        # whatever an earlier run left on your port
 # start the app on $TST_PORT in the background, as .issuelooper/project.md says
 # (the mode that needs no credentials for a UX run; live mode for a live check),
 # with its log at /tmp/tst-$TST_PORT-server.log, then wait for it (never more than a minute):
 for i in $(seq 60); do curl -sf "localhost:$TST_PORT/" > /dev/null && break; sleep 1; done
 ```
 
-Always start the server in the background (`setsid ... > log 2>&1 < /dev/null &`),
+Always start the server in the background (`nohup ... > log 2>&1 < /dev/null &`),
 in its own command. A server in the foreground never returns, and your session
-sits there until the supervisor kills it. Stop it with `fuser -k "$TST_PORT/tcp"`,
+sits there until the supervisor kills it. Stop it with `lsof -tiTCP:"$TST_PORT" -sTCP:LISTEN | xargs kill`,
 never with `pkill` or `killall`: they match command lines, yours included, and
 the guard refuses them.
 

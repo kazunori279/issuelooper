@@ -21,8 +21,8 @@ Run dir ($ISSUELOOPER_RUN, default <repo root>/.issuelooper/run):
     logs/monitor.stderr.log
 
 The Claude Code session (`-p --input-format stream-json --output-format stream-json
---verbose`, one {"type": "user", ...} line per message) is built from its documented
-format and has not yet been checked against a live run. agy's is in AGY_PROTOCOL.md.
+--verbose`, one {"type": "user", ...} line per message) was checked with Claude Code
+2.1.286 on macOS. agy's format is in AGY_PROTOCOL.md.
 """
 
 import argparse
@@ -40,6 +40,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import agent_cli  # noqa: E402
 import config  # noqa: E402
+from broker_socket import prepare_socket  # noqa: E402
 
 
 def now():
@@ -454,9 +455,8 @@ def main():
     run = pathlib.Path(args.run).resolve() if args.run else run_dir().resolve()
     run.mkdir(parents=True, exist_ok=True)
     sock = run / "broker.sock"
-    if sock.exists():
-        sock.unlink()
-    server = Server(str(sock), Handler)
+    address = prepare_socket(sock)
+    server = Server(str(address), Handler)
     server.session = Session(run)
     (run / "broker.pid").write_text(str(os.getpid()))
     signal.signal(
@@ -466,6 +466,7 @@ def main():
         ).start(),
     )
     server.serve_forever()
+    address.unlink(missing_ok=True)
     sock.unlink(missing_ok=True)
     (run / "broker.pid").unlink(missing_ok=True)
 

@@ -133,10 +133,17 @@ pane_env() {
 }
 
 start_supervisor() {
-  local launch=()
-  command -v setsid >/dev/null 2>&1 && launch=(setsid)
-  ( cd "$ROOT" && exec ${launch[@]+"${launch[@]}"} env "$@" python3 "$HERE/ccpool.py" run >>"$RUN/pool.out" 2>&1 </dev/null ) &
-  echo $! > "$RUN/pool.pid"
+  python3 - "$ROOT" "$HERE" "$RUN" "$@" <<'PYTHON'
+import pathlib, subprocess, sys
+root, here, run = map(pathlib.Path, sys.argv[1:4])
+with (run / "pool.out").open("a") as log:
+    proc = subprocess.Popen(
+        ["env", *sys.argv[4:], sys.executable, str(here / "ccpool.py"), "run"],
+        cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        start_new_session=True,
+    )
+(run / "pool.pid").write_text(str(proc.pid) + "\n")
+PYTHON
   sleep 1
   alive "$RUN/pool.pid" || die "the supervisor exited at once; see $RUN/pool.out"
 }

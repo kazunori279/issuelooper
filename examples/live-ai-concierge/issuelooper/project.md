@@ -31,7 +31,7 @@ Ports 8000 and 8001 are the owner's (`.issuelooper/deploy.sh` serves main there)
 never run `make run` or `make scripted`.
 
 - Scripted (no credentials):
-  `GOOGLE_MAPS_API_KEY= SESSIONS_DB=/tmp/<name>.db CONCIERGE_SCRIPT=spec/fixtures/script.json setsid uv run concierge --port <port> > /tmp/<name>-server.log 2>&1 < /dev/null &`
+  `GOOGLE_MAPS_API_KEY= SESSIONS_DB=/tmp/<name>.db CONCIERGE_SCRIPT=spec/fixtures/script.json nohup uv run concierge --port <port> > /tmp/<name>-server.log 2>&1 < /dev/null &`
 - Ready when `curl -sf localhost:<port>/` answers.
 
 ## Look at a change on screen
@@ -83,7 +83,7 @@ Acceptance that needs the real Gemini Live model (live answers, real tool
 calls). Start the app without `CONCIERGE_SCRIPT`, with credentials through a
 symlink into the tree or worktree (`ln -sf "$SHARED_REPO_PATH/.env" .env`;
 a worker removes it before committing):
-`SESSIONS_DB=/tmp/<name>-live.db setsid uv run concierge --port <port> > /tmp/<name>-live.log 2>&1 < /dev/null &`.
+`SESSIONS_DB=/tmp/<name>-live.db nohup uv run concierge --port <port> > /tmp/<name>-live.log 2>&1 < /dev/null &`.
 A worker checking a `needs:live` change drives it in English and Japanese when
 the issue concerns language.
 

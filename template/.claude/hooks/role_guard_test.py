@@ -190,8 +190,8 @@ def test_kill_by_pattern() -> None:
                     "pkill -9 -f uvicorn || true"):
             verdict, reason = run(cmd, role=role)
             check(f"{cmd!r} is refused for {role}", verdict, "refuse")
-        check(f"the refusal for {role} names the substitute", "fuser -k" in reason, True)
-    for cmd in ("fuser -k 8021/tcp", "kill $(cat /tmp/app.pid)"):
+        check(f"the refusal for {role} names the substitute", "lsof -tiTCP:" in reason, True)
+    for cmd in ("lsof -tiTCP:8021 -sTCP:LISTEN | xargs kill", "kill $(cat /tmp/app.pid)"):
         verdict, _ = run(cmd, role="tester")
         check(f"{cmd!r} is allowed", verdict, "allow")
     # The word alone is enough (a grep for it is refused too): cheap, and never needed.

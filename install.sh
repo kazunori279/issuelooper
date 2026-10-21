@@ -33,7 +33,7 @@ for a in "$@"; do
   esac
 done
 [ -n "$repo" ] || die "usage: install.sh <repo-dir> [--upgrade] [--no-labels] [--no-commit]"
-REPO="$(cd "$repo" && pwd)" || die "no such directory: $repo"
+REPO="$(cd "$repo" && pwd -P)" || die "no such directory: $repo"
 
 # --- prerequisites ---------------------------------------------------------------
 git -C "$REPO" rev-parse --show-toplevel >/dev/null 2>&1 || die "$REPO is not a git repository"

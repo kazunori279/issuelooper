@@ -131,5 +131,5 @@ requests over 12 hours; every role on Gemini 4 Argon held a UX score of 80 or mo
 ```
 
 This stops the supervisor, its sessions, the dashboard and the panes; the servers
-`deploy.sh` started keep running (`fuser -k 8000/tcp 8001/tcp` stops them). `start`
+`deploy.sh` started keep running (`lsof -tiTCP:8000 -tiTCP:8001 -sTCP:LISTEN | xargs kill` stops them). `start`
 picks up where it left off.
