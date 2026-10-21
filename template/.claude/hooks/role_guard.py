@@ -281,6 +281,20 @@ SAFE_FILTER = re.compile(r"\|\s*[^|]*\bpython3?\b[^|]*\s-c\b")
 DISCARDS_BODY = re.compile(r"-o\s+/dev/null")
 
 
+# Gate 6. Some files are the owner's: the spec, reference data, a fixture a demo
+# replays. Workers edited such a fixture to fit their own tests, which changed what
+# the owner's demo showed. $GUARD_PROTECTED_PATHS lists them, comma-separated: a
+# path ending in `/` covers everything under it. Empty turns the gate off.
+def protected_paths() -> list[str]:
+    raw = os.environ.get("GUARD_PROTECTED_PATHS", "")
+    return [p.strip().removeprefix("./") for p in raw.split(",") if p.strip()]
+
+
+def is_protected(path: str, protected: list[str]) -> bool:
+    return any(path == p.rstrip("/") or path.startswith(p if p.endswith("/") else p + "/")
+               for p in protected)
+
+
 def secret_url_in(command: str) -> str | None:
     """The first configured secret URL path the command names, or None."""
     for path in secret_urls():
@@ -1140,7 +1154,7 @@ def check_shared_checkout_clean() -> None:
 
 
 def check_pr_merge(command: str) -> None:
-    """Pre-merge gates 0-5, in the order a refusal is cheapest to act on.
+    """Pre-merge gates 0-6, in the order a refusal is cheapest to act on.
 
     Gate 0: the shared checkout is clean (`git status --porcelain` is empty) and
     local main has no unpushed commits ahead of origin/main. Catches direct
@@ -1165,6 +1179,8 @@ def check_pr_merge(command: str) -> None:
 
     Gate 5: a passing review record exists for the PR head ($REVIEW_DIR/<sha>.json,
     written by review_gate.py). See review_gate_check.
+
+    Gate 6: the PR changes nothing under $GUARD_PROTECTED_PATHS, the owner's files.
     """
     check_shared_checkout_clean()
     repo_match = REPO_FLAG.search(command)
@@ -1237,6 +1253,24 @@ def check_pr_merge(command: str) -> None:
                 "naming what was run where the behavior was actually seen.\n\n"
                 "If the label is wrong — the acceptance really is checkable from a "
                 "test — say so on the issue. The monitor clears it; a merge does not."
+            )
+
+        # Gate 6: the protected paths are the owner's.
+        protected = protected_paths()
+        touched = [
+            str(f.get("path") or "")
+            for f in (files if isinstance(files, list) else [])
+            if isinstance(f, dict) and is_protected(str(f.get("path") or ""), protected)
+        ]
+        if touched:
+            block(
+                f"{target} changes the owner's files: {', '.join(f'`{p}`' for p in touched[:5])}.\n\n"
+                "This project lists them in GUARD_PROTECTED_PATHS "
+                f"({', '.join(f'`{p}`' for p in protected)}): the owner's spec, reference data or "
+                "fixtures. A pull request does not change them.\n\n"
+                f"Take those files out of the branch (`git checkout origin/main -- {' '.join(touched[:5])}`, "
+                "commit, sweep again). A test that needs other data brings its own copy under the "
+                "tests. If the owner's file itself looks wrong, say so on the issue for the owner."
             )
 
         # Gate 1: Check AST parse and conflict markers on changed .py files of PR head commit

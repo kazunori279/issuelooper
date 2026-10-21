@@ -42,6 +42,7 @@ KEYS = {
     ("sweep", "command"): "SWEEP_COMMAND",
     ("sweep", "slots"): "SWEEP_SLOTS",
     ("sweep", "record_dir"): "SWEEP_RECORD_DIR",
+    ("sweep", "fast_command"): "POOL_FAST_CHECK_CMD",
     ("deploy", "command"): "POOL_DEPLOY_CMD",
     ("deploy", "timeout_s"): "POOL_DEPLOY_TIMEOUT_S",
     ("live", "enabled"): "POOL_LIVE",
@@ -50,6 +51,7 @@ KEYS = {
     ("ux", "idle_gap_minutes"): "POOL_UX_IDLE_GAP_MIN",
     ("spec", "enabled"): "POOL_SPEC",
     ("spec", "gap_minutes"): "POOL_SPEC_GAP_MIN",
+    ("spec", "id_pattern"): "POOL_MAP_ID_PATTERN",
     ("review", "enabled"): "REVIEW_GATE",
     ("review", "rules"): "REVIEW_RULES",
     ("review", "production_paths"): "REVIEW_PATHS",
@@ -62,6 +64,7 @@ KEYS = {
     ("pool", "tester_port_base"): "TST_PORT",
     ("pool", "run_dir"): "ISSUELOOPER_RUN",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",
+    ("guard", "protected_paths"): "GUARD_PROTECTED_PATHS",
 }
 # [agents.<role>] cli / model -> CCROLE_<ROLE>_CLI / CCROLE_MODEL_<ROLE>.
 ROLE_KEYS = {"cli": "CCROLE_{ROLE}_CLI", "model": "CCROLE_MODEL_{ROLE}"}

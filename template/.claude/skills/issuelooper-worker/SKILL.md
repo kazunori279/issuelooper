@@ -21,14 +21,13 @@ Names below: `K=$WRK_K`, `N` your issue, `T` your claim token,
 
 ## 1. Read the issue
 
-```bash
-gh issue view $N --json title,body,labels,comments
-```
-
-Read the body, every comment (a report from whoever reopened it, a review-gate
-or merge-gate refusal on the PR, the owner's answer) and the spec sections it
-touches. An `owner-request` issue says what the owner wants as a user: build
-that, not a control or a label that only suits a test.
+Your prompt quotes the issue as of the claim: its body and newest comments (a
+report from whoever reopened it, a review-gate or merge-gate refusal, the owner's
+answer), and a list of the files on `origin/main` that name its ids. Read those
+and the spec sections it touches. Run `gh issue view $N --comments` only when the
+prompt says older comments were left out and you need them, or to see a comment
+written after the claim. An `owner-request` issue says what the owner wants as a
+user: build that, not a control or a label that only suits a test.
 
 If live checks are on and any acceptance criterion can only be observed in the
 live environment (`.issuelooper/project.md`, *Live mode*), add `needs:live`
@@ -72,7 +71,19 @@ cd "$WT"            # then run the worktree setup from .issuelooper/project.md
 ## 3. Trace the cause, then write the failing test
 
 Find the line that is wrong, or the place a feature is missing, and decide the
-approach. Then write the test **in a new file of its own**, named
+approach. Read the way a careful engineer with a short budget does:
+
+- Start from the file list in your prompt; search only when it does not lead you
+  there, and search narrowly (`grep -n <name>` in the files or directory you
+  expect, not `grep -rn` over the repository).
+- Read each file once, whole or in the ranges you need, and keep what you learned
+  in your notes. Do not reread a file you have read unless you changed it.
+- Check `git status` and `git log` when you need them for a decision (before a
+  commit, after a rebase), not as a habit between steps.
+- To try a behavior, write the failing test and run it; do not probe with a string
+  of one-line scripts.
+
+Then write the test **in a new file of its own**, named
 `test_issue_$N.py` in the suite `.issuelooper/project.md` names for this kind of
 change. Never append to a shared test file: every worker appending to the same
 file is what makes pull requests conflict. Use the suite's existing fixtures; add

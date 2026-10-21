@@ -34,12 +34,13 @@ One supervisor per repository, `.claude/hooks/ccpool.py`, reads GitHub every few
 seconds and starts a fresh session for each unit of work the moment it appears.
 Finish your unit and stop; nothing waits on a timer.
 
-- **Claimable issues** (`stage:triage` or `stage:ready`, unblocked, not held,
-  not `ux:proposed`): the supervisor claims the issue (label `stage:doing` plus a
-  signed claim comment, `claim.py`) and starts a worker. The worker opens a pull
-  request and moves the issue to `stage:pr`. A worker that ends without a PR
-  commits its work on branch `issue-<N>`; the supervisor pushes it and the next
-  worker on the issue continues from it.
+- **Claimable issues** (`stage:triage` or `stage:ready`, no open blocker in a
+  `Blocked by:` line or a GitHub dependency, not held, not `ux:proposed`): the
+  supervisor claims the issue (label `stage:doing` plus a signed claim comment,
+  `claim.py`) and starts a worker. The worker opens a pull request and moves the
+  issue to `stage:pr`. A worker that ends without a PR commits its work on
+  branch `issue-<N>`; the supervisor pushes it and the next worker on the issue
+  continues from it.
 - **Pull requests at `stage:pr`**: when GitHub says the PR is mergeable, the
   supervisor runs the review gate (`review_gate.py`) and the merge gates
   (`role_guard.py`), squash-merges it, clears `stage:pr` (or sets `stage:live`
@@ -49,9 +50,13 @@ Finish your unit and stop; nothing waits on a timer.
   place); otherwise a merger session rebases and lands it. A source file that
   keeps conflicting, or grows past 900 lines, gets an issue to split it. A
   refusal over a missing sweep record is re-swept by the supervisor before
-  anything is handed back. Either gate refusing hands the PR back: a comment on
-  the PR with the reason, and the issue back at `stage:triage`, where a worker
-  picks it up and updates the same PR.
+  anything is handed back. When the project sets a fast check
+  (`sweep.fast_command`), a PR whose head is behind `main` is first merged with
+  the current `main` and checked: two PRs that do not conflict can still break
+  `main` together (a moved import, a renamed function). Either gate refusing, or
+  that check failing, hands the PR back: a comment on the PR with the reason,
+  and the issue back at `stage:triage`, where a worker picks it up and updates
+  the same PR.
 - **`stage:live` issues** (when live checks are on): a tester checks the merged
   change against the live environment and posts a `live-verified:` line; the
   monitor then closes it.
@@ -92,6 +97,7 @@ merger run the same checks, so write the PR to pass them the first time.
 | 3 | `- **Fail-before:** tests/<suite>/test_<name>.py <N> -> <M>` with M > N, and the named file gains a `def test_`, or one waiver: `waived - needs: tester repro`, `waived - loop/process`, `waived - docs only`, `waived - owner ruling`. |
 | 4 | A PR does not auto-close a `needs:live` issue: it says `Refs #N`, not `Fixes #N`. |
 | 5 | The review gate passed this head. A second model reads the diff for data that is made up and shown to the user as if real (when a source fails, finds nothing or leaves a field out), code that exists to pass tests or evaluators (special-casing sample or fixture inputs, test-mode branches, hidden duplicates for checks), and the project's own rules (`.issuelooper/review_rules.md`). Show an honest empty state or error instead of invented data. |
+| 6 | Nothing the project lists as the owner's (`guard.protected_paths`, such as the spec) changes. A test that needs other data brings its own copy under the tests; an owner's file that looks wrong is a comment on the issue. |
 
 ## Labels
 

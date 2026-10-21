@@ -8,8 +8,8 @@
 The supervisor (ccpool.py) and the monitor host (broker.py) start sessions, read
 their stream-json output and decide when to resume one. Everything that depends on
 the CLI lives here: the arguments for a first turn and for a resume, the session id
-in the stream, whether the model went silent after a finished step, and whether a
-result ended on a quota error with no answer.
+in the stream, whether the model went silent, whether the CLI is retrying a failed
+model call, and whether a result ended on a quota error with no answer.
 
 Which CLI a role uses: CCROLE_<ROLE>_CLI, else CCROLE_CLI, else agy. The model:
 CCROLE_MODEL_<ROLE>, else CCROLE_MODEL, else none (the CLI picks). ccrole.sh applies
@@ -110,9 +110,14 @@ class Cli:
         return ""
 
     def model_stalled(self, events: list[dict]) -> bool:
-        """The last event is a finished step and no tool is running: if nothing comes
-        next for a while, the model went silent."""
+        """No tool is running and the stream is not finished: if nothing comes next for
+        a while, the model went silent."""
         raise NotImplementedError
+
+    def in_model_retry(self, events: list[dict]) -> bool:
+        """The CLI is retrying a failed model call inside the turn, so the wait is the
+        model's, not the session's. False for a CLI whose stream does not show it."""
+        return False
 
     def quota_result(self, e: dict) -> bool:
         """A result that ended on a model quota or rate-limit error with no answer."""
@@ -205,10 +210,19 @@ class Agy(Cli):
         return sid
 
     def model_stalled(self, events):
+        # Any step but a running tool, including a reply that started and went quiet:
+        # streams have hung inside an ACTIVE agent_response for half an hour.
         events = self.current(events)
         last = events[-1] if events else {}
         step = last.get("step_update") if last.get("event") == "step_update" else None
-        return isinstance(step, dict) and step.get("state") != "ACTIVE"
+        return isinstance(step, dict) and not (step.get("state") == "ACTIVE" and step.get("step_type") == "tool")
+
+    def in_model_retry(self, events):
+        # agy marks each failed model call it retries with an error_message step.
+        events = self.current(events)
+        last = events[-1] if events else {}
+        step = last.get("step_update") if last.get("event") == "step_update" else None
+        return isinstance(step, dict) and step.get("step_type") == "error_message"
 
     def quota_result(self, e):
         # A result that has a full answer next to a stale 429 from a retried call did finish.

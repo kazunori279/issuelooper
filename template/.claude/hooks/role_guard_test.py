@@ -1256,6 +1256,27 @@ def test_merge_may_not_close_a_needs_live_issue() -> None:
     check("the same branch merges once the body says Refs", verdict, "allow")
 
 
+def test_merge_may_not_change_protected_paths() -> None:
+    """Gate 6. GUARD_PROTECTED_PATHS are the owner's: workers edited a fixture the
+    owner's demo replays to fit their own tests."""
+    env, _ = with_fake_gh(prs={
+        "710": {"files": [{"path": "src/app/cards.js", "changeType": "MODIFIED"},
+                          {"path": "spec/fixtures/script.json", "changeType": "MODIFIED"}]},
+        "711": {"files": [{"path": "src/app/cards.js", "changeType": "MODIFIED"},
+                          {"path": "tests/e2e/fixtures/spec_script.json", "changeType": "ADDED"},
+                          {"path": "specs.md", "changeType": "ADDED"}]},
+    })
+    protected = {**env, "GUARD_PROTECTED_PATHS": "spec/,LICENSE"}
+    verdict, reason = run("gh pr merge 710 --squash", role="merger", extra_env=protected)
+    check("a pull request that changes a protected path is refused", verdict, "refuse")
+    check("the refusal names the file and the way out",
+          ("spec/fixtures/script.json" in reason, "git checkout origin/main --" in reason), (True, True))
+    verdict, _ = run("gh pr merge 711 --squash", role="merger", extra_env=protected)
+    check("a test's own copy, and a path that only starts the same, are fine", verdict, "allow")
+    verdict, _ = run("gh pr merge 710 --squash", role="merger", extra_env=env)
+    check("no protected paths: the gate is off", verdict, "allow")
+
+
 def test_needs_live_close_requires_evidence() -> None:
     """The other end of gate 4: the issue stays open until somebody says where
     they saw the behavior."""

@@ -26,6 +26,10 @@ port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried;
 [sweep]
 command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
 slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time
+fast_command = ""            # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit
+                             # tests pass) run before a merge on a pull request that is behind main, merged with
+                             # main; a failure hands it back. Runs in a fresh worktree, so it sets up what it needs.
+                             # Empty = no such check
 
 [deploy]
 command = ""                 # POOL_DEPLOY_CMD: run from the shared checkout after main moves; empty = no deploys
@@ -41,6 +45,8 @@ idle_gap_minutes = 10        # POOL_UX_IDLE_GAP_MIN: while no worker or merger h
 [spec]
 enabled = false              # POOL_SPEC: while no worker or merger has work, a tester checks the app against the spec
 gap_minutes = 45             # POOL_SPEC_GAP_MIN: at most one spec check per this many minutes
+id_pattern = ""              # POOL_MAP_ID_PATTERN: a regex for the spec's requirement ids (such as '\bREQ-\d+\b');
+                             # a worker's prompt lists the files that name the ids its issue mentions
 
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
@@ -57,6 +63,8 @@ tester_port_base = 8021      # TST_PORT: the first port handed to a tester
 
 [guard]
 secret_urls = []             # GUARD_SECRET_URLS: URL paths whose response holds a secret; fetching them unfiltered is refused
+protected_paths = []         # GUARD_PROTECTED_PATHS: the owner's files (such as ["spec/"]; a trailing / covers a
+                             # directory); merge gate 6 refuses a pull request that changes any of them
 
 # Any other variable, passed through as written.
 [env]
