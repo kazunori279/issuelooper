@@ -24,8 +24,10 @@ serve() {  # serve PORT NAME [ENV=VALUE ...]
   local p="$1" name="$2"; shift 2
   fuser -k "$p/tcp" >/dev/null 2>&1 || true
   sleep 1
-  (cd "$dest" && env SESSIONS_DB="$base/$name.db" "$@" setsid uv run concierge --port "$p" \
-     > "$base/$name.log" 2>&1 < /dev/null &)
+  # The whole background job writes to the log: a shell left holding the supervisor's
+  # output pipe would keep the deploy from ever finishing.
+  (cd "$dest" && exec env SESSIONS_DB="$base/$name.db" "$@" setsid uv run concierge --port "$p") \
+    > "$base/$name.log" 2>&1 < /dev/null &
   for _ in $(seq 60); do curl -sf "localhost:$p/" > /dev/null && return 0; sleep 1; done
   echo "the $name server did not answer on :$p; see $base/$name.log" >&2
   tail -20 "$base/$name.log" >&2
