@@ -282,15 +282,46 @@ def is_prod(path: str) -> bool:
     return path.startswith(PATHS)
 
 
+def compact(part: str, context: int = 3) -> str:
+    """A file's diff with context lines kept only within `context` lines of a change."""
+    lines = part.splitlines(keepends=True)
+    changed = [i for i, ln in enumerate(lines)
+               if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))]
+    keep = set()
+    for i in changed:
+        keep.update(range(i - context, i + context + 1))
+    out, gap = [], False
+    for i, ln in enumerate(lines):
+        if not ln.startswith(" ") or i in keep:
+            out.append(ln)
+            gap = False
+        elif not gap:
+            out.append(" ...\n")
+            gap = True
+    return "".join(out)
+
+
 def cap_diff(diff: str, limit: int) -> tuple[str, bool]:
-    """Production files first, each cut to its share."""
+    """Production files get the whole budget before any test, fixture or doc file, with
+    context far from a change dropped. Equal shares once cut a long production file
+    in half while a test went whole, and a branch in the part cut merged unseen."""
     if len(diff) <= limit:
         return diff, False
-    files = sorted(split_files(diff), key=lambda f: not is_prod(f[0]))
-    parts = [p for _, p in files]
-    share = max(1500, limit // max(1, len(parts)))
-    out = "".join(p if len(p) <= share else p[:share] + "\n... (cut)\n" for p in parts)
-    return out[:limit], True
+    files = split_files(diff)
+    prod = [compact(p) for path, p in files if is_prod(path)]
+    rest = [compact(p) for path, p in files if not is_prod(path)]
+    cut = False
+    if sum(map(len, prod)) > limit:
+        share = max(1500, limit // max(1, len(prod)))
+        prod = [p if len(p) <= share else p[:share] + "\n... (cut)\n" for p in prod]
+        rest, cut = [], True
+    room = limit - sum(map(len, prod))
+    if rest and sum(map(len, rest)) > room:
+        share = max(0, room // len(rest))
+        rest = [p if len(p) <= share else p[:share] + "\n... (cut)\n" for p in rest if share > 200]
+        cut = True
+    out = "".join(prod + rest)
+    return out[:limit], cut or len(out) > limit
 
 
 def diff_key(diff: str) -> str:

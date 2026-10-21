@@ -366,6 +366,17 @@ try:
     check("cap cut", cut, True)
     check("cap puts production first", text.startswith("diff --git a/src/a.py"), True)
     check("cap within limit", len(text) <= 3000, True)
+    long_prod = diff_for([("src/places.py", ["line"] * 700 + ["is_legacy_mock = True"])])
+    tests = diff_for([("tests/test_big.py", ["x" * 100] * 50)])
+    text, cut = rg.cap_diff(tests + long_prod, 6000)
+    check(
+        "the whole production file, then tests in the room left",
+        (cut, "is_legacy_mock" in text, text.startswith("diff --git a/src/places.py"), "tests/test_big.py" in text),
+        (True, True, True, True),
+    )
+    unchanged = ("diff --git a/src/a.py b/src/a.py\n@@ -1,40 +1,41 @@\n" + " ctx\n" * 20 + "+new\n"
+                 + " ctx\n" * 20)
+    check("context far from a change is dropped", rg.compact(unchanged).count(" ctx"), 6)
 finally:
     os.environ.clear()
     os.environ.update(saved)

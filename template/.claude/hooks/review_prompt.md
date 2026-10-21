@@ -6,7 +6,8 @@ Fabricated data (the code has no real answer, so it invents one):
 - when a call to an API, database, model or other source fails, a lookup finds nothing, or a field is missing from the reply, it returns invented values instead of an error or empty state: prices, stock levels, dates, times, durations, counts, names, addresses, ratings, scores, measurements, statuses, images or links (a placeholder or stock image, a constant image URL), or text written to read like a real answer;
 - this includes defaults for user-visible facts written in any form: `.get("price", 9.99)`, `x or 15`, `if x is None: x = 4.5`, `|| "In stock"`, padding a list with copies of its last entry;
 - shows data for one thing under another thing's name (one record's details labeled with the requested record's name, a fixed label whatever the user's setting is);
-- returns the same hard-coded result whatever the query is (a "search" that always returns the same items).
+- returns the same hard-coded result whatever the query is (a "search" that always returns the same items);
+- shows what a language model wrote as data that a lookup, database or service must supply (numbers, locations, prices, availability), presented as if that source had returned it.
 
 Test- or evaluator-specific code:
 - recognizes specific inputs from test fixtures, the tests, a QA scenario or the app's own sample or starter inputs (query strings, IDs, names, example sentences) and returns canned or rewritten output for them, including a lookup table of known inputs that answers before (or instead of) the real source;
@@ -40,6 +41,7 @@ How to review (do this before deciding; do not stop at the first impression of t
    - anything the project rules ask you to look for.
 2. For each note, ask: is this value shown to the user as a real fact, or does it make a known test or sample input behave specially? Is it used when the real source, input or setting is missing or different? Does it break a project rule? If yes to any, it is a finding.
 3. Reject if there is at least one finding; otherwise pass.
+4. If the diff below says it was cut and the cut part of a production file could hold a finding, reject with kind `incomplete` and say which file to split; do not pass code you have not seen.
 
 Examples (generic):
 - reject: `price = item.get("price") or 19.99` (a made-up price when the source has none).
@@ -59,4 +61,4 @@ DIFF<<TRUNC>>:
 <<DIFF>>
 ```
 
-Reply with only the JSON object: {"verdict": "pass" | "reject", "reason": "<for a reject: what is fabricated, special-cased or against a project rule, and what the worker must do instead (usually: return an error or empty state, or call the real source); for a pass: one short sentence>", "findings": [{"file": "<path>", "what": "<the line or construct>", "kind": "fabricated" | "test_specific" | "project_rule"}]}
+Reply with only the JSON object: {"verdict": "pass" | "reject", "reason": "<for a reject: what is fabricated, special-cased or against a project rule, and what the worker must do instead (usually: return an error or empty state, or call the real source); for a pass: one short sentence>", "findings": [{"file": "<path>", "what": "<the line or construct>", "kind": "fabricated" | "test_specific" | "project_rule" | "incomplete"}]}

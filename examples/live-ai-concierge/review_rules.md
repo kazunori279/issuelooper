@@ -24,6 +24,21 @@ Also reject showing data for one place under another place's name: weather for
 Kyoto labeled with the requested city, or a fixed "渋谷" label whatever the
 configured location is.
 
+## Map data comes from a geocoder, a Places lookup or a router
+
+Reject showing a model's own reply as map or route data: coordinates, durations,
+distances, ratings or a polyline that a language model wrote (even with Google
+Search or Maps grounding) pinned or drawn as if a geocoder, Places lookup or
+router had returned them, including a polyline built from the model's waypoints
+(`encode_polyline(waypoints)`) and a straight-line distance standing in for a
+route. A grounded call may pick the places; the pins and routes must come from a
+geocoder, Places lookup or router, or the card says it has none.
+
+Also reject drawing a route in another travel mode than the card names: a driving
+path under a walking or transit card, a fallback chain over travel modes, or a
+router profile the server does not actually support (`router.project-osrm.org`
+routes only by car, whatever profile the URL names).
+
 ## The page's Maps key stays in the page
 
 The spec (R-MAP-2) says `GOOGLE_MAPS_API_KEY` is a browser key restricted to the
@@ -103,6 +118,10 @@ polish) is still rejected if any added line does one of the listed things.
   weather API.
 - reject: `minutes = route.get("minutes") or 10`.
 - reject: `requests.get("https://places.googleapis.com/v1/places:searchText", headers={"X-Goog-Api-Key": os.environ["GOOGLE_MAPS_API_KEY"]})` in `src/`.
+- reject: `polyline = encode_polyline([(s["lat"], s["lng"]) for s in model_json["waypoints"]])`
+  drawn as the route.
+- reject: a places card whose pins are the `lat`/`lng` a Search-grounded model call
+  wrote, with no geocoder or Places lookup.
 - pass: `if not results: return {"error": "No images found"}`.
 - pass: `lat, lng = settings.home_lat, settings.home_lng; label = settings.home_location`.
 - pass: `KANJI = {"Shibuya": "渋谷"}` used only to display a name the user or the
