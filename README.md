@@ -1,7 +1,11 @@
 # issuelooper
 
-A framework for developing a repository with many AI coding-agent sessions at
-once, coordinated only through GitHub. Issues are the work queue, labels are the
+A swarm development framework: your personal software factory. You file issues,
+answer the occasional question and review what ships; a team of AI coding agents
+does the rest.
+
+issuelooper develops a repository with many AI coding-agent sessions at once,
+coordinated only through GitHub. Issues are the work queue, labels are the
 state, pull requests are the output, and signed comments are the conversation. A
 deterministic supervisor (a program, not an agent) watches the repository, starts
 a fresh agent session for each unit of work, and merges pull requests that pass
