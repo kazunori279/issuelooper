@@ -50,7 +50,7 @@ as `UX: ...` issues; no one has to accept them first.
 
 - The [requirements](../../README.md#requirements): `gh` signed in, Python 3.11+,
   `agy` signed in with access to `gemini-4-argon-high`, herdr, and
-  [uv](https://docs.astral.sh/uv/). Linux.
+  [uv](https://docs.astral.sh/uv/). Linux or macOS.
 - A Google Cloud project with the Vertex AI API enabled, and Application Default
   Credentials on this machine (`gcloud auth application-default login`). Live mode
   uses `gemini-3.8-live` in `us-central1` (`LIVE_MODEL` in `.env`).
