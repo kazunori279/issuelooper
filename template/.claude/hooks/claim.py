@@ -65,6 +65,7 @@ GH = os.environ.get("CLAIM_GH", "gh")
 STALE_MIN = int(os.environ.get("CLAIM_STALE_MIN", "60"))
 MAX_ATTEMPTS = int(os.environ.get("CLAIM_MAX_ATTEMPTS", "3"))
 SETTLE_S = float(os.environ.get("CLAIM_SETTLE_S", "2"))
+READ_RETRIES = int(os.environ.get("CLAIM_READ_RETRIES", "3"))  # re-reads while the claim's own comment is missing
 JITTER_S = float(os.environ.get("CLAIM_JITTER_S", "3"))
 # Claims this much older than yours do not compete with it: they are left over
 # from an earlier cycle (a PR the merger later handed back). A live rival claimed
@@ -344,6 +345,14 @@ def try_claim(cand: dict, loop: str) -> dict | None:
     time.sleep(SETTLE_S)
     after = comments_of(n)
     ok, other = holds(after, token)
+    # GitHub's read can lag its write by seconds: read again before deciding, while
+    # this claim's own comment is missing from the thread.
+    for _ in range(READ_RETRIES):
+        if ok or any(e.get("token") == token for e in active_claims(after)):
+            break
+        time.sleep(SETTLE_S)
+        after = comments_of(n)
+        ok, other = holds(after, token)
     if not ok:
         # Two different failures: a rival's earlier claim, or GitHub's read not showing
         # this claim's own comment yet. Both were reported as "another worker claimed it
@@ -351,8 +360,11 @@ def try_claim(cand: dict, loop: str) -> dict | None:
         if any(e.get("token") == token for e in active_claims(after)):
             cand["lost"] = f"another worker claimed it first (claim {other})"
         else:
-            cand["lost"] = ("its own claim comment was not in GitHub's re-read of the thread "
-                            f"{SETTLE_S:.0f} s later (a read that lagged behind the write)")
+            cand["lost"] = ("its own claim comment was not in GitHub's re-reads of the thread "
+                            f"over {SETTLE_S * (READ_RETRIES + 1):.0f} s (a read that lagged behind the write)")
+            # Nobody holds it: put the stage back, or it sits at stage:doing with no
+            # claim until CLAIM_STALE_MIN.
+            edit_labels(n, remove or [frm], [DOING])
         if mine.get("id"):
             try:
                 gh("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/issues/comments/{mine['id']}")

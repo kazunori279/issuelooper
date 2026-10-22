@@ -308,6 +308,9 @@ def test_refusal_says_what_failed() -> None:
           (res.returncode, "own claim comment was not in GitHub's re-read" in res.stderr,
            "claimed it first" in res.stderr, "stage:doing" in res.stderr),
           (3, True, False, False))
+    labels = set(repo.load()["issues"]["5"]["labels"])
+    check("nobody holds it, so its stage is put back (not left at stage:doing)",
+          ("stage:triage" in labels, "stage:doing" in labels), (True, False))
     repo = Repo([issue(6, ["stage:triage", "P1"])], comments={6: [old_claim(900, "rival", 0.1)]})
     res = repo.run("claim", "--loop", "7", "--issue", "6")
     check("a rival's earlier claim: another worker claimed it first",
