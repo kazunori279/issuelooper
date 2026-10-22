@@ -54,8 +54,9 @@ as `UX: ...` issues; no one has to accept them first.
 - A Google Cloud project with the Vertex AI API enabled, and Application Default
   Credentials on this machine (`gcloud auth application-default login`). Live mode
   uses `gemini-3.8-live` in `us-central1` (`LIVE_MODEL` in `.env`).
-- Optional: a Google Maps JavaScript API key restricted to `localhost`, for the maps
-  in the places, route and place cards. Without one the cards show lists.
+- Optional: a Google Maps JavaScript API key whose website restriction allows
+  `http://localhost:*/*` (any port: the testers run the app on ports of their own),
+  for the maps in the places, route and place cards. Without one the cards show lists.
 - Ports 8000 and 8001 free: `deploy.sh` serves the app there for you.
 - Cost: in the benchmark, every role on Gemini 4 Argon cost about $570 of model
   usage at Vertex list prices over 12 hours with 16 sessions, so plan on roughly
