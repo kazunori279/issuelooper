@@ -1717,6 +1717,36 @@ def test_orphaned_stage_pr_goes_back_to_the_queue() -> None:
     check("one with an open PR is the merge path's", [u.kind for u in Rig(state([old], prs=[pr(143, 82, draft=True)])).step()], [])
 
 
+def test_requeue_looks_again_before_moving() -> None:
+    """The plan's snapshot can predate the supervisor's own merge by seconds: #28 was
+    requeued three seconds after its PR merged, before the label edit that follows."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-requeue-"))
+    log = d / "calls"
+
+    def outcome(pr_state: str) -> tuple[str, list[str]]:
+        gh = d / "gh"
+        gh.write_text(
+            "#!/bin/sh\n"
+            f'echo "$*" >> {log}\n'
+            'case "$1 $2" in\n'
+            "  'issue view') echo '{\"state\": \"OPEN\", \"labels\": [{\"name\": \"stage:pr\"}]}' ;;\n"
+            f"  'pr list') echo '[{{\"state\": \"{pr_state}\"}}]' ;;\n"
+            "esac\n"
+        )
+        gh.chmod(0o755)
+        log.write_text("")
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh)), fetcher=state, spawn=False)
+        w = ccpool.Session(pool, ccpool.Unit("auto", "requeue", "requeue:28@x", "rcl:28", 28, (1, 28), {}), 5)
+        w.dir.mkdir(parents=True, exist_ok=True)
+        return w.requeue({}), [c for c in log.read_text().splitlines() if c.startswith("issue edit")]
+
+    got, edits = outcome("MERGED")
+    check("a PR merged meanwhile: left alone", (got, edits), ("skipped (its PR is merged)", []))
+    got, edits = outcome("CLOSED")
+    check("closed without a merge: back to stage:triage",
+          (got, edits), ("ok", ["issue edit 28 --remove-label stage:pr --add-label stage:triage"]))
+
+
 def test_wrap_up_fits_the_timeout() -> None:
     """With a 20-minute timeout a 35-minute wrap-up never came: the worker was killed
     first, and the prompt promised a wrap-up it would never get."""

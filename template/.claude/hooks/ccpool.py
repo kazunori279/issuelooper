@@ -1784,6 +1784,20 @@ class Session(threading.Thread):
         """An issue at stage:pr with no open pull request: back to stage:triage, so the
         next worker opens a new one (the branch keeps what was done)."""
         n = self.unit.number
+        # The plan read a snapshot: the supervisor may have merged the PR seconds before
+        # (its label edit follows the merge). Look again, on GitHub, before moving it.
+        issue = self.gh("issue", "view", str(n), "--json", "state,labels")
+        prs = self.gh("pr", "list", "--state", "all", "--head", f"issue-{n}", "--json", "state")
+        try:
+            labels = {x["name"] for x in json.loads(issue.stdout)["labels"]}
+            open_ = json.loads(issue.stdout)["state"] == "OPEN"
+            states = {x["state"] for x in json.loads(prs.stdout or "[]")}
+        except (ValueError, KeyError, TypeError):
+            return "skipped (could not read the issue or its PRs)"
+        if not open_ or "stage:pr" not in labels:
+            return "skipped (no longer at stage:pr)"
+        if states & {"OPEN", "MERGED"}:
+            return f"skipped (its PR is {'open' if 'OPEN' in states else 'merged'})"
         self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
         self.gh("issue", "comment", str(n), "--body",
                 f"<!-- merger -->\nBack to stage:triage: #{n} was at stage:pr with no open pull request "
