@@ -50,6 +50,7 @@ KEYS = {
     ("ux", "enabled"): "POOL_UX",
     ("ux", "gap_minutes"): "POOL_UX_GAP_MIN",
     ("ux", "idle_gap_minutes"): "POOL_UX_IDLE_GAP_MIN",
+    ("ux", "journeys"): "POOL_UX_JOURNEYS",
     ("spec", "enabled"): "POOL_SPEC",
     ("spec", "gap_minutes"): "POOL_SPEC_GAP_MIN",
     ("spec", "id_pattern"): "POOL_MAP_ID_PATTERN",

@@ -262,8 +262,10 @@ def progress(m: dict) -> str:
         f"{(rv.get('input', 0) + rv.get('output', 0)) / 1e6:.2f}M tokens, verdicts "
         f"{esc(', '.join(f'{k} {v}' for k, v in sorted((rv.get('verdicts') or {}).items())) or 'none')}</div>"
     )
+    ux = m["progress"].get("ux_scores")
     return (
         "<h2>Progress</h2>"
+        + (f"<div style='margin-bottom:6px'>{esc(dm.ux_scores_text(ux))}</div>" if ux else "")
         + table
         + review
         + (

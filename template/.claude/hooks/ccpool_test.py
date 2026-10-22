@@ -1228,6 +1228,44 @@ def test_spec_check_when_half_the_pool_is_free() -> None:
           [u.kind for u in uncapped.step() if u.kind == "spec"], [])
 
 
+def test_ux_journeys_and_score() -> None:
+    ux = ccpool.Unit("tester", "ux", "ux:abc", "tst:ux:abc", None, (2, 0, 0), {"sha": "a" * 40, "deployed": True})
+    own = ccpool.tester_prompt(ux, 8021, "60m")
+    check("no journeys script: the tester keeps its own per repository, not in a shared /tmp/ux",
+          (f"/tmp/issuelooper-{ccpool.repo_root().name}/ux/journeys.py" in own, "/tmp/ux/" in own), (True, False))
+    given = ccpool.tester_prompt(ux, 8021, "60m", "ux/journeys.py")
+    check("the project's script: run it from the tree, write none, probes in a scratch file",
+          ("`ux/journeys.py`, from your extracted tree" in given, "do not write a journeys file" in given,
+           "/tmp/tst-8021-probes.py" in given, "/tmp/issuelooper-" in given), (True, True, True, False))
+    check("the report's first line is the score", ("`Score: N/100`" in own, "`Score: N/100`" in given), (True, True))
+    old = os.environ.pop("POOL_UX_JOURNEYS", None)
+    try:
+        os.environ["POOL_UX_JOURNEYS"] = "ux/journeys.py"
+        check("POOL_UX_JOURNEYS", ccpool.Config.from_env().ux_journeys, "ux/journeys.py")
+    finally:
+        os.environ.pop("POOL_UX_JOURNEYS", None)
+        if old is not None:
+            os.environ["POOL_UX_JOURNEYS"] = old
+    h = Rig(state(main="a" * 40), ux=True, ux_idle_gap_s=1e12)
+    for i, report in enumerate(("Score: 38/100\n\nThe commit ...", None, "# UX run\n**Score:** 58 / 100\n")):
+        h.st = state(main=str(i + 1) * 40)
+        u = next(u for u in h.step(2000) if u.kind == "ux")
+        w = next(w for w in h.pool.sessions.values() if w.unit.key == u.key)
+        w.dir.mkdir(parents=True, exist_ok=True)
+        if report is not None:
+            (w.dir / "ux_report.md").write_text(report)
+        h.finish(u.key)
+    logged = [json.loads(x) for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+              if json.loads(x)["kind"] == "ux_score"]
+    check("each UX run's score is logged, a missing one as missing",
+          [(r["sha"][:1], r["score"], "missing" in r) for r in logged], [("1", 38, False), ("2", None, True), ("3", 58, False)])
+    h.step()
+    check("and kept in state.json for the dashboard",
+          [r["score"] for r in json.loads((h.pool.cfg.logdir / "state.json").read_text())["ux_scores"]], [38, None, 58])
+    again = ccpool.Pool(h.pool.cfg, fetcher=state, spawn=False)
+    check("a restarted supervisor keeps them", [r["score"] for r in again.ux_scores], [38, None, 58])
+
+
 def test_stall_threshold_by_model() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
     pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)

@@ -99,8 +99,15 @@ as people would use it, and report what gets in their way.
 
 ### 1. The journeys
 
-Your journeys live in `/tmp/ux/journeys.py` and persist from run to run: the
-first run writes them, later runs extend them. Read the spec, the test hooks the
+When the project provides a journeys script (`[ux] journeys` in
+`.issuelooper/config.toml`; your prompt names it), run it from your extracted
+tree as `.issuelooper/project.md` says and do not write a journeys file of your
+own: any probes of your own go in `/tmp/tst-$TST_PORT-probes.py`.
+
+Without such a script, your journeys live in
+`/tmp/issuelooper-<repository directory name>/ux/journeys.py` (your prompt names
+the path) and persist from run to run: the first run writes
+them, later runs extend them. Read the spec, the test hooks the
 UI exposes, the journeys `.issuelooper/project.md` asks for, and the
 `owner-request` issues (`gh issue list --label owner-request --state all`), and
 make sure the journeys cover, at minimum:
@@ -128,7 +135,7 @@ Run it against your server, writing under `.ux/` (ignored by git, so the
 screenshots never dirty the shared checkout):
 
 ```bash
-python3 /tmp/ux/journeys.py --port "$TST_PORT" --out "$SHARED_REPO_PATH/.ux/<sha12>"
+python3 <your journeys file> --port "$TST_PORT" --out "$SHARED_REPO_PATH/.ux/<sha12>"
 ```
 
 When live checks are on and `.issuelooper/project.md` names a live journey, run
@@ -198,8 +205,9 @@ A worker turns the steps into a failing test, so make them exact.
 
 ### 4. Report
 
-Write `$LOGDIR/ux_report.md`: the commit, the journeys you ran (and which you
-added or changed this run), a 0-100 score for the app as a user would rate it,
-every finding with its disposition (`filed #N`, `already #N`,
-`not filed: <why>`), and anything you could not test. Then stop the server and
-remove `$T`.
+Write `$LOGDIR/ux_report.md`. Its first line is `Score: N/100`: N is the 0-100
+score a user would give the app, on the scale in step 2; the supervisor reads that
+line and the owner follows it from run to run. Then the commit, the journeys you
+ran (and which you added or changed this run), every finding with its disposition
+(`filed #N`, `already #N`, `not filed: <why>`), and anything you could not test.
+Then stop the server and remove `$T`.

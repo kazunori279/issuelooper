@@ -86,7 +86,9 @@ files that name the issue's backticked names and requirement ids (`[spec]
 id_pattern`), so it reads less to find its way. When workers run out of issues,
 testers make the next work: extra UX runs (never two at once) and, if enabled,
 spec checks. A spec check also starts while half of `[pool] max_sessions` would stay
-idle, at most one per `[spec] gap_minutes`.
+idle, at most one per `[spec] gap_minutes`. A UX run walks the journeys script the
+project names in `[ux] journeys`, or else journeys the tester writes and keeps per
+repository, and starts its report with `Score: N/100`, which the supervisor logs.
 
 ## Requirements
 
@@ -221,9 +223,9 @@ refreshes every 15 seconds and shows, from the top:
   timeout, seconds since its last output, the command it is running, and a link to
   its log; then the monitor and the aides.
 - **Queue**: open issues per stage, holds, the owner's decisions, open PRs.
-- **Progress** for the last hour and day: merges, hand-backs and why, issue cycle
-  time, how sessions ended, tokens per role, and cost where the agent CLI reports
-  one (Claude Code does; agy reports tokens only).
+- **Progress**: the recent UX scores, then for the last hour and day: merges,
+  hand-backs and why, issue cycle time, how sessions ended, tokens per role, and
+  cost where the agent CLI reports one (Claude Code does; agy reports tokens only).
 - **Over time**: agents at work by role, and open issues against merges per hour.
 - **Recent**: the supervisor's last 30 events in plain words.
 

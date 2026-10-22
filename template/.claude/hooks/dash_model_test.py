@@ -186,6 +186,8 @@ def fixture() -> pathlib.Path:
         "feed_pending": 2,
         "feed_pending_since": NOW - 1200,
         "main_check": {"sha": "b" * 40, "ok": False, "t": NOW - 30, "failing": ["tests/e2e/test_a.py::test_x"]},
+        "ux_scores": [{"t": NOW - 900, "sha": "a", "score": 38}, {"t": NOW - 600, "sha": "b", "score": None},
+                      {"t": NOW - 300, "sha": "c", "score": 58}, {"t": NOW - 100, "sha": "d", "score": 78}],
     }
     (pool / "state.json").write_text(json.dumps(state))
     (run / "pool.pid").write_text(str(os.getpid()))
@@ -302,6 +304,7 @@ def test_model() -> None:
         ("Needs attention:" in txt, "merger  PR #9" in txt, "Queue:" in txt, "main check RED bbbbbbbb" in txt),
         (True, True, True, True),
     )
+    check("the recent UX scores", "UX score 38 → 58 → 78 (1 report(s) without a score)" in txt, True)
 
 
 def test_empty_run_dir() -> None:
@@ -332,6 +335,7 @@ def test_pages_and_server() -> None:
     ):
         check(f"page has {part}", part in html, True)
     check("the Health line has main's last check", 'main check <b class="bad">red</b>' in html, True)
+    check("Progress has the UX scores", "UX score 38 → 58 → 78" in html, True)
     check(
         "the cost note for a CLI with no price",
         "sessions on a CLI that reports no price" in html,

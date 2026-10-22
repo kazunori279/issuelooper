@@ -47,6 +47,8 @@ enabled = true               # POOL_LIVE: needs:live issues get a tester's live 
 enabled = true               # POOL_UX: a tester walks the deployed app as a user and files findings
 gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many minutes
 idle_gap_minutes = 10        # POOL_UX_IDLE_GAP_MIN: while no worker or merger has work, another UX run after this many minutes
+journeys = "ux/journeys.py"  # POOL_UX_JOURNEYS: the project's journeys script, a path in the repository; project.md
+                             # says how to run it. Empty = the tester writes and keeps its own
 
 [spec]
 enabled = true               # POOL_SPEC: while no worker or merger has work, or half of max_sessions is idle, a

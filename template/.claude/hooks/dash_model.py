@@ -244,6 +244,10 @@ def load(
     model["progress"]["24h"]["reviewer"] = reviewer_usage(
         max(started_at, now - 24 * HOUR)
     )
+    # The UX runs' scores, oldest first (None: the report had no `Score: N/100`).
+    model["progress"]["ux_scores"] = [
+        r.get("score") for r in state.get("ux_scores") or []
+    ]
     model["attention"] = attention(model, state, log, now)
     return model
 
@@ -596,6 +600,17 @@ def attention(m: dict, state: dict, log: list[dict], now: float) -> list[dict]:
 # --- the terminal view --------------------------------------------------------------
 
 
+def ux_scores_text(scores: list) -> str:
+    """"UX score 38 → 58 → 78" for the last six runs that reported one."""
+    known = [str(s) for s in scores if s is not None][-6:]
+    missing = sum(1 for s in scores if s is None)
+    return (
+        "UX score "
+        + (" → ".join(known) or "none reported")
+        + (f" ({missing} report(s) without a score)" if missing else "")
+    )
+
+
 def main_check_text(mc: dict) -> str:
     """" · main check green abcd1234", or "" before the first check."""
     if not mc:
@@ -650,6 +665,8 @@ def text(m: dict, width: int = 100) -> str:
         )
         + f" · owner {st.get('stage:owner', 0)} · on hold {st.get('on hold', 0)} · open PRs {sum((q.get('prs') or {}).values())}",
     ]
+    if p.get("ux_scores"):
+        lines.append(ux_scores_text(p["ux_scores"]))
     for key in ("1h", "24h"):
         x = p[key]
         cyc = x["cycle_min"]

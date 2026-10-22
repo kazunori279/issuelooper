@@ -49,8 +49,9 @@ and empty states, and the cards' maps.
 
 ## UX run journeys
 
-The UX checks are in `ux/`; start every UX run from them rather than writing
-journeys from scratch:
+The UX checks are in `ux/`, and `[ux] journeys` in config.toml names
+`ux/journeys.py`: start every UX run from them, and never write a journeys file of
+your own:
 
 1. **Scripted journeys.** From the extracted tree (no server of your own needed;
    it starts the app itself with `ux/ux_script.json`, about 4 minutes):
@@ -69,7 +70,8 @@ journeys from scratch:
    the first answer, answer every question, and never show "Not delivered", a
    stuck status or a dead input. A step that fails in one of the two runs is a bug.
 3. **Your own probes.** Then up to six actions of your own, in a short Playwright
-   script, on whatever looked wrong or untested in the journeys, and every
+   script at `/tmp/tst-$TST_PORT-probes.py` (scratch, not a journeys file), on
+   whatever looked wrong or untested in the journeys, and every
    `owner-request` that shipped, with a screenshot after each.
 
 Judge every screenshot by `ux/rubric.md` (what counts as friction, and what does

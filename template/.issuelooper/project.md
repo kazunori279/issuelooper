@@ -50,7 +50,9 @@ apply. Keep it short: commands and paths, not prose.
 <!-- Optional, when `[ux] enabled = true`. Journeys the tester must cover beyond
      the standard ones (first visit on desktop and phone, every language, a long
      session, interruptions, shipped owner requests), and a live journey to run
-     twice when live checks are on. -->
+     twice when live checks are on. When the repository has its own journeys
+     script (`[ux] journeys` in config.toml), how to run it from the extracted
+     tree. -->
 
 ## Live mode
 

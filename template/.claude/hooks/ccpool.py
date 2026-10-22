@@ -58,6 +58,10 @@ UNITS
           workers' next work. A spec check also starts while at least half of
           POOL_MAX_WORKERS would stay free after the due units start, once
           POOL_SPEC_GAP_MIN passed; never two at once. Each tester gets its own port.
+          A UX run walks the project's journeys script (POOL_UX_JOURNEYS, a path
+          in the repository) when there is one, else journeys it keeps in
+          /tmp/issuelooper-<repository directory>/ux/; the score on its report's
+          first line (`Score: N/100`) is logged and shown on the dashboard.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
 monitor's; no unit is started for them, and none for an issue with an open blocker
@@ -277,6 +281,7 @@ class Config:
     auto_cap: int = 4
     ux_gap_s: float = 1500
     ux_idle_gap_s: float = 600
+    ux_journeys: str = ""  # the project's journeys script (a repository path); empty = the tester keeps its own
     spec: bool = False
     spec_gap_s: float = 2700
     unknown_s: float = 300
@@ -356,6 +361,7 @@ class Config:
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
+            ux_journeys=e("POOL_UX_JOURNEYS", "").strip(),
             spec_gap_s=gap_s("POOL_SPEC_GAP", 45),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
@@ -1004,7 +1010,30 @@ Do not read, rebase or merge any other pull request.
 Budget: hard wall-clock timeout of {timeout}."""
 
 
-def tester_prompt(u: Unit, port: int, timeout: str) -> str:
+def ux_journeys_path() -> str:
+    """Where a tester keeps its own journeys when the project has none: per repository,
+    so they neither leak into another loop on the machine nor come from one."""
+    return f"/tmp/issuelooper-{repo_root().name}/ux/journeys.py"
+
+
+SCORE_LINE = re.compile(r"(?i)\bscore\b\W*(\d{1,3})\s*/\s*100\b")
+
+
+def ux_score(report: pathlib.Path) -> int | None:
+    """N from a UX report's `Score: N/100` (asked for on its first line; looked for in the
+    first ten), or None when it has none."""
+    try:
+        lines = report.read_text(errors="replace").splitlines()[:10]
+    except OSError:
+        return None
+    for ln in lines:
+        m = SCORE_LINE.search(ln)
+        if m and int(m.group(1)) <= 100:
+            return int(m.group(1))
+    return None
+
+
+def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
     rules = (
         f"\n\nYour port is $TST_PORT={port}, yours alone (never the port the project's own run "
         f"command uses; scratch files and any app database under /tmp/tst-{port}-*). Stop every "
@@ -1046,14 +1075,23 @@ def tester_prompt(u: Unit, port: int, timeout: str) -> str:
             "Write the check's report to $LOGDIR/spec_report.md."
             + rules
         )
+    if journeys:
+        walk = (f"run the project's journeys, `{journeys}`, from your extracted tree as {PROJECT} says "
+                "(do not write a journeys file of your own; put any probes of your own in "
+                f"/tmp/tst-{port}-probes.py)")
+    else:
+        walk = (f"walk the user journeys in {ux_journeys_path()} (this repository's, kept from run to run; "
+                "write or extend them first if they do not cover what the spec and the recent owner "
+                "requests describe)")
     return (
         "Use the issuelooper-tester skill (section UX run) and do exactly one run, then stop.\n\n"
         f"Your unit: {where}. Start the app at that commit on your port in the mode {PROJECT} "
-        "names for UX runs, walk the user journeys in /tmp/ux/journeys.py (write or extend them first "
-        "if they do not cover what the spec and the recent owner requests describe), save every "
+        f"names for UX runs, {walk}, save every "
         f"screenshot under .ux/{sha[:12]}/, read all of them together against the product's spec "
         f"({PROJECT} says where it is) as a harsh UX reviewer, and file at most five new "
-        "findings. Write the run's report to $LOGDIR/ux_report.md."
+        "findings. Write the run's report to $LOGDIR/ux_report.md. Its first line must be "
+        "`Score: N/100`, N being the 0-100 score a user would give the app on the skill's scale; "
+        "the supervisor reads that line."
         + rules
     )
 
@@ -1477,7 +1515,7 @@ class Session(threading.Thread):
         else:
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
-            prompt = tester_prompt(u, self.port, cfg.timeouts["tester"])
+            prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys)
 
         rc, elapsed, timed_out = self.session(prompt, env)
 
@@ -2004,6 +2042,7 @@ class Pool:
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
         self.red_failing: tuple = ()  # the failing tests last reported on it
         self.own_deployed = ""
+        self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
         self.main_seen: dict[str, float] = {}
         self.stopping = False
         self.clock = time.time
@@ -2014,6 +2053,7 @@ class Pool:
         except (OSError, ValueError):
             self.seq = 0
         self.load_deploys()
+        self.load_ux_scores()
 
     # --- bookkeeping ---
     def log(self, kind: str, **kv):
@@ -2205,6 +2245,8 @@ class Pool:
                 )
         if outcome.startswith("quota error"):
             self.quota_seen(u.role)
+        if u.kind == "ux":
+            self.record_ux_score(w)
         extra = {}
         if (w.dir / "session.jsonl").exists():
             extra["usage"] = w.cli.usage(w.events())
@@ -2221,6 +2263,36 @@ class Pool:
             **extra,
         )
         self.wake.set()
+
+    def record_ux_score(self, w: Session):
+        """The score from the UX run's report, for pool.jsonl and the dashboard. 7 of 10
+        reports in one run had none, so a run's score could not be followed."""
+        score = ux_score(w.dir / "ux_report.md")
+        rec = {"t": round(self.clock(), 1), "sha": str(w.unit.info.get("sha", ""))[:12], "score": score}
+        with self.lock:
+            self.ux_scores = (self.ux_scores + [rec])[-20:]
+        if score is None:
+            self.log("ux_score", session=w.seq, sha=rec["sha"], score=None,
+                     missing="no `Score: N/100` line in ux_report.md")
+        else:
+            self.log("ux_score", session=w.seq, sha=rec["sha"], score=score)
+
+    def load_ux_scores(self):
+        """The scores this run already logged, so a restarted supervisor keeps them."""
+        try:
+            lines = (self.cfg.logdir / "pool.jsonl").read_text(errors="replace").splitlines()
+        except OSError:
+            return
+        for line in lines:
+            if '"ux_score"' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("kind") == "ux_score":
+                self.ux_scores.append({"t": rec.get("t", 0), "sha": rec.get("sha", ""), "score": rec.get("score")})
+        self.ux_scores = self.ux_scores[-20:]
 
     @staticmethod
     def label(u: Unit) -> str:
@@ -2625,6 +2697,7 @@ class Pool:
             "feed_pending": len(self.events),
             "feed_pending_since": self.pending_since,
             "main_check": self.main_check_last,
+            "ux_scores": self.ux_scores[-10:],
         }
         q = state["queue"]
         brief = {"open": q["open"], **q["stages"], "prs": sum(q["prs"].values())}
