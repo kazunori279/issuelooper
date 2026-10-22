@@ -91,7 +91,11 @@ the claim released without a failed attempt. Every quota error also holds new
 agent sessions pool-wide for a doubling pause (quota_seen), reset when a session
 ends ok. While the CLI itself retries a failed model call inside a turn (agy: the
 stream's last event is an error_message step), the session's clocks (timeout,
-wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session.
+wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session. When a
+session ends, processes still running with a working directory in its scratch paths
+(a worker's /tmp/wrk-<seq>-*, a merger's /tmp/mrg-<pr>-*, a tester's
+/tmp/tst-<port>-*) are killed and logged (leftovers_killed); POOL_KILL_LEFTOVERS=0
+turns that off.
 
 A worker's prompt quotes its issue (the body and the newest comments) and a map of
 the files on origin/main that name the issue's backticked names, and the spec's
@@ -267,6 +271,7 @@ class Config:
     stall_s: float = 600
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
+    kill_leftovers: bool = True  # kill what a session left running in its scratch paths
     # The most a session's clocks stand still for the CLI's own retries of a model call;
     # 20 min was not enough for a model whose calls kept failing for a while.
     retry_pause_max_s: float = 2400
@@ -349,6 +354,7 @@ class Config:
             stall_s=float(e("POOL_STALL_S", "600")),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
+            kill_leftovers=env_flag("POOL_KILL_LEFTOVERS", True),
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
@@ -1176,6 +1182,49 @@ SESSION = (
 )
 
 
+def parse_lsof(text: str) -> dict[int, str]:
+    """pid -> working directory from `lsof -a -d cwd -Fn` (lines `p<pid>` then `n<path>`)."""
+    out: dict[int, str] = {}
+    pid = None
+    for line in text.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:]) if line[1:].isdigit() else None
+        elif line.startswith("n") and pid is not None:
+            out[pid] = line[1:]
+    return out
+
+
+def process_cwds() -> dict[int, str]:
+    """pid -> working directory of every process this user can read: /proc on Linux,
+    else lsof ({} when neither works)."""
+    if os.path.isdir("/proc/self"):
+        out = {}
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                try:
+                    out[int(d)] = os.readlink(f"/proc/{d}/cwd")
+                except OSError:
+                    pass
+        return out
+    try:
+        r = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return parse_lsof(r.stdout)
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether pid runs (a zombie, already dead and waiting for its parent, does not)."""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
 # Session outcomes that put the claim back without counting a failed attempt.
 NOT_A_FAILURE = ("startup crash", "quota error", "stopped with the supervisor")
 
@@ -1454,6 +1503,55 @@ class Session(threading.Thread):
             for c in data.get("comments") or []
         )
 
+    def scratch_prefixes(self) -> list[str]:
+        """Where this session's worktrees and scratch files live, as the prompts and
+        skills name them: /tmp/wrk-<seq>-*, /tmp/mrg-<pr>-*, /tmp/tst-<port>-*."""
+        u = self.unit
+        if u.role == "worker":
+            name = f"wrk-{self.seq}-"
+        elif u.role == "merger" and u.number is not None:
+            name = f"mrg-{u.number}-"
+        elif u.role == "tester" and self.port:
+            name = f"tst-{self.port}-"
+        else:
+            return []
+        return sorted({f"{t}/{name}" for t in ("/tmp", os.path.realpath("/tmp"))})
+
+    def kill_leftovers(self) -> list[int]:
+        """Kill the processes still running in this session's scratch paths: servers and
+        test runs a session started with setsid or nohup leave its process group and
+        outlive it (five were found hours after their sessions). Matched by working
+        directory alone, never by name; the supervisor is never one of them."""
+        prefixes = tuple(self.scratch_prefixes())
+        if not prefixes:
+            return []
+        spare = {1, os.getpid(), os.getppid()}
+        found = {pid: cwd for pid, cwd in process_cwds().items() if pid not in spare and cwd.startswith(prefixes)}
+        if not found:
+            return []
+        procs = []
+        for pid, cwd in found.items():
+            try:
+                cmd = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            except OSError:
+                cmd = ""
+            procs.append({"pid": pid, "cwd": cwd, "cmd": cmd.strip()[:200]})
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = time.time() + 5
+        while time.time() < deadline and any(pid_alive(p) for p in found):
+            time.sleep(0.2)
+        for pid in found:
+            if pid_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        self.pool.log("leftovers_killed", session=self.seq, role=self.unit.role, processes=procs)
+        return sorted(found)
+
     def kill(self):
         if self.proc and self.proc.poll() is None:
             try:
@@ -1518,6 +1616,8 @@ class Session(threading.Thread):
             prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys)
 
         rc, elapsed, timed_out = self.session(prompt, env)
+        if cfg.kill_leftovers:
+            self.kill_leftovers()
 
         if self.pool.stopping:
             # The owner stopped the loop: the claim goes back without a failed attempt,

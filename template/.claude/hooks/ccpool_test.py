@@ -1266,6 +1266,43 @@ def test_ux_journeys_and_score() -> None:
     check("a restarted supervisor keeps them", [r["score"] for r in again.ux_scores], [38, None, 58])
 
 
+def test_leftover_processes_are_killed() -> None:
+    """A server or test run a session started with setsid outlives it; when the session
+    ends, what runs in its scratch paths is killed, and nothing else."""
+    seq = 900000 + os.getpid() % 90000
+    inside = pathlib.Path(tempfile.mkdtemp(prefix=f"wrk-{seq}-7-", dir="/tmp"))
+    outside = pathlib.Path(tempfile.mkdtemp(prefix=f"wrk-{seq + 1}-7-", dir="/tmp"))
+    procs = [subprocess.Popen(["sleep", "60"], cwd=str(c), start_new_session=True) for c in (inside, outside)]
+    try:
+        h = Rig(state())
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:7@x", "wrk:7", 7, (4,), {}), seq)
+        check("a worker's scratch paths", w.scratch_prefixes()[0], f"/tmp/wrk-{seq}-")
+        killed = w.kill_leftovers()
+        check("the process in the session's paths is killed", (killed, procs[0].wait(timeout=10) != 0),
+              ([procs[0].pid], True))
+        check("one in another session's paths is not", procs[1].poll(), None)
+        rec = [json.loads(x) for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+               if json.loads(x)["kind"] == "leftovers_killed"]
+        check("and the kill is logged", [(p["pid"], p["cwd"], p["cmd"]) for p in rec[0]["processes"]],
+              [(procs[0].pid, str(inside), "sleep 60")])
+        check("nothing left: nothing logged", w.kill_leftovers(), [])
+        m = ccpool.Session(h.pool, ccpool.Unit("merger", "land", "mrg:12@x", "mrg:12", 12, (0,), {"issue": 2}), 3)
+        t = ccpool.Session(h.pool, ccpool.Unit("tester", "ux", "ux:a", "tst:ux:a", None, (2,), {"sha": "a"}), 4)
+        t.port = 8121
+        a = ccpool.Session(h.pool, ccpool.Unit("auto", "merge", "merge:12@x", "mrg:12", 12, (0,), {}), 5)
+        check("a merger's, a tester's, none for a unit without an agent",
+              (m.scratch_prefixes()[0], t.scratch_prefixes()[0], a.scratch_prefixes()), ("/tmp/mrg-12-", "/tmp/tst-8121-", []))
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+        inside.rmdir()
+        outside.rmdir()
+    check("lsof's cwd listing (no /proc)", ccpool.parse_lsof("p12\nfcwd\nn/tmp/wrk-3-9-wt\np40\nfcwd\nn/home/x\n"),
+          {12: "/tmp/wrk-3-9-wt", 40: "/home/x"})
+
+
 def test_stall_threshold_by_model() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
     pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)
@@ -2323,6 +2360,7 @@ def test_end_to_end_with_fake_github() -> None:
         POOL_REVIEW_CMD=str(review),
         POOL_GUARD_CMD=str(guard),
         POOL_MAIN_CHECK="0",  # it would fetch into this checkout
+        POOL_KILL_LEFTOVERS="0",  # its sessions' paths (/tmp/wrk-1-*) may be a real loop's on this machine
     )
     proc = subprocess.Popen(
         [sys.executable, str(HERE / "ccpool.py"), "run"],

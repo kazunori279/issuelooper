@@ -80,7 +80,8 @@ call (agy). Conflicting PRs that only add lines are rebased without an agent (on
 per head; a head whose rebase failed goes to a merger), a PR that conflicts again
 after three merger sessions (main kept moving) goes back to a worker, a file that keeps
 conflicting gets an issue to split it, and a deploy that lost a race with another
-`git fetch` is tried again. Issues blocked by an open issue (a `Blocked by:` line
+`git fetch` is tried again. Servers and test runs a session left running in its
+scratch paths under `/tmp` are killed when it ends. Issues blocked by an open issue (a `Blocked by:` line
 or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the
 files that name the issue's backticked names and requirement ids (`[spec]
 id_pattern`), so it reads less to find its way. When workers run out of issues,
