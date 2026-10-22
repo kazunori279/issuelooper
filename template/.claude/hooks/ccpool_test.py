@@ -1067,6 +1067,137 @@ def test_idle_pool_makes_tester_work() -> None:
     check("spec checks alone", [u.kind for u in h.step()], ["spec"])
 
 
+FAKE_GH_LOG = r"""#!/bin/sh
+echo "$*" >> "$0.log"
+case "$1 $2" in
+  "issue list") cat "$0.list" 2>/dev/null || echo "[]" ;;
+  "issue create") echo "https://github.com/o/r/issues/77" ;;
+esac
+"""
+
+
+def test_main_check_reports_a_red_main() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-maincheck-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_LOG)
+    gh.chmod(0o755)
+    h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
+    pool = h.pool
+    red = ("tests/unit/test_ok.py .. \nFAILED tests/e2e/test_a.py::test_x - AssertionError: boom\n"
+           "FAILED tests/e2e/test_b.py::test_y\nERROR tests/e2e/test_c.py::test_z\n== sweep is red ==\n")
+    results = {"1": (False, red), "2": (False, red), "3": (True, "44 green"),
+               "4": (False, "FAILED tests/e2e/test_d.py::test_w\n"), "5": (True, "45 green")}
+    swept, gate = [], threading.Event()
+    gate.set()
+
+    def sweep(sha):
+        swept.append(sha[0])
+        gate.wait(10)
+        return results[sha[0]]
+    pool.sweep_main = sweep
+    pool.commits_since = lambda old, new: [f"{new[:7]} Merge PR #5", f"{old[:7] or 'none'} older"]
+
+    def settle():
+        for _ in range(100):
+            if not pool.main_check_running:
+                return
+            time.sleep(0.05)
+
+    def calls():
+        return (d / "gh.log").read_text() if (d / "gh.log").exists() else ""
+    h.step()
+    settle()
+    check("a red main: an issue titled by the first failing tests, type:bug P0 stage:triage",
+          [ln for ln in calls().splitlines() if ln.startswith("issue create")][0].split(" --body ")[0],
+          "issue create --title main is red: tests/e2e/test_a.py::test_x, tests/e2e/test_b.py::test_y and 1 more "
+          "--label type:bug --label P0 --label stage:triage")
+    text = calls()
+    check("signed, with the failing tests, the commits and the output",
+          ("<!-- merger -->" in text, "- `tests/e2e/test_c.py::test_z`" in text,
+           "No green main seen since the supervisor started" in text, "AssertionError: boom" in text),
+          (True, True, True, True))
+    check("an open one was looked for first", "issue list --state open --search main is red in:title" in text, True)
+    check("the monitor hears it", any("main 11111111 is RED" in e and "filed #77" in e for e in pool.events), True)
+    h.step()
+    check("the dashboard's state has the check",
+          {k: v for k, v in json.loads((pool.cfg.logdir / "state.json").read_text())["main_check"].items() if k != "t"},
+          {"sha": "1" * 40, "ok": False, "failing": ["tests/e2e/test_a.py::test_x", "tests/e2e/test_b.py::test_y",
+                                                     "tests/e2e/test_c.py::test_z"]})
+    gate.clear()
+    h.st = state(main="2" * 40)
+    h.step()
+    h.st = state(main="9" * 40)
+    h.step()
+    h.st = state(main="3" * 40)
+    h.step()
+    check("one check at a time", swept, ["1", "2"])
+    gate.set()
+    settle()
+    h.step()
+    settle()
+    check("then the newest main only, not the ones in between", swept, ["1", "2", "3"])
+    log = calls()
+    check("still red on the same tests (2): no second issue and no comment",
+          (log.count("issue create"), log.count("issue comment")), (1, 1))
+    check("green again (3): a comment and the issue closed",
+          (log.splitlines()[-1], "main is green again at 33333333" in log), ("issue close 77", True))
+    check("and the monitor hears it", any("green again at 33333333; closed #77" in e for e in pool.events), True)
+    h.st = state(main="4" * 40)
+    h.step()
+    settle()
+    check("red again: a new issue, with the commits since the last green main",
+          (calls().count("issue create"), "Commits since the last green main (33333333)" in calls()), (2, True))
+    (d / "gh.list").write_text(json.dumps([{"number": 80, "title": "main is red: something"}]))
+    pool.red_issue, pool.red_looked = None, False  # a restarted supervisor
+    h.st = state(main="5" * 40)
+    h.step()
+    settle()
+    check("a restarted supervisor finds the open issue and closes it on green", calls().splitlines()[-1],
+          "issue close 80")
+    off = Rig(state(main="6" * 40))
+    off.step()
+    check("POOL_MAIN_CHECK off: no check", (off.pool.main_check_sha, off.pool.main_check_running), ("", False))
+    old = {k: os.environ.pop(k, None) for k in ("POOL_MAIN_CHECK", "SWEEP_COMMAND")}
+    try:
+        check("no sweep command: off", ccpool.Config.from_env().main_check, False)
+        os.environ["SWEEP_COMMAND"] = "make verify"
+        check("on by default with a sweep command", ccpool.Config.from_env().main_check, True)
+        os.environ["POOL_MAIN_CHECK"] = "0"
+        check("POOL_MAIN_CHECK=0 turns it off", ccpool.Config.from_env().main_check, False)
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    work, g = git_repo(d / "repo")
+    (work / ".claude/hooks").mkdir(parents=True)
+    for f in ("sweep_run.py", "config.py"):
+        (work / ".claude/hooks" / f).write_text((HERE / f).read_text())
+    g("add", "-f", ".")
+    g("commit", "-qm", "base")
+    g("push", "-q", "origin", "HEAD:main")
+    sha = g("rev-parse", "HEAD")
+    keep = {k: os.environ.get(k) for k in ("SHARED_REPO_PATH", "SWEEP_COMMAND", "SWEEP_LOCK", "SWEEP_RECORD_DIR")}
+    os.environ.update(SHARED_REPO_PATH=str(work), SWEEP_LOCK=str(d / "lock"), SWEEP_RECORD_DIR=str(d / "rec"),
+                      SWEEP_COMMAND="echo 'FAILED tests/t.py::test_a - boom'; exit 1")
+    try:
+        real = ccpool.Pool(ccpool.Config(logdir=d / "pool2"), fetcher=state, spawn=False)
+        ok, out = real.sweep_main(sha)
+        check("the real sweep in a worktree at main: red, with the failing test",
+              (ok, ccpool.failing_tests(out)), (False, ["tests/t.py::test_a"]))
+        os.environ["SWEEP_COMMAND"] = "true"
+        check("and green", real.sweep_main(sha)[0], True)
+        check("its worktree is gone", pathlib.Path(f"/tmp/issuelooper-main-{sha[:12]}").exists(), False)
+    finally:
+        for k, v in keep.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    check("a red sweep with no pytest summary names sweep_run.py's reasons",
+          ccpool.failing_tests("x\n== sweep is red ==\n   `make verify` exited 2\n\nsweep record not written\n"),
+          ["`make verify` exited 2"])
+
+
 def test_stall_threshold_by_model() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
     pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)
@@ -2123,6 +2254,7 @@ def test_end_to_end_with_fake_github() -> None:
         SHARED_REPO_PATH=str(HERE.parents[1]),
         POOL_REVIEW_CMD=str(review),
         POOL_GUARD_CMD=str(guard),
+        POOL_MAIN_CHECK="0",  # it would fetch into this checkout
     )
     proc = subprocess.Popen(
         [sys.executable, str(HERE / "ccpool.py"), "run"],

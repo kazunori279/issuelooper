@@ -33,6 +33,8 @@ fast_command = "uv sync --frozen -q && uv run python -c 'import concierge.main' 
                              # tests pass) run before a merge on a pull request that is behind main, merged with
                              # main; a failure hands it back. Runs in a fresh worktree, so it sets up what it needs.
                              # Empty = no such check
+main_check = true            # POOL_MAIN_CHECK: after main moves, run the whole suite on the newest main in the
+                             # background; a red main files a `main is red` issue (P0), closed when it is green again
 
 [deploy]
 command = "bash .issuelooper/deploy.sh"   # POOL_DEPLOY_CMD: run from the shared checkout after main moves; empty = no deploys

@@ -29,6 +29,7 @@ cli = "agy"
 [sweep]
 command = "make verify"
 slots = 2
+main_check = false
 [live]
 enabled = true
 [spec]
@@ -52,6 +53,7 @@ with tempfile.TemporaryDirectory() as d:
     check("role model", values.get("CCROLE_MODEL_TESTER"), "big-model")
     check("role cli", values.get("CCROLE_MONITOR_CLI"), "agy")
     check("int", values.get("SWEEP_SLOTS"), "2")
+    check("main check off", values.get("POOL_MAIN_CHECK"), "0")
     check("bool", values.get("POOL_LIVE"), "1")
     check("spec", (values.get("POOL_SPEC"), values.get("POOL_SPEC_GAP_MIN")), ("1", "30"))
     check("list", values.get("REVIEW_PATHS"), "src/,static/")

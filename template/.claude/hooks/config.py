@@ -43,6 +43,7 @@ KEYS = {
     ("sweep", "slots"): "SWEEP_SLOTS",
     ("sweep", "record_dir"): "SWEEP_RECORD_DIR",
     ("sweep", "fast_command"): "POOL_FAST_CHECK_CMD",
+    ("sweep", "main_check"): "POOL_MAIN_CHECK",
     ("deploy", "command"): "POOL_DEPLOY_CMD",
     ("deploy", "timeout_s"): "POOL_DEPLOY_TIMEOUT_S",
     ("live", "enabled"): "POOL_LIVE",

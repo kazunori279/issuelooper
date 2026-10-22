@@ -86,6 +86,13 @@ def header(m: dict) -> str:
         f'{esc(h["monitor"])}</b> <span class="dim">{esc(m["monitor"].get("host", ""))}</span>',
         f"main <code>{esc(h['main'][:8])}</code>",
     ]
+    mc = h.get("main_check") or {}
+    if mc:
+        ok = mc.get("ok")
+        items.append(
+            f'main check <b class="{ {True: "ok", False: "bad"}.get(ok, "warn") }">'
+            f'{ {True: "green", False: "red"}.get(ok, "not run") }</b> <code>{esc(str(mc.get("sha", ""))[:8])}</code>'
+        )
     if h["deployed"]:
         items.append(
             f'deployed <code>{esc(h["deployed"][:8])}</code> <span class="dim">{dm.ago(h["deployed_ago_s"])} ago</span>'

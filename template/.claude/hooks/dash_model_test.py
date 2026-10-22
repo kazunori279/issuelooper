@@ -185,6 +185,7 @@ def fixture() -> pathlib.Path:
         ],
         "feed_pending": 2,
         "feed_pending_since": NOW - 1200,
+        "main_check": {"sha": "b" * 40, "ok": False, "t": NOW - 30, "failing": ["tests/e2e/test_a.py::test_x"]},
     }
     (pool / "state.json").write_text(json.dumps(state))
     (run / "pool.pid").write_text(str(os.getpid()))
@@ -275,8 +276,9 @@ def test_model() -> None:
             any("#5 failed twice in a row (timed out, failed)" in w for w in whats),
             any("could not read GitHub" in w for w in whats),
             any("2 update(s) have waited" in w for w in whats),
+            any("main is red at bbbbbbbb: tests/e2e/test_a.py::test_x" in w for w in whats),
         ],
-        [True] * 7,
+        [True] * 8,
     )
     check(
         "red before yellow",
@@ -297,8 +299,8 @@ def test_model() -> None:
     txt = dm.text(m)
     check(
         "terminal view",
-        ("Needs attention:" in txt, "merger  PR #9" in txt, "Queue:" in txt),
-        (True, True, True),
+        ("Needs attention:" in txt, "merger  PR #9" in txt, "Queue:" in txt, "main check RED bbbbbbbb" in txt),
+        (True, True, True, True),
     )
 
 
@@ -329,6 +331,7 @@ def test_pages_and_server() -> None:
         "/session/5",
     ):
         check(f"page has {part}", part in html, True)
+    check("the Health line has main's last check", 'main check <b class="bad">red</b>' in html, True)
     check(
         "the cost note for a CLI with no price",
         "sessions on a CLI that reports no price" in html,

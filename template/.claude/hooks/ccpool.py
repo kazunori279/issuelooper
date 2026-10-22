@@ -107,6 +107,17 @@ that fails on git's "cannot lock ref" (another unit fetching into the same .git)
 tried again after 5 s and 10 s. While a merger session is running it waits up to
 POOL_DEPLOY_GRACE_S, so one deploy carries both merges. Empty: no deploys.
 
+MAIN CHECK
+
+With POOL_MAIN_CHECK (on by default when SWEEP_COMMAND is set), each time origin/main
+moves the supervisor runs the full check suite on it in a worktree (sweep_locked.py,
+so it takes a sweep slot like any sweep), in the background, one run at a time: a
+main that moved during a run is not checked, only the newest. A red main tells the
+monitor and files an issue `main is red: <first failing tests>` (type:bug, P0,
+stage:triage) with the failing tests, the commits since the last green main and the
+end of the output, or comments on the one already open; the next green main closes
+it. Merges never wait for it.
+
 MONITOR
 
 The monitor is broker.py's long-lived session: it triages and re-prioritizes. When
@@ -254,6 +265,7 @@ class Config:
     # 20 min was not enough for a model whose calls kept failing for a while.
     retry_pause_max_s: float = 2400
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
+    main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
     fast_check_s: float = 300
     map_id_pattern: str = ""  # a regex for the spec's requirement ids (the worker's file map)
     stale_min: int = 60
@@ -332,6 +344,7 @@ class Config:
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
+            main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
             map_id_pattern=e("POOL_MAP_ID_PATTERN", "").strip(),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
@@ -482,6 +495,24 @@ def pr_issue(pr: dict) -> int | None:
         return int(m.group(1))
     m = LINK.search(pr.get("body") or "")
     return int(m.group(1)) if m else None
+
+
+FAILED_LINE = re.compile(r"(?m)^(?:FAILED|ERROR) (\S+)")
+
+
+def failing_tests(out: str) -> list[str]:
+    """The tests a red sweep names (pytest's `FAILED <test>` and `ERROR <test>` lines),
+    else the reasons sweep_run.py printed under `== sweep is red ==`."""
+    found: list[str] = []
+    for t in FAILED_LINE.findall(out):
+        if t not in found:
+            found.append(t)
+    if found:
+        return found
+    tail = out.split("== sweep is red ==", 1)
+    if len(tail) < 2:
+        return []
+    return [ln.strip() for ln in tail[1].splitlines() if ln.strip() and not ln.startswith("sweep ")][:5]
 
 
 def blocked(issue: dict, open_numbers: set[int]) -> bool:
@@ -1950,6 +1981,13 @@ class Pool:
         self.merge_lock = threading.Lock()
         self.deploy_tried: set[str] = set()
         self.main_checks: dict[str, bool] = {}  # main sha -> its fast check passed
+        self.main_check_sha = ""  # the newest main a full check started on
+        self.main_check_running = False
+        self.main_check_last: dict = {}  # {sha, ok, t, failing}: the last full check that finished
+        self.main_green = ""  # the last main whose full check was green
+        self.red_issue: int | None = None  # the open `main is red` issue
+        self.red_looked = False  # whether GitHub was asked for one since this supervisor started
+        self.red_failing: tuple = ()  # the failing tests last reported on it
         self.own_deployed = ""
         self.main_seen: dict[str, float] = {}
         self.stopping = False
@@ -2256,6 +2294,128 @@ class Pool:
             )
         self.wake.set()
 
+    # --- main's own check ---
+    def gh(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([self.cfg.gh, *args], capture_output=True, text=True, timeout=120,
+                              cwd=repo_root())
+
+    def main_check_due(self, st: dict):
+        """Start the full check of the newest origin/main, unless one is running. The
+        merged-tree check runs only the quick command, so a semantic conflict in the
+        slower tests reached main twice in one run and nobody noticed for half an hour."""
+        main = st.get("main", "")
+        with self.lock:
+            if not self.cfg.main_check or not main or self.main_check_running or main == self.main_check_sha:
+                return
+            self.main_check_running, self.main_check_sha = True, main
+        threading.Thread(target=self.check_main, args=(main,), daemon=True).start()
+
+    def check_main(self, sha: str):
+        try:
+            ok, out = self.sweep_main(sha)
+            self.main_checked(sha, ok, out)
+        except Exception as exc:  # noqa: BLE001 - a failed check is not a failed supervisor
+            self.log("main_check_error", sha=sha[:12], error=str(exc)[:300])
+        finally:
+            with self.lock:
+                self.main_check_running = False
+            self.wake.set()  # main may have moved meanwhile
+
+    def sweep_main(self, sha: str) -> tuple[bool | None, str]:
+        """The sweep at sha in a worktree: (True green, False red, None when it could not
+        run; its output)."""
+        root = str(repo_root())
+        wt = f"/tmp/issuelooper-main-{sha[:12]}"
+
+        def git(*a):
+            return subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, timeout=300)
+        git("worktree", "remove", "--force", wt)
+        try:
+            for attempt in range(3):  # other units fetch into the same .git (ref lock)
+                if git("fetch", "-q", "origin", "main").returncode == 0:
+                    break
+                time.sleep(2 + 2 * attempt)
+            if git("worktree", "add", "-q", "--detach", wt, sha).returncode != 0:
+                return None, f"could not add a worktree at {sha[:12]}"
+            r = subprocess.run([sys.executable, str(HERE / "sweep_locked.py")], cwd=wt, env=dict(os.environ),
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3600)
+            out = r.stdout + r.stderr
+            if r.returncode == 0 and "green" in r.stdout:
+                return True, out
+            # 1 is a red sweep; 2 and 3 mean it did not run (no runner, no slot).
+            return (False if r.returncode == 1 else None), out
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        finally:
+            git("worktree", "remove", "--force", wt)
+
+    def commits_since(self, old: str, new: str) -> list[str]:
+        root = str(repo_root())
+        args = ["log", "--oneline", "--no-decorate"] + ([f"{old}..{new}"] if old else ["-10", new])
+        r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=60)
+        return r.stdout.splitlines()[:30] if r.returncode == 0 else []
+
+    def find_red_issue(self) -> int | None:
+        r = self.gh("issue", "list", "--state", "open", "--search", "main is red in:title",
+                    "--json", "number,title")
+        try:
+            found = [i["number"] for i in json.loads(r.stdout or "[]") if i["title"].startswith("main is red")]
+        except (ValueError, KeyError, TypeError):
+            found = []
+        return min(found) if found else None
+
+    def main_checked(self, sha: str, ok: bool | None, out: str):
+        failing = failing_tests(out) if ok is False else []
+        with self.lock:
+            self.main_check_last = {"sha": sha, "ok": ok, "t": round(time.time(), 1), "failing": failing[:5]}
+        self.log("main_check", sha=sha[:12], ok=ok, failing=failing[:5])
+        if ok is None:
+            return  # it could not run; the next main gets a check
+        if not self.red_looked:  # one left open by an earlier run
+            self.red_issue, self.red_looked = self.find_red_issue(), True
+        if ok:
+            self.main_green = sha
+            n, self.red_issue, self.red_failing = self.red_issue, None, ()
+            if n:
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\nmain is green again at {sha[:8]}: the full check suite passes there.")
+                self.gh("issue", "close", str(n))
+                self.event(f"main is green again at {sha[:8]}; closed #{n}")
+            return
+        self.report_red(sha, failing, out)
+
+    def report_red(self, sha: str, failing: list[str], out: str):
+        """File the `main is red` issue, or update the open one when what fails changed."""
+        names = ", ".join(failing[:2]) + (f" and {len(failing) - 2} more" if len(failing) > 2 else "")
+        title = f"main is red: {names or 'the check suite fails'}"[:200]
+        commits = self.commits_since(self.main_green, sha)
+        since = (f"Commits since the last green main ({self.main_green[:8]}):" if self.main_green
+                 else "No green main seen since the supervisor started; the newest commits:")
+        body = (
+            f"<!-- merger -->\nThe full check suite (`{os.environ.get('SWEEP_COMMAND', '')}`) fails on "
+            f"origin/main at {sha[:8]}, so every pull request is now checked against a broken main. "
+            "Merges go on; fix this first.\n\nFailing:\n"
+            + ("\n".join(f"- `{t}`" for t in failing[:20]) or "- (no test named; see the output)")
+            + f"\n\n{since}\n" + ("\n".join(f"- {c}" for c in commits) or "- (could not list them)")
+            + "\n\nThe end of the output:\n\n```\n" + out.strip()[-3000:].replace("```", "'''")
+            + "\n```\n"
+        )
+        if self.red_issue is None:
+            r = self.gh("issue", "create", "--title", title, "--label", "type:bug", "--label", "P0",
+                        "--label", "stage:triage", "--body", body)
+            m = re.search(r"/issues/(\d+)", r.stdout)
+            self.red_issue = int(m.group(1)) if m else None
+            what = f"filed #{self.red_issue}" if m else f"could not file an issue ({r.stderr.strip()[-200:]})"
+        elif tuple(failing) != self.red_failing:
+            self.gh("issue", "comment", str(self.red_issue), "--body", body)
+            self.gh("issue", "edit", str(self.red_issue), "--title", title)
+            what = f"updated #{self.red_issue}"
+        else:
+            return  # still red on the same tests: the issue already says so
+        self.red_failing = tuple(failing)
+        self.event(f"main {sha[:8]} is RED: the full check suite fails ({names or 'no test named'}); {what}. "
+                   "Merges go on; the fix is P0")
+
     # --- monitor feed ---
     def observe(self, st: dict, now: float, started: list[Unit], stuck: list[Unit]):
         """Turn the change since the last snapshot into monitor events."""
@@ -2424,6 +2584,7 @@ class Pool:
         ):
             self.hurry_pr = None
         self.deploy_check(st, now)
+        self.main_check_due(st)
         self.feed(st, now)
         if not self.events:
             self.pending_since = 0.0
@@ -2448,6 +2609,7 @@ class Pool:
             ],
             "feed_pending": len(self.events),
             "feed_pending_since": self.pending_since,
+            "main_check": self.main_check_last,
         }
         q = state["queue"]
         brief = {"open": q["open"], **q["stages"], "prs": sum(q["prs"].values())}
@@ -2465,6 +2627,7 @@ class Pool:
             poll_s=self.cfg.poll_s,
             clis={r: agent_cli.cli_for(r) for r in ROLES},
             deploys=bool(self.cfg.deploy_cmd),
+            main_check=self.cfg.main_check,
             live=self.cfg.live,
             ux=self.cfg.ux,
         )

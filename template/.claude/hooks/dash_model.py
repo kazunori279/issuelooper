@@ -268,6 +268,8 @@ def health(
         "quota_pause_s": max(0.0, q_until - now),
         "paused_roles": paused,
         "monitor": mon.get("state", "gone"),
+        # the supervisor's last full check of origin/main: {sha, ok, t, failing}
+        "main_check": state.get("main_check") or {},
     }
 
 
@@ -524,6 +526,14 @@ def attention(m: dict, state: dict, log: list[dict], now: float) -> list[dict]:
             f"Stuck: {key} keeps failing and will not be retried.",
             "Read its session.log; re-scope the issue",
         )
+    mc = h["main_check"]
+    if mc.get("ok") is False:
+        add(
+            "red",
+            f"main is red at {mc.get('sha', '')[:8]}: "
+            + (", ".join(mc.get("failing") or [])[:200] or "the check suite fails"),
+            "The supervisor filed a `main is red` issue (P0); merges go on",
+        )
     deploys = [r for r in log if r.get("kind") in ("deployed", "deploy_failed")]
     if deploys and deploys[-1]["kind"] == "deploy_failed":
         add(
@@ -586,12 +596,21 @@ def attention(m: dict, state: dict, log: list[dict], now: float) -> list[dict]:
 # --- the terminal view --------------------------------------------------------------
 
 
+def main_check_text(mc: dict) -> str:
+    """" · main check green abcd1234", or "" before the first check."""
+    if not mc:
+        return ""
+    word = {True: "green", False: "RED"}.get(mc.get("ok"), "not run")
+    return f" · main check {word} {str(mc.get('sha', ''))[:8]}"
+
+
 def text(m: dict, width: int = 100) -> str:
     h, q, p = m["health"], m["queue"], m["progress"]
     lines = [
         f"{time.strftime('%H:%M:%S', time.localtime(m['now']))}  {m['repo'] or m['root']}",
         f"supervisor {'up' if h['supervisor'] else 'DOWN'}, polled {ago(h['last_poll_s'])} ago · "
         f"monitor {h['monitor']} · main {h['main'][:8]}"
+        + main_check_text(h["main_check"])
         + (f" · deployed {h['deployed'][:8]}" if h["deployed"] else "")
         + (f" · QUOTA PAUSE {ago(h['quota_pause_s'])}" if h["quota_pause_s"] else ""),
         "",

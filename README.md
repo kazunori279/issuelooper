@@ -64,6 +64,13 @@ set, the supervisor merges a PR whose head is behind `main` with the current
 imports, the unit tests pass). A failure hands the PR back, unless `main` alone
 fails the check too, in which case nobody is blamed and the gates decide.
 
+What the quick check leaves out can still break `main`. After `main` moves, the
+supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
+background, one run at a time. A red `main` tells the monitor and files an issue
+titled `main is red: <failing tests>` (P0) with the failing tests, the commits since
+the last green `main` and the end of the output; the next green `main` closes it.
+Merges do not wait for it. `[sweep] main_check = false` turns it off.
+
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
 worker, model quota errors are waited out with backoff, silent sessions are
@@ -205,8 +212,8 @@ free port if that one is taken; `issuelooper dashboard` prints the URL). It
 refreshes every 15 seconds and shows, from the top:
 
 - **Health**: the supervisor, when it last read GitHub, the monitor's state, any
-  quota pause, `main` and the deployed commit.
-- **Needs you**: decisions waiting at `stage:owner`, stuck work, an issue whose
+  quota pause, `main`, its last full check (green or red) and the deployed commit.
+- **Needs you**: a red `main`, decisions waiting at `stage:owner`, stuck work, an issue whose
   sessions failed twice in a row, a failed deploy, a monitor at a prompt or gone,
   GitHub read errors, updates piling up for the monitor. Each line says what to do.
 - **Agents**: every running session with its issue or PR, time against its
