@@ -1198,6 +1198,36 @@ def test_main_check_reports_a_red_main() -> None:
           ["`make verify` exited 2"])
 
 
+def test_spec_check_when_half_the_pool_is_free() -> None:
+    """Workers never ran out of issues with 16 sessions, so spec checks never started,
+    even with most slots idle."""
+    issues = [iss(n, ["stage:triage", "P1"]) for n in range(1, 4)]
+    h = Rig(state(issues, main="a" * 40), spec=True, spec_gap_s=2700, global_cap=16)
+    first = h.step()
+    check("3 workers due of 16 slots: a spec check starts beside them",
+          sorted(u.kind for u in first), ["implement", "implement", "implement", "spec"])
+    spec = next(u for u in first if u.kind == "spec")
+    check("and the tester is told why", "half of the pool's sessions are free" in ccpool.tester_prompt(spec, 8021, "60m"),
+          True)
+    h.finish(spec.key)
+    check("not again within POOL_SPEC_GAP_MIN", [u.kind for u in h.step(60)], [])
+    h.pool.book.last_spec_t = 0
+    h.pool.book.running["tst:spec"] = spec  # one still running
+    check("never two at once", [u.kind for u in h.step(1)], [])
+    del h.pool.book.running["tst:spec"]
+    busy = Rig(state([iss(n, ["stage:triage", "P1"]) for n in range(1, 11)], main="a" * 40),
+               spec=True, spec_gap_s=2700, global_cap=16)
+    check("10 workers due of 16: less than half stays free, no spec check",
+          [u.kind for u in busy.step() if u.kind == "spec"], [])
+    for u in [u for u in busy.pool.book.running.values()][:6]:
+        busy.finish(u.key)
+    check("4 left running and nothing else due: half is free, a spec check",
+          [u.kind for u in busy.step()], ["spec"])
+    uncapped = Rig(state(issues, main="a" * 40), spec=True, spec_gap_s=2700)
+    check("no global cap: no half to measure, only the idle trigger",
+          [u.kind for u in uncapped.step() if u.kind == "spec"], [])
+
+
 def test_stall_threshold_by_model() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
     pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)

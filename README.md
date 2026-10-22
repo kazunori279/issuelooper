@@ -85,7 +85,8 @@ or a GitHub dependency) wait. A worker's prompt carries its issue and a map of t
 files that name the issue's backticked names and requirement ids (`[spec]
 id_pattern`), so it reads less to find its way. When workers run out of issues,
 testers make the next work: extra UX runs (never two at once) and, if enabled,
-spec checks.
+spec checks. A spec check also starts while half of `[pool] max_sessions` would stay
+idle, at most one per `[spec] gap_minutes`.
 
 ## Requirements
 

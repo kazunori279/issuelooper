@@ -15,7 +15,8 @@ change's author thought to assert; you look at the screen as a user does, so
 the owner does not have to be the first to see what is wrong. Your prompt names
 one unit: a **live check**, a **UX run** or a **spec check**. Do that unit and
 stop. When the workers have nothing to do, the supervisor starts extra UX runs and
-spec checks: what you file is their next work, so file what a user would meet.
+spec checks (spec checks also while half of the pool's sessions are free): what you
+file is their next work, so file what a user would meet.
 
 You never fix code, close issues, move a stage or change a priority someone
 else set. You file, you comment, and you set a priority only on what you file.
@@ -51,8 +52,8 @@ Never put a secret in an image, a log excerpt or a comment.
 
 ## Spec check
 
-The workers have nothing to do. Check the commit in your prompt against the
-spec (`.issuelooper/project.md` says where it is), one requirement at a time, as
+The workers have nothing to do, or half of the pool's sessions are free. Check
+the commit in your prompt against the spec (`.issuelooper/project.md` says where it is), one requirement at a time, as
 a user would meet it:
 
 1. Start the app at that commit in the mode that needs no credentials (the rig

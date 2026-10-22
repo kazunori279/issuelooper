@@ -55,7 +55,9 @@ UNITS
           running. When no worker or merger has anything to do: another UX run once
           POOL_UX_IDLE_GAP_MIN passed since the last, and with POOL_SPEC=1 a spec check (the app against the spec, one
           requirement at a time) every POOL_SPEC_GAP_MIN; what they file is the
-          workers' next work. Each tester gets its own port.
+          workers' next work. A spec check also starts while at least half of
+          POOL_MAX_WORKERS would stay free after the due units start, once
+          POOL_SPEC_GAP_MIN passed; never two at once. Each tester gets its own port.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
 monitor's; no unit is started for them, and none for an issue with an open blocker
@@ -786,6 +788,17 @@ def plan(
         if cfg.spec and now - book.last_spec_t >= cfg.spec_gap_s:
             units.append(Unit("tester", "spec", f"spec:{ux_sha[:12]}:{book.extra_runs}",
                               "tst:spec", None, (2, 0, 1), info))
+    elif ux_sha and cfg.spec and now - book.last_spec_t >= cfg.spec_gap_s:
+        # Workers never ran out of issues in a six-hour run with 16 sessions, so the
+        # idle trigger never fired, even with 11-14 slots idle near the end. A spec
+        # check also starts when half the pool would stay free after what is due starts
+        # (the "tst:spec" family keeps it to one at a time). Without a global cap there
+        # is no half to measure; the idle trigger alone applies.
+        agents = sum(v for r, v in book.role_counts().items() if r != "auto")
+        due_agents = sum(1 for u in units if u.role != "auto" and not book.why_not(u, cfg))
+        if cfg.global_cap and cfg.global_cap - agents - due_agents >= cfg.global_cap / 2:
+            units.append(Unit("tester", "spec", f"spec:{ux_sha[:12]}:{book.extra_runs}", "tst:spec", None,
+                              (2, 0, 1), {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd), "spare": True}))
 
     units.sort(key=lambda u: u.rank)
     due, stuck = [], []
@@ -1025,7 +1038,9 @@ def tester_prompt(u: Unit, port: int, timeout: str) -> str:
         return (
             "Use the issuelooper-tester skill (section Spec check) and do exactly one check, then "
             "stop.\n\n"
-            f"Your unit: {where}, and no worker has anything to do. Start the app at that commit on "
+            f"Your unit: {where}, and "
+            + ("half of the pool's sessions are free" if u.info.get("spare") else "no worker has anything to do")
+            + ". Start the app at that commit on "
             f"your port and check it against the product's spec ({PROJECT} says where it is), one "
             "requirement at a time, on screen, and file at most five gaps a user would meet. "
             "Write the check's report to $LOGDIR/spec_report.md."
