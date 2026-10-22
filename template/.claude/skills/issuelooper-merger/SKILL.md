@@ -68,7 +68,8 @@ Stop once the review gate passed, with `$N` still at `stage:pr`. Do not merge an
 do not change its labels. On its next poll the supervisor merges the new head with
 the current `main` in a worktree, runs the quick check and the merge gates, merges,
 and updates the labels; a merge made from an older `main` broke `main` more than
-once. If the PR conflicts again by then, it starts another merger session.
+once. If the PR conflicts again by then, it starts another merger session; after
+three merger sessions without a merge, it hands the PR back to a worker instead.
 
 ## 5. Hand back
 

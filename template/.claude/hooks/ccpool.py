@@ -42,7 +42,12 @@ UNITS
           CONFLICTING after the supervisor's rebase could not land it (or UNKNOWN for
           POOL_UNKNOWN_S). It works on only that PR ($MERGE_PR, enforced by
           role_guard): rebase, resolve, re-sweep, review gate; the supervisor's next
-          poll merges it, so every merge passes the same checks.
+          poll merges it, so every merge passes the same checks. When a merger
+          ends, GitHub is read again at once and every POOL_MIN_FETCH_S while the
+          PR reads UNKNOWN, so the resolved head is merged before main moves again.
+          A PR whose POOL_MERGER_MAX (3) merger sessions each ended without a merge
+          (main moved on and it conflicted again) goes back to a worker instead
+          (handback, no agent).
   tester  (agent) with POOL_LIVE=1, one per stage:live issue each time it enters
           stage:live (the live check against the real services); with POOL_UX=1, a
           UX run at most every POOL_UX_GAP_MIN minutes, on the deployed sha (or on
@@ -254,6 +259,7 @@ class Config:
     stale_min: int = 60
     orphan_pr_min: int = 10
     unclaimable_retry_s: float = 240
+    merger_max: int = 3  # merger sessions on one PR without a merge before it goes back to a worker
     auto_cap: int = 4
     ux_gap_s: float = 1500
     ux_idle_gap_s: float = 600
@@ -331,6 +337,7 @@ class Config:
             stale_min=env_int("CLAIM_STALE_MIN", 60),
             orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
             unclaimable_retry_s=float(e("POOL_UNCLAIMABLE_RETRY_S", "") or 240),
+            merger_max=env_int("POOL_MERGER_MAX", 3),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
@@ -523,6 +530,7 @@ class Book:
         self.clean: set[str] = set()  # keys whose session ended cleanly
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
+        self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.paused: dict[str, float] = {}  # role -> until (crash breaker)
         self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
         self.quota_streak = 0  # pauses in a row without a session ending ok
@@ -683,6 +691,21 @@ def plan(
                     pr["number"],
                     (0, pr["number"]),
                     info,
+                )
+            )
+        elif cfg.merger_max and book.merger_runs[pr["number"]] >= cfg.merger_max:
+            # Main kept moving while merger sessions resolved it, and it conflicted again
+            # each time (one PR had four merger sessions before the monitor sent it back).
+            # A worker rebases it onto the current main and finishes it instead.
+            units.append(
+                Unit(
+                    "auto",
+                    "handback",
+                    f"handback:{pr['number']}@{pr['head'][:12]}",
+                    f"mrg:{pr['number']}",
+                    pr["number"],
+                    (0, pr["number"]),
+                    {**info, "mergers": book.merger_runs[pr["number"]]},
                 )
             )
         else:
@@ -928,7 +951,7 @@ from a merger session, and any write to a PR but #{pr}.
 3. Stop there, with #{n} still at stage:pr: do not merge. The supervisor merges the new
    head on its next poll, after checking it merged with the current main and running the
    merge gates, so every merge goes through the same checks. If main moved and the PR
-   conflicts again, it starts another merger session.
+   conflicts again, it starts another merger session (after three, a worker gets it).
 4. Hand back only when the rebase needs a decision about behavior, or the sweep is red
    after a clean rebase: comment on the PR naming the hunk or the test, and swap stage:pr
    for stage:triage on #{n}. Once per PR.
@@ -1363,8 +1386,8 @@ class Session(threading.Thread):
         self.dir.mkdir(parents=True, exist_ok=True)
         env = self.env()
         if u.role == "auto":
-            return {"merge": self.auto_merge, "rebase": self.auto_rebase,
-                    "requeue": self.requeue}.get(u.kind, self.reclaim)(env)
+            return {"merge": self.auto_merge, "rebase": self.auto_rebase, "requeue": self.requeue,
+                    "handback": self.merger_handback}.get(u.kind, self.reclaim)(env)
         claim_file = self.dir / "claim"
         if u.role == "worker":
             pool = str(cfg.caps["worker"] or "unlimited")
@@ -1786,6 +1809,17 @@ class Session(threading.Thread):
                 "tries the merge again on the new head.")
         self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
 
+    def merger_handback(self, env: dict) -> str:
+        """A PR that conflicted again after POOL_MERGER_MAX merger sessions: back to a worker."""
+        u = self.unit
+        pr, n, k = u.number, u.info["issue"], u.info.get("mergers", 0)
+        self.hand_back(pr, n, (
+            f"**Not merged: it keeps conflicting with main.** {k} merger sessions resolved this "
+            "pull request's conflicts, and each time main moved on before the merge and it "
+            "conflicted again. Rebase it onto the current origin/main in your worktree and finish it."))
+        self.pool.log("handback", pr=pr, issue=n, by="merger loop", reason=f"{k} merger sessions without a merge")
+        return "handed back after repeated conflicts"
+
     def requeue(self, env: dict) -> str:
         """An issue at stage:pr with no open pull request: back to stage:triage, so the
         next worker opens a new one (the branch keeps what was done)."""
@@ -1904,6 +1938,8 @@ class Pool:
         self.prev: dict | None = None
         self.idle_flagged = False
         self.last_fetch = 0.0
+        self.hurry_pr: int | None = None  # a merger just ended on it: poll fast while it reads UNKNOWN
+        self.hurry_until = 0.0
         self.last_sent = 0.0
         self._herdr = None  # herdr_link.Monitor, made on first use
         self.pending_since = 0.0  # when the oldest unsent monitor update was queued
@@ -2086,6 +2122,13 @@ class Pool:
                 b.unclaimable[u.number] = (updated, (self.prev or {}).get("main", ""), now)
             if u.kind == "rebase" and outcome.startswith(("left to a merger", "rebase stopped")):
                 b.rebase_failed[u.number] = u.info.get("head") or ""
+            if u.role == "merger" and not outcome.startswith(NOT_A_FAILURE):
+                b.merger_runs[u.number] += 1
+                # The resolved head merges on the next poll; GitHub may still be computing
+                # its mergeability, so read again soon rather than after POOL_POLL_S.
+                self.hurry_pr, self.hurry_until = u.number, now + 60
+            if (u.kind == "merge" and outcome == "ok") or (u.kind == "handback" and outcome.startswith("handed back")):
+                b.merger_runs.pop(u.number, None)
             if outcome.startswith("startup crash"):
                 self.crashes[u.role] += 1
                 if self.crashes[u.role] >= self.cfg.crash_max:
@@ -2376,6 +2419,10 @@ class Pool:
             self.start(u)
         self.observe(st, now, started, stuck)
         self.prev = st
+        if self.hurry_pr is not None and not any(
+            p["number"] == self.hurry_pr and p["mergeable"] == "UNKNOWN" for p in st["prs"]
+        ):
+            self.hurry_pr = None
         self.deploy_check(st, now)
         self.feed(st, now)
         if not self.events:
@@ -2422,7 +2469,10 @@ class Pool:
             ux=self.cfg.ux,
         )
         while not self.stopping:
-            wait = max(self.cfg.poll_s - (time.time() - self.last_fetch), 0)
+            poll = self.cfg.poll_s
+            if self.hurry_pr is not None and time.time() < self.hurry_until:
+                poll = min(poll, self.cfg.min_fetch_s)
+            wait = max(poll - (time.time() - self.last_fetch), 0)
             self.wake.wait(timeout=wait)
             self.wake.clear()
             if self.stopping:

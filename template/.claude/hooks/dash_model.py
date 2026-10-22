@@ -121,7 +121,8 @@ def ago(seconds: float | None) -> str:
     return f"{s / 3600:.1f} h"
 
 
-UNIT_KINDS = {"wrk": "#", "mrg": "PR #", "merge": "PR #", "rebase": "PR #", "reclaim": "#", "tst": "#"}
+UNIT_KINDS = {"wrk": "#", "mrg": "PR #", "merge": "PR #", "rebase": "PR #", "handback": "PR #", "reclaim": "#",
+              "tst": "#"}
 
 
 def target_of(r: dict) -> str:
@@ -148,6 +149,8 @@ def unit_label(r: dict) -> str:
         return f"auto-rebase of {tgt}"
     if unit.startswith("reclaim:"):
         return f"stale claim on {tgt}"
+    if unit.startswith("handback:"):
+        return f"hand-back of {tgt}"
     if unit.startswith("ux:"):
         return "tester UX run"
     if unit.startswith("spec:"):

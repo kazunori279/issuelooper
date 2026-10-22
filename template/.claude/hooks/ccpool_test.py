@@ -290,6 +290,54 @@ def test_merges_one_per_pr() -> None:
     )
 
 
+def test_merger_loop_goes_back_to_a_worker() -> None:
+    """Main moved while each merger resolved the PR, and it conflicted again: after
+    POOL_MERGER_MAX merger sessions it goes back to a worker, not to a fourth merger."""
+    def conflicting(k):
+        return state([iss(2, ["stage:pr"])], prs=[pr(12, 2, head=str(k) * 40, mergeable="CONFLICTING")],
+                     main=chr(ord("c") + k) * 40)
+    h = Rig(conflicting(1), merger_max=3)
+    for k in range(1, 4):
+        h.st = conflicting(k)
+        h.pool.book.rebase_failed[12] = str(k) * 40  # the supervisor's rebase of this head failed
+        started = h.step()
+        check(f"conflict {k}: a merger session", [(u.role, u.kind) for u in started], [("merger", "land")])
+        h.finish(started[0].key)
+        check(f"a merger's end makes the supervisor poll fast (conflict {k})", h.pool.hurry_pr, 12)
+    check("three merger sessions without a merge are counted", h.pool.book.merger_runs[12], 3)
+    h.st = conflicting(4)
+    h.pool.book.rebase_failed[12] = "4" * 40
+    started = h.step()
+    check("the fourth conflict: a hand-back (no agent), not a merger",
+          [(u.role, u.kind, u.info.get("mergers")) for u in started], [("auto", "handback", 3)])
+    h.finish(started[0].key, "handed back after repeated conflicts")
+    check("the hand-back resets the count", h.pool.book.merger_runs[12], 0)
+    h.pool.book.merger_runs[12] = 2
+    h.st = state([iss(2, ["stage:pr"])], prs=[pr(12, 2, head="9" * 40)], main="f" * 40)
+    started = h.step()
+    check("the PR reads MERGEABLE: no more fast polls", (h.pool.hurry_pr, [u.kind for u in started]),
+          (None, ["merge"]))
+    h.finish(started[0].key)
+    check("a merge resets the count", h.pool.book.merger_runs[12], 0)
+    h.pool.book.merger_runs[12] = 0
+    h.pool.finished(ccpool.Session(h.pool, ccpool.Unit("merger", "land", "mrg:12@q", "mrg:12", 12, (0, 12),
+                                                        {"issue": 2}), 99), "quota error (exit 3)")
+    check("a merger that ended on a quota error does not count", h.pool.book.merger_runs[12], 0)
+    calls = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-handback-")) / "gh.log"
+    gh = calls.parent / "gh"
+    gh.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+    gh.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=calls.parent / "pool", gh=str(gh)), fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("auto", "handback", "handback:12@x", "mrg:12", 12, (0, 12),
+                                         {"issue": 2, "mergers": 3}), 1)
+    w.dir.mkdir(parents=True)
+    check("the hand-back unit's outcome", w.work(), "handed back after repeated conflicts")
+    log = calls.read_text().splitlines()
+    check("it asks a worker to rebase onto the current main, and moves #2 to stage:triage",
+          (log[0].startswith("pr comment 12 --body <!-- merger -->"), "Rebase it onto the current origin/main" in calls.read_text(),
+           log[-1]), (True, True, "issue edit 2 --remove-label stage:pr --add-label stage:triage"))
+
+
 def test_no_merger_while_its_worker_runs() -> None:
     h = Rig(state([iss(1, ["stage:triage"])]))
     h.step()

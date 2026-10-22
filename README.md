@@ -70,7 +70,8 @@ worker, model quota errors are waited out with backoff, silent sessions are
 resumed (sooner for models that step quickly; a reply that stops mid-stream counts
 too), and a session's clocks stand still while the agent CLI retries a failed model
 call (agy). Conflicting PRs that only add lines are rebased without an agent (once
-per head; a head whose rebase failed goes to a merger), a file that keeps
+per head; a head whose rebase failed goes to a merger), a PR that conflicts again
+after three merger sessions (main kept moving) goes back to a worker, a file that keeps
 conflicting gets an issue to split it, and a deploy that lost a race with another
 `git fetch` is tried again. Issues blocked by an open issue (a `Blocked by:` line
 or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the
