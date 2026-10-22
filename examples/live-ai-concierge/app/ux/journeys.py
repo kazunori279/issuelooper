@@ -117,7 +117,9 @@ def server(
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
-    url = f"http://127.0.0.1:{port}/"
+    # localhost, not 127.0.0.1: a browser Maps key is restricted to the page's origin,
+    # and the README restricts it to localhost.
+    url = f"http://localhost:{port}/"
     try:
         for _ in range(120):
             if proc.poll() is not None:
