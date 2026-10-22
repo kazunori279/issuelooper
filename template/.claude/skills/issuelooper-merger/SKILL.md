@@ -1,6 +1,6 @@
 ---
 name: issuelooper-merger
-description: "The merger of this repository's issue loop (issuelooper), for a session whose CC_ROLE is already `merger`: land one pull request that conflicts with main. Rebase in a worktree, resolve so both sides survive, re-sweep, run the review gate, merge, clear stage:pr. Hand back only when the rebase needs a decision about behavior. Do not load this to find out what your role is."
+description: "The merger of this repository's issue loop (issuelooper), for a session whose CC_ROLE is already `merger`: resolve one pull request that conflicts with main. Rebase in a worktree, resolve so both sides survive, re-sweep, run the review gate, push, and leave the merge to the supervisor. Hand back only when the rebase needs a decision about behavior. Do not load this to find out what your role is."
 ---
 
 # issuelooper: the merger
@@ -13,8 +13,10 @@ limits and this repository's commands.
 The supervisor merges every pull request GitHub calls mergeable. It starts you
 for one that conflicts with `main` (or whose mergeability GitHub has not
 computed for several minutes). Your prompt names the PR (`$MERGE_PR`), its issue
-and its head. The guard refuses a merge of any other PR. You write no feature
-code: you resolve conflicts, nothing more.
+and its head. You do not merge: the supervisor merges your resolved head on its next
+poll, after checking it merged with the current `main`, and the guard refuses
+`gh pr merge` from you. You write no feature code: you resolve conflicts, nothing
+more.
 
 Names below: `P=$MERGE_PR`, `N` its issue, `WT=/tmp/mrg-$P-wt`.
 
@@ -60,19 +62,13 @@ python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr $P
 - `review_gate.py` exit 0: go on. Exit 1: it rejected the PR and already handed it
   back (PR comment, issue at `stage:triage`); stop. Exit 2: run it again.
 
-## 4. Merge
+## 4. Leave the merge to the supervisor
 
-```bash
-gh pr merge $P --squash --delete-branch --match-head-commit "$(git rev-parse HEAD)"
-gh issue edit $N --remove-label stage:pr          # add --add-label stage:live when the issue is needs:live
-gh issue comment $N --body "<!-- merger -->
-Merged PR #$P after resolving the conflict with main (<one line on what both sides kept>)."
-```
-
-Run the label edit in the very next command after the merge. If GitHub refuses
-the merge because `main` moved and the PR conflicts again, repeat from step 2,
-up to three rounds; then say so on the PR and stop. The supervisor deploys, if
-the project deploys.
+Stop once the review gate passed, with `$N` still at `stage:pr`. Do not merge and
+do not change its labels. On its next poll the supervisor merges the new head with
+the current `main` in a worktree, runs the quick check and the merge gates, merges,
+and updates the labels; a merge made from an older `main` broke `main` more than
+once. If the PR conflicts again by then, it starts another merger session.
 
 ## 5. Hand back
 

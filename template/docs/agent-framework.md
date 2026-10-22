@@ -9,7 +9,7 @@ through GitHub issues, labels, pull requests and signed comments.
   gate (`review_gate.py`) and the merge gates (`role_guard.py`) pass, and deploys
   when the project has a deploy command.
 - **Worker**: one claimed issue, from a failing test to a pull request.
-- **Merger**: lands a pull request that conflicts with `main`.
+- **Merger**: resolves a pull request that conflicts with `main`; the supervisor merges it.
 - **Tester**: live checks against the live environment, UX runs over the
   deployed app that file what gets in a user's way, and spec checks when the
   workers have nothing to do (all optional).

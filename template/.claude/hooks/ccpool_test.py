@@ -141,7 +141,9 @@ def test_cap_and_instant_refill() -> None:
     )
     check("nothing more while the cap is full", h.step(), [])
     h.finish(started[0].key)
-    h.st = state([i for i in issues if i["number"] != 2] + [iss(2, ["stage:pr", "P0"])])
+    # #2's worker opened a (draft) PR, so #2 is at stage:pr with a pull request.
+    h.st = state([i for i in issues if i["number"] != 2] + [iss(2, ["stage:pr", "P0"])],
+                 prs=[pr(9, 2, draft=True)])
     check(
         "a finished session frees its slot on the next poll",
         [u.number for u in h.step(0)],
@@ -1700,6 +1702,19 @@ def test_silent_model_is_resumed() -> None:
           ("s7", True))
     rc, timed_out, calls = stall_session("claude-busy", "claude")
     check("claude: a tool_use with no result yet is left alone", (rc, len(calls)), (0, 1))
+
+
+def test_orphaned_stage_pr_goes_back_to_the_queue() -> None:
+    """GitHub closed PR #143 when a force-push made its head its base; #82 stayed at
+    stage:pr with no open PR, and #141 (blocked on it) waited too."""
+    old = iss(82, ["stage:pr", "P1"], updated="2033-05-18T03:00:00Z")  # NOW - ~33 min
+    h = Rig(state([old]))
+    started = h.step()
+    check("an old stage:pr issue with no open PR is requeued",
+          [(u.role, u.kind, u.number) for u in started], [("auto", "requeue", 82)])
+    fresh = iss(83, ["stage:pr", "P1"], updated="2033-05-18T03:30:00Z")  # NOW - ~3 min
+    check("a fresh one is left alone (its PR may be landing)", Rig(state([fresh])).step(), [])
+    check("one with an open PR is the merge path's", [u.kind for u in Rig(state([old], prs=[pr(143, 82, draft=True)])).step()], [])
 
 
 def test_wrap_up_fits_the_timeout() -> None:

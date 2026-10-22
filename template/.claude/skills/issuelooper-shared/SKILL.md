@@ -47,7 +47,8 @@ Finish your unit and stop; nothing waits on a timer.
   for a `needs:live` issue) and deploys `main` when the project has a deploy
   command. When the PR conflicts with `main`, the supervisor first rebases it
   itself (when every conflict is two workers only adding lines at the same
-  place); otherwise a merger session rebases and lands it. A source file that
+  place); otherwise a merger session rebases and resolves it, and the supervisor merges
+  the result. A source file that
   keeps conflicting, or grows past 900 lines, gets an issue to split it. A
   refusal over a missing sweep record is re-swept by the supervisor before
   anything is handed back. When the project sets a fast check
@@ -86,8 +87,8 @@ the PR's head. Any later commit or rebase needs a new sweep.
 
 ## The merge gates
 
-A pull request merges only when all of these hold. The supervisor and the
-merger run the same checks, so write the PR to pass them the first time.
+A pull request merges only when all of these hold. Every merge is the
+supervisor's, through these checks, so write the PR to pass them the first time.
 
 | Gate | Requires |
 |---|---|

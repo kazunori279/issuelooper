@@ -197,7 +197,7 @@ CLI_COMMENT_FLAG = re.compile(
     r"""--comment[=\s]+(?:"([^"]*)"|'([^']*)'|([^\s"';&|]+))"""
 )
 
-# Only the merger merges (and ccpool.py, through the same gates). Both spellings,
+# Only the supervisor (ccpool.py, with CC_ROLE=merger) merges. Both spellings,
 # because `gh pr merge` is a thin wrapper over the second.
 MERGE = re.compile(r"\bgh\s+pr\s+merge\b|/pulls/\d+/merge\b")
 
@@ -1592,8 +1592,17 @@ MERGE_PR_ENV = "MERGE_PR"
 
 
 def merger_pr_scope_check(command: str) -> None:
-    """A pool merger merges only the pull request its supervisor assigned."""
+    """A merger session merges nothing: the supervisor merges (its units are `merge:...`,
+    a merger session's `mrg:...`). Otherwise a merge names only the assigned PR."""
     mine = os.environ.get(MERGE_PR_ENV, "").strip().lstrip("#")
+    if os.environ.get("POOL_UNIT", "").startswith("mrg:"):
+        block(
+            "A merger session does not merge. Stop with the issue still at `stage:pr`: the "
+            "supervisor merges your new head on its next poll, after checking it merged with "
+            "the current main and running the merge gates, so every merge passes the same "
+            "checks. A merger that merged a head behind main broke main more than once.\n\n"
+            "If the PR conflicts again by then, the supervisor starts another merger session."
+        )
     if not mine:
         return
     prs: list[str] = []
@@ -1832,10 +1841,11 @@ def main(raw: str) -> None:
 
     if MERGE.search(command) and role != "merger":
         block(
-            f"Only the merger merges, and this session is the {role}.\n\n"
+            f"Only the supervisor merges, and this session is the {role}.\n\n"
             "Mergeable pull requests are landed by the supervisor (ccpool.py) once the "
-            "merge gates and the review gate pass; a merger session lands one that "
-            "conflicts with main. Open the PR, put `stage:pr` on the issue, and leave it."
+            "merge gates and the review gate pass; a merger session resolves one that "
+            "conflicts with main and leaves the merge to it. Open the PR, put `stage:pr` "
+            "on the issue, and leave it."
         )
 
     if CLOSES.search(command) and role in ("tester", "aide", "worker"):

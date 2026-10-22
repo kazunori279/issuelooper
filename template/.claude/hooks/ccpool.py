@@ -25,8 +25,8 @@ UNITS
           squash-merged; a refusal hands the PR back to a worker (a refusal over
           the sweep record is re-swept here first). With POOL_FAST_CHECK_CMD set, a
           PR whose head is behind main is first merged with main in a worktree and
-          the command runs there: a failure hands the PR back, unless main alone
-          fails it too. rebase: a CONFLICTING PR is first rebased here, once per
+          the command runs there, under the merge lock right before the merge: a
+          failure hands the PR back, unless main alone fails it too. rebase: a CONFLICTING PR is first rebased here, once per
           head and main, and not again for a head whose rebase failed; when every
           conflict hunk, in any text file, only adds lines on both sides, both are
           kept, the PR is swept and pushed, and the next poll merges it. The conflicted files are
@@ -35,10 +35,13 @@ UNITS
           issue to split it (at most POOL_SPLIT_PER_WINDOW per window,
           POOL_SPLIT_MAX per run). reclaim: a stage:doing claim older than
           CLAIM_STALE_MIN with no PR and no running worker goes back to the queue.
+          requeue: an issue at stage:pr with no open PR for POOL_ORPHAN_PR_MIN
+          (its PR was closed without a merge) goes back to stage:triage.
   merger  (agent) one per open PR whose issue is at stage:pr and that GitHub calls
           CONFLICTING after the supervisor's rebase could not land it (or UNKNOWN for
-          POOL_UNKNOWN_S). It lands only that PR ($MERGE_PR, enforced by
-          role_guard): rebase, resolve, re-sweep, review gate, merge.
+          POOL_UNKNOWN_S). It works on only that PR ($MERGE_PR, enforced by
+          role_guard): rebase, resolve, re-sweep, review gate; the supervisor's next
+          poll merges it, so every merge passes the same checks.
   tester  (agent) with POOL_LIVE=1, one per stage:live issue each time it enters
           stage:live (the live check against the real services); with POOL_UX=1, a
           UX run at most every POOL_UX_GAP_MIN minutes, on the deployed sha (or on
@@ -248,6 +251,7 @@ class Config:
     fast_check_s: float = 300
     map_id_pattern: str = ""  # a regex for the spec's requirement ids (the worker's file map)
     stale_min: int = 60
+    orphan_pr_min: int = 10
     auto_cap: int = 4
     ux_gap_s: float = 1500
     ux_idle_gap_s: float = 600
@@ -323,6 +327,7 @@ class Config:
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
             map_id_pattern=e("POOL_MAP_ID_PATTERN", "").strip(),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
+            orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
@@ -594,6 +599,18 @@ def plan(
                 units.append(
                     Unit("auto", "reclaim", f"reclaim:{n}@{i['updated']}", f"rcl:{n}", n, (1, n), {})
                 )
+        elif (
+            "stage:pr" in labels
+            and n not in pr_of
+            and f"wrk:{n}" not in book.running
+            and age_s(i["updated"], now) > cfg.orphan_pr_min * 60
+        ):
+            # Its pull request was closed without a merge (GitHub closes one whose head
+            # became its base after a force-push): nothing else would ever move it, and
+            # issues blocked on it waited too.
+            units.append(
+                Unit("auto", "requeue", f"requeue:{n}@{i['updated']}", f"rcl:{n}", n, (1, n), {})
+            )
         elif "stage:live" in labels and cfg.live:
             # Keyed on this entry into stage:live (Pool.track_live), so a hand-back,
             # a reopen or a later merge for it gets a new check. Until a check of
@@ -889,16 +906,12 @@ mid-work."""
 
 def merger_prompt(u: Unit, timeout: str) -> str:
     pr, n = u.number, u.info["issue"]
-    after = (
-        "add stage:live (the issue is needs:live, so the merge leaves it open)"
-        if u.info.get("needs_live")
-        else "nothing else"
-    )
     return f"""Use the issuelooper-merger skill and land exactly one pull request: #{pr}
 (issue #{n}, head {u.info["head"][:8]}, GitHub said {u.info["mergeable"]}). Then stop.
 
-The supervisor merges mergeable pull requests itself; this one conflicts with main, so it
-is yours. The guard refuses a merge of any PR but #{pr}.
+The supervisor merges mergeable pull requests itself; this one conflicts with main, so
+resolving it is yours. The merge stays the supervisor's: the guard refuses `gh pr merge`
+from a merger session, and any write to a PR but #{pr}.
 1. Rebase onto origin/main in /tmp/mrg-{pr}-wt and resolve the conflicts so that both this
    change and what landed on main survive ({PROJECT} says how to set up a worktree).
    Then run `python3 .claude/hooks/sweep_locked.py --update-pr {pr}` there and push with
@@ -906,12 +919,11 @@ is yours. The guard refuses a merge of any PR but #{pr}.
 2. Run the review gate on the new head:
    `python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr {pr}`. Exit 1: it rejected
    the PR and already handed it back; stop. Exit 2: run it again.
-3. Merge with `gh pr merge {pr} --squash --delete-branch --match-head-commit <headRefOid>`.
-   If main moved meanwhile and the PR conflicts again, repeat from 1, up to three rounds;
-   then say so on the PR and stop.
-4. In the very next command clear stage:pr on #{n} ({after}) and post one signed merge
-   comment on #{n}. The supervisor deploys, if this repository deploys.
-5. Hand back only when the rebase needs a decision about behavior, or the sweep is red
+3. Stop there, with #{n} still at stage:pr: do not merge. The supervisor merges the new
+   head on its next poll, after checking it merged with the current main and running the
+   merge gates, so every merge goes through the same checks. If main moved and the PR
+   conflicts again, it starts another merger session.
+4. Hand back only when the rebase needs a decision about behavior, or the sweep is red
    after a clean rebase: comment on the PR naming the hunk or the test, and swap stage:pr
    for stage:triage on #{n}. Once per PR.
 
@@ -1345,7 +1357,8 @@ class Session(threading.Thread):
         self.dir.mkdir(parents=True, exist_ok=True)
         env = self.env()
         if u.role == "auto":
-            return {"merge": self.auto_merge, "rebase": self.auto_rebase}.get(u.kind, self.reclaim)(env)
+            return {"merge": self.auto_merge, "rebase": self.auto_rebase,
+                    "requeue": self.requeue}.get(u.kind, self.reclaim)(env)
         claim_file = self.dir / "claim"
         if u.role == "worker":
             pool = str(cfg.caps["worker"] or "unlimited")
@@ -1461,15 +1474,6 @@ class Session(threading.Thread):
         u = self.unit
         pr, n, head = u.number, u.info["issue"], u.info["head"]
         env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr))
-        # A head swept on an older main says nothing about the merged result: one PR
-        # moved an import, another (swept before it) still used it, GitHub saw no
-        # conflict, and main stopped starting. A rebase and full sweep per merge would
-        # serialize the merges (most were behind main), so a quick check runs on the
-        # head merged with the current main instead.
-        if self.pool.cfg.fast_check_cmd:
-            held = self.merged_check(pr, n, head, u.info.get("branch") or "", env)
-            if held:
-                return held
         r = subprocess.run(
             [*shlex.split(self.pool.cfg.review_cmd), "--pr", str(pr)],
             env=env, cwd=repo_root(), capture_output=True, text=True, timeout=900,
@@ -1495,6 +1499,17 @@ class Session(threading.Thread):
                 return {}
 
         with self.pool.merge_lock:
+            # A head swept on an older main says nothing about the merged result: one PR
+            # moved an import, another (swept before it) still used it, GitHub saw no
+            # conflict, and main stopped starting. A rebase and full sweep per merge would
+            # serialize the merges (most were behind main), so a quick check runs on the
+            # head merged with the current main instead. It runs under the lock, right
+            # before the merge: a check made before the review went stale when other
+            # merges landed meanwhile, and main broke three times in one run that way.
+            if self.pool.cfg.fast_check_cmd:
+                held = self.merged_check(pr, n, head, u.info.get("branch") or "", env)
+                if held:
+                    return held
             verdict = gates()
             if verdict.get("decision") in ("block", "deny") and re.search(
                 r"(?i)sweep", str(verdict.get("reason") or "")
@@ -1764,6 +1779,18 @@ class Session(threading.Thread):
                 "Fix this on this branch, re-sweep, push and update the PR body; the supervisor "
                 "tries the merge again on the new head.")
         self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
+
+    def requeue(self, env: dict) -> str:
+        """An issue at stage:pr with no open pull request: back to stage:triage, so the
+        next worker opens a new one (the branch keeps what was done)."""
+        n = self.unit.number
+        self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
+        self.gh("issue", "comment", str(n), "--body",
+                f"<!-- merger -->\nBack to stage:triage: #{n} was at stage:pr with no open pull request "
+                f"for over {self.pool.cfg.orphan_pr_min} minutes (it was closed without a merge). The next "
+                f"worker opens a new one; the branch `issue-{n}` keeps what was done.")
+        self.pool.log("requeue", issue=n)
+        return "ok"
 
     def reclaim(self, env: dict) -> str:
         """Put stale stage:doing claims (no PR, no running worker) back in the queue."""

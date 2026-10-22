@@ -1861,6 +1861,13 @@ def test_pool_merger_lands_only_its_own_pr() -> None:
     check("its own PR merges through the usual gates", verdict, "allow")
     verdict, _ = run("gh pr merge 71 --squash", role="merger", extra_env=env)
     check("without $MERGE_PR any PR is the merger's", verdict, "allow")
+    session = {**env, "MERGE_PR": "70", "POOL_UNIT": "mrg:70@bbbbbbbbbbbb@cccccccccccc"}
+    verdict, reason = run("gh pr merge 70 --squash", role="merger", extra_env=session)
+    check("a merger session does not merge, not even its own PR", verdict, "refuse")
+    check("it is told the supervisor merges", "supervisor merges" in reason, True)
+    supervisor = {**env, "MERGE_PR": "70", "POOL_UNIT": "merge:70@bbbbbbbbbbbb@cccccccccccc"}
+    verdict, _ = run("gh pr merge 70 --squash", role="merger", extra_env=supervisor)
+    check("the supervisor's merge unit merges through the gates", verdict, "allow")
     (TEST_SWEEP_RECORDS / f"{head}.json").unlink()
 
 
