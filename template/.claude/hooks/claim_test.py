@@ -72,12 +72,15 @@ with open(state_path + ".lock", "w") as lk:
             out, write = "", True
         elif re.search(r"/issues/(\d+)/comments$", path):
             out = s["comments"].get(re.search(r"/issues/(\d+)/comments$", path).group(1), [])
+            # a read that lags behind the writes: new comments not visible yet
+            out = [c for c in out if c["id"] <= int(os.environ.get("FAKE_GH_HIDE_AFTER", "999999999"))]
         elif re.search(r"/issues/(\d+)$", path):
             out = issue_view(s, s["issues"][re.search(r"/issues/(\d+)$", path).group(1)])
         elif path.endswith("/issues"):
             want = q.get("labels")
             out = [issue_view(s, i) for i in s["issues"].values() if i.get("state", "open") == "open"
-                   and (not want or want in i["labels"])]
+                   and (not want or want in i["labels"])
+                   and str(i["number"]) not in os.environ.get("FAKE_GH_UNLISTED", "").split(",")]
             out += [{"number": p["number"], "pull_request": {}, "labels": []} for p in s["prs"]]
         elif path.endswith("/pulls"):
             out = s["prs"]
@@ -289,6 +292,26 @@ def test_claim_named_issue() -> None:
         check(f"--issue {n} ({why}) exits 3", res.returncode, 3)
         check(f"--issue {n} ({why}) writes nothing", len(repo.load()["writes"]), before)
         check(f"--issue {n} ({why}) says why", said in res.stderr, True)
+
+
+def test_refusal_says_what_failed() -> None:
+    """A claim right after an issue was filed failed on GitHub's lag, and claim.py said
+    "another worker claimed it first" though nobody had."""
+    repo = Repo([issue(5, ["stage:triage", "P1"])])
+    res = repo.run("claim", "--loop", "7", "--issue", "5", FAKE_GH_UNLISTED="5")
+    check("missing from GitHub's list of open issues: exit 3, said so",
+          (res.returncode, "not in GitHub's list of open issues" in res.stderr, "claimed it first" in res.stderr),
+          (3, True, False))
+    check("and nothing written", repo.load()["writes"], [])
+    res = repo.run("claim", "--loop", "7", "--issue", "5", FAKE_GH_HIDE_AFTER="1000")
+    check("its own claim comment not in the re-read: said so",
+          (res.returncode, "own claim comment was not in GitHub's re-read" in res.stderr,
+           "claimed it first" in res.stderr, "stage:doing" in res.stderr),
+          (3, True, False, False))
+    repo = Repo([issue(6, ["stage:triage", "P1"])], comments={6: [old_claim(900, "rival", 0.1)]})
+    res = repo.run("claim", "--loop", "7", "--issue", "6")
+    check("a rival's earlier claim: another worker claimed it first",
+          (res.returncode, "another worker claimed it first (claim rival)" in res.stderr), (3, True))
 
 
 def test_two_loops_race_for_one_issue() -> None:

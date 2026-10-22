@@ -314,13 +314,16 @@ def edit_labels(n: int, add: list[str], remove: list[str]) -> None:
 
 
 def try_claim(cand: dict, loop: str) -> dict | None:
-    """One claim attempt on one candidate. Returns the claim, or None if lost."""
+    """One claim attempt on one candidate. Returns the claim, or None if lost; then
+    cand["lost"] says what failed."""
     issue = cand["issue"]
     n = issue["number"]
     frm = stage_of(issue)
     token = uuid.uuid4().hex[:10]
     comments = comments_of(n)
-    if failed_attempts(comments) >= MAX_ATTEMPTS:
+    attempts = failed_attempts(comments)
+    if attempts >= MAX_ATTEMPTS:
+        cand["lost"] = f"{attempts} failed attempts since the last reset (limit {MAX_ATTEMPTS})"
         return None
     stale = active_claims(comments) if frm == DOING else []
     if frm == DOING:
@@ -339,7 +342,17 @@ def try_claim(cand: dict, loop: str) -> dict | None:
     )
     mine = post_comment(n, body)
     time.sleep(SETTLE_S)
-    if not holds(comments_of(n), token)[0]:
+    after = comments_of(n)
+    ok, other = holds(after, token)
+    if not ok:
+        # Two different failures: a rival's earlier claim, or GitHub's read not showing
+        # this claim's own comment yet. Both were reported as "another worker claimed it
+        # first", which sent the owner looking for a worker that did not exist.
+        if any(e.get("token") == token for e in active_claims(after)):
+            cand["lost"] = f"another worker claimed it first (claim {other})"
+        else:
+            cand["lost"] = ("its own claim comment was not in GitHub's re-read of the thread "
+                            f"{SETTLE_S:.0f} s later (a read that lagged behind the write)")
         if mine.get("id"):
             try:
                 gh("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/issues/comments/{mine['id']}")
@@ -368,9 +381,10 @@ def cmd_candidates(_args) -> int:
     return 0
 
 
-def why_not(n: int) -> str:
+def why_not(n: int, unseen: bool = False) -> str:
     """Why issue n is not claimable now, for the supervisor's log. Without it a refused
-    claim leaves no reason anywhere, and repeated refusals cannot be explained."""
+    claim leaves no reason anywhere, and repeated refusals cannot be explained. unseen:
+    the list of open issues claim.py picked from did not have n."""
     try:
         issue = gh_json("api", f"repos/{{owner}}/{{repo}}/issues/{n}") or {}
     except GhError as exc:
@@ -395,7 +409,12 @@ def why_not(n: int) -> str:
     attempts = failed_attempts(comments_of(n))
     if attempts >= MAX_ATTEMPTS:
         return f"{attempts} failed attempts since the last reset (limit {MAX_ATTEMPTS})"
-    return "another worker claimed it first"
+    if unseen:
+        # A worker started 1-3 s after an issue was filed: GitHub's list of open issues
+        # did not have it yet, though the issue itself reads as claimable.
+        return ("it was not in GitHub's list of open issues when claim.py read it, though it "
+                "reads as claimable now (a new issue can take a few seconds to appear there)")
+    return "no reason found: it reads as claimable now (a read that lagged behind GitHub?)"
 
 
 def cmd_claim(args) -> int:
@@ -403,6 +422,7 @@ def cmd_claim(args) -> int:
     if JITTER_S > 0:
         time.sleep(random.uniform(0, JITTER_S))
     tried: set[int] = set()
+    lost = ""  # what failed in the last claim attempt
     for _ in range(args.tries):
         pool = [c for c in candidates() if c["issue"]["number"] not in tried]
         if args.issue is not None:
@@ -420,8 +440,12 @@ def cmd_claim(args) -> int:
                 pathlib.Path(args.claim_file).write_text(text + "\n")
             print(text)
             return 0
+        lost = cand.get("lost", "")
     if args.issue is not None:
-        print(f"claim.py: #{args.issue} is not claimable: {why_not(args.issue)}", file=sys.stderr)
+        # A lost attempt says itself what failed: a read made after it would find the
+        # label it set (stage:doing) and blame that.
+        why = lost or why_not(args.issue, unseen=args.issue not in tried)
+        print(f"claim.py: #{args.issue} is not claimable: {why}", file=sys.stderr)
     return 3
 
 

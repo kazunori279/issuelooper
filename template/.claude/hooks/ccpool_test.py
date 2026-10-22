@@ -328,6 +328,14 @@ def test_unclaimable_is_remembered() -> None:
     )
     h.st = state([iss(1, ["stage:triage"])], main="e" * 40)
     check("a merge may have closed a native blocker: retried", len(h.step()), 1)
+    h = Rig(state([iss(1, ["stage:triage"])]), unclaimable_retry_s=240)
+    h.finish(h.step()[0].key, "unclaimable")
+    check("nothing changed, within POOL_UNCLAIMABLE_RETRY_S: not retried", h.step(200), [])
+    again = h.step(41)
+    check("after it, retried (a refusal right after the issue was filed was GitHub's lag)",
+          keys(again), ["wrk:1@2026-10-09T10:00:00Z"])
+    h.finish(again[0].key, "unclaimable")
+    check("refused again: held back for another while", h.step(60), [])
 
 
 def test_ux_run_per_gap() -> None:

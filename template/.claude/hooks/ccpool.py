@@ -18,7 +18,8 @@ UNITS
           signed comment, stage:doing) and finishes it after the session
           (`claim.py finish`). A session that ends without a pull request leaves
           its work on branch issue-<N> (pushed here), and the next worker on the
-          issue continues from it.
+          issue continues from it. An issue claim.py refuses waits until it or main
+          changes, or POOL_UNCLAIMABLE_RETRY_S (240) passes.
   auto    (no agent) merge: one per open PR whose issue is at stage:pr and that
           GitHub calls MERGEABLE. The review gate (review_gate.py) reads the diff,
           role_guard.py's merge gates run with CC_ROLE=merger, and the PR is
@@ -252,6 +253,7 @@ class Config:
     map_id_pattern: str = ""  # a regex for the spec's requirement ids (the worker's file map)
     stale_min: int = 60
     orphan_pr_min: int = 10
+    unclaimable_retry_s: float = 240
     auto_cap: int = 4
     ux_gap_s: float = 1500
     ux_idle_gap_s: float = 600
@@ -328,6 +330,7 @@ class Config:
             map_id_pattern=e("POOL_MAP_ID_PATTERN", "").strip(),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
             orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
+            unclaimable_retry_s=float(e("POOL_UNCLAIMABLE_RETRY_S", "") or 240),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
@@ -518,7 +521,7 @@ class Book:
         self.tries: collections.Counter = collections.Counter()  # key -> starts
         self.family_starts: collections.Counter = collections.Counter()
         self.clean: set[str] = set()  # keys whose session ended cleanly
-        self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main) claim.py refused
+        self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.paused: dict[str, float] = {}  # role -> until (crash breaker)
         self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
@@ -577,7 +580,10 @@ def plan(
         if labels & HOLDS:
             continue
         if labels & CLAIMABLE:
-            if blocked(i, open_numbers) or book.unclaimable.get(n) == (i["updated"], main):
+            memo = book.unclaimable.get(n)
+            if blocked(i, open_numbers) or (
+                memo and memo[:2] == (i["updated"], main) and now - memo[2] < cfg.unclaimable_retry_s
+            ):
                 continue
             units.append(
                 Unit(
@@ -2070,11 +2076,14 @@ class Pool:
                 b.family_starts[u.family] -= 1
             if outcome == "unclaimable" and u.number is not None:
                 # claim.py's own read refused it (a native dependency, attempts): no
-                # try spent; the memo holds it back until the issue or main changes.
+                # try spent; the memo holds it back until the issue or main changes, or
+                # POOL_UNCLAIMABLE_RETRY_S passes. Without the expiry, issues refused
+                # because GitHub's read lagged right after they were filed waited 36
+                # minutes for main to move, with slots free.
                 b.tries[u.key] -= 1
                 b.family_starts[u.family] -= 1
                 updated = u.key.split("@", 1)[1] if "@" in u.key else ""
-                b.unclaimable[u.number] = (updated, (self.prev or {}).get("main", ""))
+                b.unclaimable[u.number] = (updated, (self.prev or {}).get("main", ""), now)
             if u.kind == "rebase" and outcome.startswith(("left to a merger", "rebase stopped")):
                 b.rebase_failed[u.number] = u.info.get("head") or ""
             if outcome.startswith("startup crash"):
