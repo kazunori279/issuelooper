@@ -1302,15 +1302,22 @@ class Session(threading.Thread):
         # supervisor enforces the rest.
         cmd = base + cli.first_turn(prompt, hard - start + cfg.retry_pause_max_s)
         with open(self.dir / "wrapper.err", "w") as err:
-            self.proc = subprocess.Popen(
-                cmd,
-                env=env,
-                cwd=repo_root(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=err,
-                start_new_session=True,
-            )
+            # Under the pool's lock, after a look at stopping: stop() either sees this
+            # process and kills it, or it is never started. A worker still claiming its
+            # issue when `issuelooper stop --all` ran started its agent afterwards and
+            # kept running with nobody to stop it.
+            with self.pool.lock:
+                if self.pool.stopping:
+                    return 143, 0.0, False
+                self.proc = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    cwd=repo_root(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=err,
+                    start_new_session=True,
+                )
             resumes, rc = 0, None
             quota_k = 0  # resumes after a quota error, each after a doubling wait
             stall_k = 0  # resumes after the model went silent between steps
@@ -1337,11 +1344,14 @@ class Session(threading.Thread):
                     conv,
                     (budget or max(60, hard - time.time())) + cfg.retry_pause_max_s - paused,
                 )
-                with open(self.dir / "resumes.log", "a") as rl:
-                    rl.write(f"{time.time():.0f} resume {resumes} conversation {conv} ({why})\n")
-                self.proc = subprocess.Popen(
-                    again, env=env, cwd=repo_root(), stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+                with self.pool.lock:
+                    if self.pool.stopping:
+                        return  # the killed process stays; its exit ends the loop
+                    with open(self.dir / "resumes.log", "a") as rl:
+                        rl.write(f"{time.time():.0f} resume {resumes} conversation {conv} ({why})\n")
+                    self.proc = subprocess.Popen(
+                        again, env=env, cwd=repo_root(), stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
 
             while rc is None:
                 try:
@@ -1408,7 +1418,8 @@ class Session(threading.Thread):
                         quota_k += 1
                         with open(self.dir / "resumes.log", "a") as rl:
                             rl.write(f"{time.time():.0f} quota wait {wait:.0f} s before resume {quota_k}\n")
-                        time.sleep(wait)
+                        if self.pool.halt.wait(wait):
+                            break  # stopped during the wait: wrap up now, not after it
                         resume(conv, f"exited with {rc}, quota resume {quota_k} after {wait:.0f} s")
                         rc = None
         elapsed = time.time() - start
@@ -2162,6 +2173,7 @@ class Pool:
         self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
         self.main_seen: dict[str, float] = {}
         self.stopping = False
+        self.halt = threading.Event()  # set with stopping, for sessions that wait
         self.clock = time.time
         cfg.logdir.mkdir(parents=True, exist_ok=True)
         seqf = cfg.logdir / "seq"
@@ -2262,6 +2274,8 @@ class Pool:
 
     def start(self, u: Unit):
         with self.lock:
+            if self.stopping:
+                return None  # a plan made just before stop() starts nothing
             self.seq += 1
             (self.cfg.logdir / "seq").write_text(str(self.seq))
             b = self.book
@@ -2788,8 +2802,7 @@ class Pool:
             self.track_live(st)
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)
-        for u in started:
-            self.start(u)
+        started = [u for u in started if self.start(u)]  # none once stopping
         self.observe(st, now, started, stuck)
         self.prev = st
         if self.hurry_pr is not None and not any(
@@ -2873,9 +2886,12 @@ class Pool:
             w.join(timeout=max(0.0, deadline - time.time()))
 
     def stop(self, *_):
-        self.stopping = True
+        with self.lock:  # Session.session starts its process under this lock
+            self.stopping = True
+            self.halt.set()
+            sessions = list(self.sessions.values())
         self.wake.set()
-        for w in list(self.sessions.values()):
+        for w in sessions:
             w.kill()
 
 

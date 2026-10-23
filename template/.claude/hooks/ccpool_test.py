@@ -1733,6 +1733,54 @@ def run_rebase(test_only: bool, append_src: bool = False):
     )
 
 
+def test_stop_catches_a_session_still_starting() -> None:
+    """A worker still claiming its issue when `stop --all` ran started its agent
+    afterwards and kept running, its issue left at stage:doing."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stoprace-"))
+    agent = d / "ccrole"
+    agent.write_text(f"#!/bin/sh\necho started >> {d}/agent.calls\nsleep 30\n")
+    agent.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agent), render="cat", gh="true",
+                                     kill_leftovers=False, caps={r: 0 for r in ccpool.ROLES},
+                                     timeouts={"worker": "45m"}), fetcher=state, spawn=False)
+    u = ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {})
+    w = pool.start(u)
+    calls = []
+    real_sh = ccpool.Session.sh
+
+    def sh(self, args, env, name):
+        calls.append((name, args))
+        if name == "claim":  # the claim is being made when the owner stops the loop
+            (self.dir / "claim").write_text(json.dumps({"issue": 5, "token": "t", "from": "stage:triage",
+                                                        "title": "x", "pr": {"number": 9, "branch": "issue-5"}}))
+            self.pool.stop()
+        return 0
+    ccpool.Session.sh = sh
+    try:
+        outcome = w.work()
+    finally:
+        ccpool.Session.sh = real_sh
+    check("stopped during its claim: the agent never starts", (d / "agent.calls").exists(), False)
+    check("and it is wrapped up like the others: claim released, no failed attempt",
+          (outcome, [n for n, _ in calls], "--no-fail" in calls[-1][1]),
+          ("stopped with the supervisor", ["claim", "finish"], True))
+    check("nothing starts once stopping", pool.start(ccpool.Unit("worker", "implement", "wrk:6@x", "wrk:6", 6, (4,), {})),
+          None)
+    h = Rig(state([iss(1, ["stage:triage"])]))
+    h.pool.stopping = True
+    check("a step after stop() starts no unit", (h.step(), h.pool.book.running), ([], {}))
+    pool2 = ccpool.Pool(ccpool.Config(logdir=d / "pool2", ccrole=str(agent), render="cat",
+                                      timeouts={"tester": "60m"}), fetcher=state, spawn=False)
+    t = ccpool.Session(pool2, ccpool.Unit("tester", "ux", "ux:a", "tst:ux:a", None, (2,), {"sha": "a" * 40}), 2)
+    t.dir.mkdir(parents=True)
+    pool2.sessions[t.unit.family] = t
+    killer = threading.Timer(1.0, pool2.stop)
+    killer.start()
+    t0 = time.time()
+    rc, _, _ = t.session("walk the app", dict(os.environ))
+    check("a session running when stop() comes is killed", (rc != 0, time.time() - t0 < 25), (True, True))
+
+
 def test_stop_lets_sessions_release_their_claims() -> None:
     """`issuelooper stop` kills the sessions; each must still save its work and put its
     claim back, without a failed attempt, before the supervisor exits. Otherwise a
