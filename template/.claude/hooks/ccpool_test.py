@@ -574,6 +574,20 @@ def test_idle_and_drained_events() -> None:
     )
 
 
+def test_owner_questions_wait_for_the_owner() -> None:
+    """The monitor settled two stage:owner questions from the spec before the owner did."""
+    h = Rig(state([iss(124, ["stage:doing"])]))
+    h.step()
+    h.st = state([iss(124, ["stage:owner"])])
+    h.step()
+    h.st = state([{**iss(124, ["stage:owner"]), "comments": 3}])
+    h.step()
+    owner = [e for e in h.pool.events if e.startswith("#124") and "stage:owner" in e]
+    check("the monitor is told the question is the owner's, and whose comment to act on",
+          ("do not answer it yourself" in owner[0], "a comment with no role marker" in owner[1]), (True, True))
+    check("and so is every queue update", "never the answer" in ccpool.FEED_HEADER, True)
+
+
 def test_signature_moves_with_the_queue() -> None:
     a = state([iss(1, ["stage:triage"])])
     b = state([iss(1, ["stage:doing"])])

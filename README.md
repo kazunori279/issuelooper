@@ -205,7 +205,8 @@ Anything you file on GitHub enters the queue; the monitor triages it.
 When a decision is yours (what the product should do, a test that contradicts
 the spec), the monitor moves the issue to `stage:owner` and ends its reply with
 the question. Answer with a comment on the issue: the supervisor tells the
-monitor, which acts on it. An issue the workers failed three times also waits at
+monitor, which acts on it. The monitor does not answer these questions itself
+(it may add context or a recommendation), so they wait for you. An issue the workers failed three times also waits at
 `stage:owner`; any comment from you resets its attempts. So does an issue that
 failed its live check twice: the monitor lists what each fix changed and what each
 check saw, and asks whether the acceptance holds as written.

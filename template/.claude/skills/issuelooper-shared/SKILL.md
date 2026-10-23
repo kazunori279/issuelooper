@@ -110,7 +110,7 @@ One label per axis. Two `stage:` labels on one issue is a bug.
 | `stage:doing` | a worker holds the claim | `claim.py` | `claim.py`, monitor |
 | `stage:pr` | its PR is open and green | worker (own claim) | supervisor, merger, monitor |
 | `stage:live` | merged; the live check is owed | supervisor, merger, monitor | monitor |
-| `stage:owner` | waits for the owner's decision | anyone | anyone, once answered |
+| `stage:owner` | waits for the owner's decision; only the owner answers it | anyone | anyone, once the owner answered |
 | `needs:live` | acceptance needs the live environment | monitor, worker, tester, aide | monitor only |
 | `P0`, `P1`, `P2` | priority (P2 is the default; P0 is broken now) | monitor; tester and aide when filing | monitor |
 | `hold:monitor` | the monitor stopped this change from landing | monitor | monitor |

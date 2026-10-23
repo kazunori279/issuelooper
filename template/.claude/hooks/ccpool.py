@@ -1202,8 +1202,9 @@ FEED_HEADER = (
     "Pool update: the queue changed. Use the issuelooper-monitor skill and run its pass over "
     "what changed: triage the untriaged issues, re-rank the queue, hold or close low-value work, "
     "fix dependencies, act on stuck or failed work, and raise the owner's decisions at "
-    "stage:owner. If nothing needs you, say so in one line. End with the owner's decisions, "
-    "if any, as one question."
+    "stage:owner (a question there waits for the owner's own comment: add context or a "
+    "recommendation, never the answer). If nothing needs you, say so in one line. End with the "
+    "owner's decisions, if any, as one question."
 )
 
 SESSION = (
@@ -2681,11 +2682,12 @@ class Pool:
                 elif old is None:
                     self.event(f"new issue #{n}: {i['title']}")
                 elif "stage:owner" in labels and "stage:owner" not in old["labels"]:
-                    self.event(f"#{n} moved to stage:owner (needs a decision): {i['title']}")
+                    self.event(f"#{n} moved to stage:owner (the owner's decision: wait for their comment, "
+                               f"do not answer it yourself): {i['title']}")
                 elif "stage:owner" in labels and i.get("comments", 0) > old.get("comments", 0):
                     # The owner answers stage:owner on the issue; say so, or the monitor keeps asking.
                     self.event(f"#{n} (stage:owner) has a new comment: read it with `gh issue view {n} --comments`; "
-                               "it may be the owner's answer")
+                               "act only on an answer from the owner (a comment with no role marker)")
                 elif "stage:triage" in labels and "stage:pr" in old["labels"]:
                     self.event(f"#{n} was handed back from its pull request to stage:triage")
             for c in st["closed"]:
