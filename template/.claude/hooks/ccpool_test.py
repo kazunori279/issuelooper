@@ -729,6 +729,139 @@ def test_old_holds_are_pointed_out() -> None:
     check("a lifted hold is forgotten", sorted(h.pool.book.holds), [54])
 
 
+FAKE_GH_ISSUE = r"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_GH_LOG"], "a") as f:
+    f.write(" ".join(a.replace("\n", "\\n") for a in sys.argv[1:]) + "\n")
+if sys.argv[1:3] == ["issue", "view"]:
+    view = os.environ.get("FAKE_GH_VIEW", "")
+    if not view:
+        sys.exit(1)
+    print(view)
+"""
+
+
+def test_live_checks_settle_themselves() -> None:
+    """The supervisor acts on the tester's verdict; the monitor closed 24 issues by
+    hand in one run, a turn each."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-live-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_ISSUE)
+    gh.chmod(0o755)
+    loop = {"login": "loop-bot"}
+    since = "2026-10-23T12:00:00Z"
+    unit = ccpool.Unit("tester", "live", "live:9@x", "tst:9", 9, (0, 9), {"since": since, "title": "places"})
+
+    def settle(comments, labels=("stage:live", "needs:live"), state_="OPEN", view=True):
+        log = d / "gh.log"
+        log.write_text("")
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh)), fetcher=state, spawn=False)
+        os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="loop-bot", FAKE_GH_VIEW=json.dumps(
+            {"state": state_, "labels": [{"name": x} for x in labels], "comments": comments}) if view else "")
+        try:
+            pool.settle_live(unit)
+        finally:
+            for k in ("FAKE_GH_LOG", "ISSUELOOPER_LOGIN", "FAKE_GH_VIEW"):
+                os.environ.pop(k, None)
+        return [ln for ln in log.read_text().splitlines() if not ln.startswith("issue view")], pool.events
+
+    def tester(body, at="2026-10-23T12:30:00Z", author=loop):
+        return {"author": author, "body": "<!-- tester -->\n" + body, "createdAt": at, "url": "https://x/c/1"}
+
+    calls, events = settle([tester("Saw Otaru cafes.\nlive-verified: the app in live mode 2026-10-23")])
+    check("a live-verified line closes the issue",
+          [c.split(" --comment")[0] for c in calls],
+          ["issue edit 9 --remove-label stage:live", "issue close 9 --reason completed"])
+    check("and tells the monitor", events, ["#9: the live check passed; the supervisor closed it."])
+    calls, events = settle([tester("live-check-blocked: .env is missing")])
+    check("live-check-blocked goes to the owner",
+          calls[0], "issue edit 9 --remove-label stage:live --add-label stage:owner")
+    calls, events = settle([tester("Still Shibuya after setting Otaru.")])
+    check("a first failure goes back to a worker",
+          (calls[0], ccpool.LIVE_HANDBACK in calls[1]),
+          ("issue edit 9 --remove-label stage:live --add-label stage:triage", True))
+    first = {"author": loop, "body": f"<!-- merger -->\n{ccpool.LIVE_HANDBACK}\nBack", "createdAt": "2026-10-23T10:00:00Z"}
+    calls, events = settle([first, tester("Still Shibuya.")])
+    check("a second failure goes to the owner",
+          calls[0], "issue edit 9 --remove-label stage:live --add-label stage:owner")
+    ask = "live check of #9 finished: read the tester's comment"
+    for what, comments, kw in (
+        ("a verdict older than this entry into stage:live", [tester("live-verified: x", at="2026-10-23T11:00:00Z")], {}),
+        ("a stranger's comment, marker and all", [tester("live-verified: x", author={"login": "someone"})], {}),
+        ("gh that cannot read the issue", [], {"view": False}),
+    ):
+        calls, events = settle(comments, **kw)
+        check(f"{what}: nothing changes and the monitor is asked", (calls, events[0].startswith(ask)), ([], True))
+    calls, events = settle([tester("live-verified: x")], labels=("needs:live",))
+    check("an issue already off stage:live is left alone", (calls, events), ([], []))
+
+
+def test_long_dependency_waits_are_pointed_out() -> None:
+    """One P1 fix waited 6.7 hours on three dependencies and nobody looked at them again."""
+    blocked = dict(iss(238, ["stage:triage", "P1"]), blocked_by=3)
+    low = dict(iss(240, ["stage:triage", "P2"]), blocked_by=1)
+    h = Rig(state([blocked, low]), blocked_review_s=3600)
+    h.step()
+    check("a new wait: nothing said", [e for e in h.pool.events if "open blocker" in e], [])
+    h.step(3600)
+    said = [e for e in h.pool.events if "open blocker" in e]
+    check("an hour later the monitor is told once, about the P1 only",
+          [e.split(" has")[0] for e in said], ["#238 (P1)"])
+    h.step(600)
+    check("once", sum("open blocker" in e for e in h.pool.events), 1)
+    check("and every update lists it", "P0/P1 issues blocked over 60 min: #238 (70 min)" in h.pool.summary(h.st), True)
+    h.st = state([iss(238, ["stage:triage", "P1"]), low])
+    h.step()
+    check("an unblocked issue is forgotten", sorted(h.pool.book.blocked), [])
+
+
+def test_monitor_is_asked_to_split_an_issue_that_keeps_failing() -> None:
+    """The monitor may split any issue, and in a 12-hour run split none; one took eleven
+    worker sessions."""
+    h = Rig(state([iss(9, ["stage:triage", "P0"]), iss(10, ["stage:pr", "P1"]),
+                   iss(11, ["stage:triage", "P1"], body="<!-- monitor -->\n<!-- part of #9 -->\nPart")]))
+    for n in (9, 10, 11, 12):
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", f"wrk:{n}@x", f"wrk:{n}", n, (0, n)), 1)
+        h.pool.finished(w, "ok")
+    h.step()
+    check("one worker session is not enough to ask", [e for e in h.pool.events if "worker sessions" in e], [])
+    for n in (9, 10, 11):
+        h.pool.finished(ccpool.Session(h.pool, ccpool.Unit("worker", "implement", f"wrk:{n}@y", f"wrk:{n}", n,
+                                                             (0, n)), 1), "ok")
+    h.pool.finished(ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:9@z", "wrk:9", 9, (0, 9)), 1),
+                    "quota error (exit 3)")
+    h.step()
+    said = [e for e in h.pool.events if "worker sessions" in e]
+    check("after two, the monitor is asked about the claimable issue only (not one at stage:pr, not a part)",
+          [e.split(":")[0] for e in said], ["#9 has had 2 worker sessions and is not merged"])
+    h.step()
+    check("once", sum("worker sessions" in e for e in h.pool.events), 1)
+    check("a closed issue is forgotten", sorted(h.pool.book.worker_runs), [9, 10, 11])
+    off = Rig(state([iss(9, ["stage:triage"])]), decompose_after=0)
+    off.pool.book.worker_runs[9] = 5
+    off.step()
+    check("POOL_DECOMPOSE_AFTER=0: never asked", [e for e in off.pool.events if "worker sessions" in e], [])
+
+
+def test_new_ux_proposals_go_to_the_monitor_to_screen() -> None:
+    """The owner rejected 94 of 127 proposals in one run, 59 as duplicates."""
+    h = Rig(state([iss(1, ["stage:triage"])]))
+    h.step()
+    h.st = state([iss(1, ["stage:triage"]), iss(300, ["ux:proposed", "type:bug"], title="UX: near here")])
+    h.step()
+    check("a new proposal is named for screening, not for triage",
+          ([e for e in h.pool.events if "#300" in e]),
+          ["new UX proposal #300: UX: near here. Screen it before the owner reads it "
+           "(issuelooper-monitor skill, Screen UX proposals)"])
+    h.step()
+    check("once", sum("#300" in e for e in h.pool.events), 1)
+    off = Rig(state([]), ux_screen=False)
+    off.step()
+    off.st = state([iss(300, ["ux:proposed"])])
+    off.step()
+    check("POOL_UX_SCREEN=0: not named", [e for e in off.pool.events if "#300" in e], [])
+
+
 def test_signature_moves_with_the_queue() -> None:
     a = state([iss(1, ["stage:triage"])])
     b = state([iss(1, ["stage:doing"])])
@@ -1126,9 +1259,9 @@ def test_ux_proposed_is_left_alone() -> None:
     h.st = state([iss(1, ["stage:triage"])] + ux, [closed(9, ["ux:proposed"])])
     check("no worker, merge or tester for ux:proposed issues", h.step(), [])
     check(
-        "the monitor is not asked to triage them",
-        [e for e in h.pool.events if any(f"#{n}" in e for n in (7, 8, 9))],
-        [],
+        "the monitor is not asked to triage them, only to screen the new ones",
+        [e.split(":")[0] for e in h.pool.events if any(f"#{n}" in e for n in (7, 8, 9))],
+        ["new UX proposal #7", "new UX proposal #8"],
     )
     check(
         "not listed as untriaged",

@@ -2031,6 +2031,15 @@ def test_monitor_keeps_the_moderator_labels() -> None:
         "record a dependency":
             "gh api -X POST repos/o/r/issues/12/dependencies/blocked_by -F issue_id=99",
         "mark needs:live": "gh issue edit 33 --add-label needs:live",
+        "make a part a sub-issue of its parent":
+            "gh api -X POST repos/o/r/issues/12/sub_issues -F sub_issue_id=4242",
+        "remove a dependency it no longer needs":
+            "gh api -X DELETE repos/o/r/issues/12/dependencies/blocked_by/4242",
+        "file a part of a split issue":
+            "gh issue create --title 'Places card (part of #12)' --label type:feature-request --label P1 "
+            "--label stage:triage --body '<!-- monitor -->\n<!-- part of #12 -->\nThe card.'",
+        "close a duplicate UX proposal":
+            "gh issue close 301 --reason 'not planned' --comment '<!-- monitor -->\nDuplicate of #238.'",
     }
     for what, cmd in allowed.items():
         verdict, reason = run(cmd, role="monitor", extra_env=env)
