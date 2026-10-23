@@ -42,6 +42,11 @@ os.environ["REVIEW_GATE"] = "off"
 os.environ["GUARD_SECRET_URLS"] = ""
 # Live checks on, so Gate 4 applies; one case below turns them off.
 os.environ["POOL_LIVE"] = "1"
+# The live check (Gate 7) is off unless a case turns it on; its records are isolated.
+os.environ["POOL_DEVCHECK"] = "0"
+os.environ["DEVCHECK_PATHS"] = ""
+TEST_DEVCHECK_RECORDS = pathlib.Path(TEST_TMPDIR.name) / "devcheck_records"
+os.environ["DEVCHECK_RECORD_DIR"] = str(TEST_DEVCHECK_RECORDS)
 # The guard reads .issuelooper/config.toml from $SHARED_REPO_PATH; none here.
 os.environ["SHARED_REPO_PATH"] = TEST_TMPDIR.name
 
@@ -758,6 +763,7 @@ elif args[:2] == ["pr", "view"]:
         "closingIssuesReferences": [{"number": int(n)} for n in refs],
         "headRefOid": head,
         "baseRefOid": (pr_state or {}).get("baseRefOid", ""),
+        "headRefName": (pr_state or {}).get("headRefName", ""),
         "body": body,
         "files": files,
     }))
@@ -2061,6 +2067,124 @@ def test_review_gate() -> None:
     for off in ("off", "0"):
         env["REVIEW_GATE"] = off
         check(f"REVIEW_GATE={off} skips the gate", merge()[0], "allow")
+
+
+def write_devcheck_record(sha: str, status: str = "pass", key: str | None = None,
+                          steps: list | None = None) -> None:
+    """The record devcheck.py would have written at `sha`."""
+    if steps is None:
+        steps = [{"name": "smoke", "rc": 0, "log": "/tmp/smoke.log"},
+                 {"name": "script 1", "rc": 0 if status == "pass" else 1, "log": "/tmp/script-1.log"}]
+    TEST_DEVCHECK_RECORDS.mkdir(parents=True, exist_ok=True)
+    (TEST_DEVCHECK_RECORDS / f"{sha}.json").write_text(
+        json.dumps({"sha": sha, "status": status, "key": key, "steps": steps}))
+
+
+def test_devcheck_gate() -> None:
+    """Gate 7: a change a user can see was used in the real environment before its PR."""
+    head = "7" * 40
+    on = {"POOL_DEVCHECK": "1", "DEVCHECK_PATHS": "src/"}
+    src = [{"path": "src/app.js", "changeType": "MODIFIED"}]
+
+    def body(live: str = "", issue: str = "Fixes #90") -> str:
+        return (f"<!-- worker -->\n{issue}\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
+                f"- **Fail-before:** waived - owner ruling\n{live}")
+
+    def merge(pr: dict, labels: dict | None = None, linked: dict | None = None, extra: dict | None = None):
+        env, _ = with_fake_gh(labels=labels, linked=linked, prs={"95": {"headRefOid": head, **pr}})
+        return run("gh pr merge 95 --squash", role="merger", extra_env={**env, **on, **(extra or {})})
+
+    verdict, _ = merge({"body": body(), "files": src}, extra={"POOL_DEVCHECK": "0"})
+    check("devcheck off: no live check asked", verdict, "allow")
+    verdict, reason = merge({"body": body(), "files": src})
+    check("a change under the watched paths without a live check is refused", verdict, "refuse")
+    check("the refusal is Gate 7 and says how", ("Gate 7" in reason, "devcheck.py" in reason), (True, True))
+    check("and does not read as a sweep problem (the supervisor would re-sweep)", "sweep" in reason.lower(), False)
+    verdict, _ = merge({"body": body(), "files": [{"path": "docs/notes.md", "changeType": "MODIFIED"}]})
+    check("a change outside the paths, for an unlabelled issue, needs none", verdict, "allow")
+    verdict, _ = merge({"body": body("- **Live check:** waived - no visible change\n"), "files": src})
+    check("a path-only change may waive it as invisible", verdict, "allow")
+
+    labelled = {"90": ["P1", "owner-request"]}
+    verdict, reason = merge({"body": body("- **Live check:** waived - no visible change\n")},
+                            labels=labelled, linked={"95": ["90"]})
+    check("an owner-request issue cannot be waived as invisible", verdict, "refuse")
+    check("the refusal names the owner ruling", "owner ruling" in reason, True)
+    verdict, _ = merge({"body": body("- **Live check:** waived - owner ruling\n")},
+                       labels=labelled, linked={"95": ["90"]})
+    check("the owner's ruling waives it", verdict, "allow")
+    verdict, _ = merge({"body": body(issue="Refs #91"), "headRefName": "issue-91"},
+                       labels={"91": ["needs:live"]})
+    check("a needs:live issue found through its branch and Refs is in scope", verdict, "refuse")
+
+    write_devcheck_record(head)
+    verdict, _ = merge({"body": body(f"- **Live check:** {head[:12]} pass\n"), "files": src})
+    check("a passing record at the head merges", verdict, "allow")
+    write_devcheck_record(head, status="fail")
+    verdict, reason = merge({"body": body(f"- **Live check:** {head} pass\n"), "files": src})
+    check("a failed check does not", (verdict, "failed" in reason), ("refuse", True))
+    write_devcheck_record(head, steps=[{"name": "smoke", "rc": 0}])
+    verdict, reason = merge({"body": body(f"- **Live check:** {head} pass\n"), "files": src})
+    check("nor one that ran only the project's smoke", (verdict, "no script" in reason), ("refuse", True))
+    (TEST_DEVCHECK_RECORDS / f"{head}.json").unlink()
+    verdict, reason = merge({"body": body(f"- **Live check:** {head} pass\n"), "files": src})
+    check("nor a line with no record behind it", (verdict, "no record" in reason), ("refuse", True))
+
+
+def test_devcheck_survives_a_rebase_that_only_moves_the_branch() -> None:
+    """Gate 7 accepts the check of an earlier head when the branch changes the same
+    lines; a rebase that changed what it does needs a new check."""
+    import importlib
+    sys.path.insert(0, str(GUARD.parent))
+    devcheck = importlib.import_module("devcheck")
+    app = "".join(f"line {i}\n" for i in range(1, 30))
+    base = make_commit({"src/app.js": app})
+    main2 = make_commit({"src/app.js": app.replace("line 2\n", "line 2 (from main)\n")}, parent=base)
+    old_head = make_commit({"src/app.js": app.replace("line 25\n", "line 25\nadded by the PR\n")}, parent=base)
+    moved = make_commit({"src/app.js": app.replace("line 2\n", "line 2 (from main)\n")
+                         .replace("line 25\n", "line 25\nadded by the PR\n")}, parent=main2)
+    changed = make_commit({"src/app.js": app.replace("line 2\n", "line 2 (from main)\n")
+                           .replace("line 25\n", "line 25\nadded differently\n")}, parent=main2)
+    write_devcheck_record(old_head, key=devcheck.branch_key(os.getcwd(), base, old_head))
+    on = {"POOL_DEVCHECK": "1", "DEVCHECK_PATHS": "src/"}
+
+    def merge(head: str):
+        b = (f"<!-- worker -->\nFixes #12\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
+             f"- **Fail-before:** waived - owner ruling\n- **Live check:** {old_head} pass\n")
+        env, _ = with_fake_gh(prs={"96": {"headRefOid": head, "baseRefOid": main2, "body": b,
+                                          "files": [{"path": "src/app.js", "changeType": "MODIFIED"}]}})
+        return run("gh pr merge 96 --squash", role="merger", extra_env={**env, **on})
+
+    check("the same change on a moved main keeps its live check", merge(moved)[0], "allow")
+    verdict, reason = merge(changed)
+    check("a branch that now changes something else does not", verdict, "refuse")
+    check("and is told to check again with --rerun", "--rerun" in reason, True)
+    (TEST_DEVCHECK_RECORDS / f"{old_head}.json").unlink()
+
+
+def test_devcheck_at_pr_create() -> None:
+    """The worker learns about Gate 7 when it opens the PR, not at the merge."""
+    head = "8" * 40
+
+    def create(live: str) -> tuple[str, str]:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("<!-- worker -->\nFixes #93\n- **Sweep SHA:** abc1234\n"
+                     f"- **Fail-before:** tests/unit/test_app.py 7 -> 8\n{live}")
+        env, _ = with_fake_gh(labels={"93": ["owner-request"]})
+        try:
+            return run(f"gh pr create --title t --body-file {fh.name}", role="worker",
+                       extra_env={**env, **claim_env(93), "POOL_DEVCHECK": "1"})
+        finally:
+            pathlib.Path(fh.name).unlink(missing_ok=True)
+
+    verdict, reason = create("")
+    check("an owner-request PR without a live check is refused at create", verdict, "refuse")
+    check("with the way to run it", "devcheck.py" in reason, True)
+    write_devcheck_record(head)
+    check("with a passing record it opens", create(f"- **Live check:** {head} pass\n")[0], "allow")
+    write_devcheck_record(head, status="fail")
+    check("with a failed one it does not", create(f"- **Live check:** {head} pass\n")[0], "refuse")
+    (TEST_DEVCHECK_RECORDS / f"{head}.json").unlink()
 
 
 def main() -> int:

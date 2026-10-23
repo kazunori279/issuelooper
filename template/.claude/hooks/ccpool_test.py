@@ -1544,6 +1544,33 @@ def test_hard_ceiling_and_exit_124() -> None:
             os.environ["POOL_TIMEOUT_CEILING"] = old
 
 
+def test_devcheck_gives_workers_more_time() -> None:
+    """With the pre-PR live check on, a worker's default timeout and wrap-up move later,
+    and its prompt names the check; explicit settings still win."""
+    keys = ("POOL_DEVCHECK", "POOL_TIMEOUT_WORKER", "POOL_WORKER_WRAP_S")
+    old = {k: os.environ.pop(k, None) for k in keys}
+    try:
+        cfg = ccpool.Config.from_env()
+        check("devcheck off: 45 minutes, wrap-up at 35", (cfg.devcheck, cfg.timeouts["worker"], cfg.worker_wrap_s),
+              (False, "45m", 2100.0))
+        os.environ["POOL_DEVCHECK"] = "1"
+        cfg = ccpool.Config.from_env()
+        check("devcheck on: 60 minutes, wrap-up at 50", (cfg.devcheck, cfg.timeouts["worker"], cfg.worker_wrap_s),
+              (True, "60m", 3000.0))
+        os.environ["POOL_TIMEOUT_WORKER"] = "50m"
+        check("an explicit worker timeout wins", ccpool.Config.from_env().timeouts["worker"], "50m")
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    claim = {"issue": 6, "token": "t", "from": "stage:triage", "title": "x"}
+    check("the prompt names the live check only when it is on",
+          ("devcheck.py" in ccpool.worker_prompt(claim, "1", "60m", "u"),
+           "devcheck.py" in ccpool.worker_prompt(claim, "1", "60m", "u", devcheck=True)),
+          (False, True))
+
+
 def test_stall_threshold_by_model() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
     pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)

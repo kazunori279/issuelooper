@@ -276,6 +276,7 @@ class Config:
     deploy_timeout_s: float = 420
     live: bool = False
     required_files: list = dataclasses.field(default_factory=list)  # in the shared checkout; see check_files
+    devcheck: bool = False
     ux: bool = False
     broker_sock: str = ""
     herdr_monitor: str = ""
@@ -348,13 +349,16 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         e = os.environ.get
+        # A worker that also runs the app for real before its PR (devcheck.py) needs
+        # longer: the check alone takes several minutes.
+        devcheck = env_flag("POOL_DEVCHECK")
         return cls(
             poll_s=float(e("POOL_POLL_S", "15")),
             min_fetch_s=float(e("POOL_MIN_FETCH_S", "3")),
             caps={r: env_int(f"POOL_CAP_{r.upper()}", 0) for r in ROLES},
             global_cap=env_int("POOL_MAX_WORKERS", 0),
             timeouts={
-                "worker": e("POOL_TIMEOUT_WORKER", "45m"),
+                "worker": e("POOL_TIMEOUT_WORKER", "60m" if devcheck else "45m"),
                 "merger": e("POOL_TIMEOUT_MERGER", "45m"),
                 # 60 min: a UX run walks every journey and reads every screenshot;
                 # testers kept timing out at 45.
@@ -366,6 +370,7 @@ class Config:
             live=env_flag("POOL_LIVE"),
             required_files=[f.strip() for f in (e("POOL_REQUIRED_FILES", "") or (".env" if env_flag("POOL_LIVE") else ""))
                             .split(",") if f.strip()],
+            devcheck=devcheck,
             ux=env_flag("POOL_UX"),
             spec=env_flag("POOL_SPEC"),
             broker_sock=e("POOL_BROKER_SOCK", ""),
@@ -408,7 +413,7 @@ class Config:
             split_max=env_int("POOL_SPLIT_MAX", 8),
             split_per_window=env_int("POOL_SPLIT_PER_WINDOW", 1),
             split_lines=env_int("POOL_SPLIT_LINES", 900),
-            worker_wrap_s=float(e("POOL_WORKER_WRAP_S", "2100")),
+            worker_wrap_s=float(e("POOL_WORKER_WRAP_S", "3000" if devcheck else "2100")),
             # 12 min: workers on slower models ran out of 8 before they had pushed.
             worker_wrap_budget_s=float(e("POOL_WORKER_WRAP_BUDGET_S", "720")),
             tst_port=env_int("TST_PORT", config.tester_port_base()),
@@ -995,9 +1000,11 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
 
 
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
-                  wrap_min: int = 35, issue: str = "", files: str = "") -> str:
+                  wrap_min: int = 35, issue: str = "", files: str = "", devcheck: bool = False) -> str:
     n, token = c["issue"], c["token"]
     live_text = ", labelled needs:live: write Refs #%s, not Fixes" % n if live and c.get("needs_live") else ""
+    devcheck_text = (" and, for a change a user can see, a passing live check\n"
+                     "   (devcheck.py) of it") if devcheck else ""
     pr = c.get("pr") or {}
     branch = pr.get("branch") or f"issue-{n}"
     pr_text = ""
@@ -1044,7 +1051,7 @@ never append to a shared test file (that is what makes pull requests conflict).
 
 End in one of two states:
 1. A pull request for #{n} is open (or updated), in the PR format of your skill, with
-   its sweep record written at its head, and #{n} moved to stage:pr with stage:doing
+   its sweep record written at its head{devcheck_text}, and #{n} moved to stage:pr with stage:doing
    cleared. Last line of your reply: WORKER-DONE pr #<number>
 2. You could not finish: commit what you have on {branch} (the supervisor pushes it for
    the next worker), say on #{n} what blocked you and what is left, then run
@@ -1074,7 +1081,9 @@ from a merger session, and any write to a PR but #{pr}.
 1. Rebase onto origin/main in {scratch(f"mrg-{pr}-wt")} and resolve the conflicts so that both this
    change and what landed on main survive ({PROJECT} says how to set up a worktree).
    Then run `python3 .claude/hooks/sweep_locked.py --update-pr {pr}` there and push with
-   --force-with-lease.
+   --force-with-lease. If the PR body has a `Live check:` line and your resolution changed
+   what the branch does, also run `python3 .claude/hooks/devcheck.py --rerun <its sha>
+   --update-pr {pr}` (merge gate 7 refuses a changed branch with the old check).
 2. Catch up with main, which moved while you worked: once the sweep is green,
    `git fetch -q origin main`, and if `git merge-base --is-ancestor origin/main HEAD` fails,
    `git rebase origin/main` again. A clean rebase: push it with --force-with-lease and do
@@ -1753,7 +1762,7 @@ class Session(threading.Thread):
                 files = ""
             prompt = worker_prompt(claim, str(self.seq), cfg.timeouts["worker"], pool, wip,
                                    cfg.live, int(cfg.wrap_s() // 60) or 35,
-                                   issue_text(thread) if thread else "", files)
+                                   issue_text(thread) if thread else "", files, cfg.devcheck)
         elif u.role == "merger":
             env.update(MERGE_PR=str(u.number))
             prompt = merger_prompt(u, cfg.timeouts["merger"])

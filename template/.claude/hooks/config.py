@@ -56,6 +56,17 @@ KEYS = {
     ("deploy", "timeout_s"): "POOL_DEPLOY_TIMEOUT_S",
     ("live", "enabled"): "POOL_LIVE",
     ("live", "required_files"): "POOL_REQUIRED_FILES",
+    ("devcheck", "enabled"): "POOL_DEVCHECK",
+    ("devcheck", "start"): "DEVCHECK_START",
+    ("devcheck", "ready_path"): "DEVCHECK_READY_PATH",
+    ("devcheck", "command"): "DEVCHECK_COMMAND",
+    ("devcheck", "script_runner"): "DEVCHECK_SCRIPT_RUNNER",
+    ("devcheck", "slots"): "DEVCHECK_SLOTS",
+    ("devcheck", "port_base"): "DEVCHECK_PORT_BASE",
+    ("devcheck", "step_timeout_s"): "DEVCHECK_STEP_TIMEOUT_S",
+    ("devcheck", "record_dir"): "DEVCHECK_RECORD_DIR",
+    ("devcheck", "paths"): "DEVCHECK_PATHS",
+    ("devcheck", "labels"): "DEVCHECK_LABELS",
     ("ux", "enabled"): "POOL_UX",
     ("ux", "gap_minutes"): "POOL_UX_GAP_MIN",
     ("ux", "idle_gap_minutes"): "POOL_UX_IDLE_GAP_MIN",
@@ -103,11 +114,11 @@ def scratch_root(root: pathlib.Path | None = None) -> pathlib.Path:
 
 
 def record_dirs(kind: str) -> list[pathlib.Path]:
-    """Where the sweep ("sweep", $SWEEP_RECORD_DIR) or review ("review", $REVIEW_DIR)
-    records go: the first is written; readers also look in the rest, the one directory
+    """Where the sweep ("sweep", $SWEEP_RECORD_DIR), review ("review", $REVIEW_DIR) or
+    live check ("devcheck", $DEVCHECK_RECORD_DIR) records go: the first is written; readers also look in the rest, the one directory
     all repositories shared before scratch_root, so records made before an upgrade
     still count."""
-    name = {"sweep": "SWEEP_RECORD_DIR", "review": "REVIEW_DIR"}[kind]
+    name = {"sweep": "SWEEP_RECORD_DIR", "review": "REVIEW_DIR", "devcheck": "DEVCHECK_RECORD_DIR"}[kind]
     if os.environ.get(name, "").strip():
         return [pathlib.Path(os.environ[name].strip())]
     return [scratch_root() / kind, pathlib.Path(f"/tmp/issuelooper-{kind}")]

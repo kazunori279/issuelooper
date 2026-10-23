@@ -45,6 +45,22 @@ command = "bash .issuelooper/deploy.sh"   # POOL_DEPLOY_CMD: run from the shared
 [live]
 enabled = true               # POOL_LIVE: needs:live issues get a tester's live check after their merge
 
+[devcheck]
+enabled = true               # POOL_DEVCHECK: before the PR, a worker runs the app from its branch in live mode and
+                             # uses it (.claude/hooks/devcheck.py); merge gate 7 asks for the record
+start = 'ln -sf "$SHARED_REPO_PATH/.env" .env && SESSIONS_DB=$ISSUELOOPER_TMP/devcheck-$DEVCHECK_PORT.db exec uv run concierge --port $DEVCHECK_PORT'
+                             # DEVCHECK_START: live mode (no CONCIERGE_SCRIPT); the app loads .env, linked from the
+                             # shared checkout (git ignores it, so the tree stays clean); sessions in scratch
+ready_path = "/"             # DEVCHECK_READY_PATH
+command = ""                 # DEVCHECK_COMMAND: no project smoke here: ux/journeys.py starts its own server and
+                             # records failed steps instead of failing, so it serves the tester's UX runs. A smoke
+                             # for this key exits non-zero when a step fails and lives under ux/ (the owner's)
+script_runner = "uv run python"   # DEVCHECK_SCRIPT_RUNNER: workers' Playwright scripts
+slots = 2                    # DEVCHECK_SLOTS: live checks at once (each one talks to the Gemini Live API)
+port_base = 8700             # DEVCHECK_PORT_BASE
+paths = ["src/"]             # DEVCHECK_PATHS
+labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS
+
 [ux]
 enabled = true               # POOL_UX: a tester walks the deployed app as a user and files findings
 gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many minutes
@@ -67,7 +83,7 @@ fixtures = ["spec/fixtures/*.json", "ux/ux_script.json"]   # REVIEW_FIXTURES: fi
 
 [pool]
 max_sessions = 16            # POOL_MAX_WORKERS: agent sessions running at once, every role together
-worker_timeout = "45m"       # POOL_TIMEOUT_WORKER
+worker_timeout = "60m"       # POOL_TIMEOUT_WORKER: 60 with the live check on
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by

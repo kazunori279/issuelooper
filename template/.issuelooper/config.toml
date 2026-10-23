@@ -43,6 +43,21 @@ enabled = false              # POOL_LIVE: needs:live issues get a tester's live 
                              # .env when live checks are on); while one is missing, the monitor and the dashboard
                              # say so and no live check starts
 
+[devcheck]
+enabled = false              # POOL_DEVCHECK: before the PR, a worker runs the app from its branch the way it runs
+                             # for users (real services, credentials) and uses it (.claude/hooks/devcheck.py);
+                             # merge gate 7 refuses a PR in scope without a passing record for its change
+start = ""                   # DEVCHECK_START: starts the app in the real environment on $DEVCHECK_PORT, in the
+                             # foreground, from a worktree; keep what it writes (databases, logs) in $ISSUELOOPER_TMP
+ready_path = "/"             # DEVCHECK_READY_PATH: the app is up once this path answers with a status below 500
+command = ""                 # DEVCHECK_COMMAND: the project's end-to-end smoke against $DEVCHECK_URL, run before
+                             # the worker's own scripts; keep it in an owner's path (guard.protected_paths)
+script_runner = "python3"    # DEVCHECK_SCRIPT_RUNNER: runs each worker script (such as "uv run python")
+slots = 2                    # DEVCHECK_SLOTS: checks that may run at the same time (each one uses the real services)
+port_base = 8700             # DEVCHECK_PORT_BASE: slot k serves on port_base + k
+paths = ["src/"]             # DEVCHECK_PATHS: a PR that changes any of these needs a live check
+labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS: so does a PR for an issue with one
+
 [ux]
 enabled = false              # POOL_UX: a tester walks the deployed app as a user and files findings
 gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many minutes
@@ -67,7 +82,7 @@ max_rejects = 2              # REVIEW_MAX_REJECTS: rejects handed back to worker
 
 [pool]
 max_sessions = 8             # POOL_MAX_WORKERS: agent sessions running at once, every role together
-worker_timeout = "45m"       # POOL_TIMEOUT_WORKER
+# worker_timeout = "45m"     # POOL_TIMEOUT_WORKER: default 45m, or 60m with [devcheck] on
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
