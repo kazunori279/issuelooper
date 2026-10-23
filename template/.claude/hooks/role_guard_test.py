@@ -739,7 +739,8 @@ if args[:2] == ["issue", "view"]:
     bodies = state.get("comments", {}).get(args[2], [])
     print(json.dumps({
         "labels": [{"name": n} for n in names],
-        "comments": [{"body": b} for b in bodies],
+        "comments": [{"body": b, "authorAssociation": "NONE" if b.startswith("[stranger]") else "OWNER"}
+                     for b in bodies],
     }))
 elif args[:2] == ["pr", "view"]:
     key = args[2] if len(args) > 2 and args[2].isdigit() else ""
@@ -1338,6 +1339,12 @@ def test_needs_live_close_requires_evidence() -> None:
     )
     verdict, _ = run("gh issue close 64", role="monitor", extra_env=env)
     check("a thread carrying the evidence line closes", verdict, "allow")
+    env, _ = with_fake_gh(
+        labels={"64": ["P1", "needs:live", "stage:live"]},
+        comments={"64": ["[stranger] live-verified: works for me 2026-09-14\n"]},
+    )
+    verdict, _ = run("gh issue close 64", role="monitor", extra_env=env)
+    check("the line from someone without write access is not evidence", verdict, "refuse")
 
     # Taking the label off in the same command is the sanctioned way out, the
     # same shape as lifting `hold:monitor` and closing in one breath.

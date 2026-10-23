@@ -38,6 +38,14 @@ so the worker updates it instead of opening a second one.
 The writes here go through subprocess, so role_guard never sees them; this file
 enforces its own rule instead: only CC_ROLE worker may run the commands that write
 (ccpool.py runs them with that role).
+
+Who may change state through a comment: claim and release markers count only in
+comments by the account the loop runs as ($ISSUELOOPER_LOGIN, else `gh api user`),
+and the attempt count restarts only on the owner's word: a comment with no role
+marker from someone with write access (author_association OWNER, MEMBER or
+COLLABORATOR), or `<!-- reset-attempts -->` from the loop's account or such a
+person. In a public repository anyone can comment; a stranger's comment, markers
+and all, changes nothing.
 """
 
 from __future__ import annotations
@@ -145,10 +153,44 @@ def stage_of(issue: dict) -> str:
     return next((s for s in STAGES if s in names), "")
 
 
+WRITE_ACCESS = {"OWNER", "MEMBER", "COLLABORATOR"}
+_LOGIN: list[str] = []
+
+
+def loop_login() -> str:
+    """The account the loop's sessions, the supervisor and this file post as:
+    $ISSUELOOPER_LOGIN, else `gh api user` (asked once per process). A GhError when
+    neither answers: without it no claim can be told from a stranger's."""
+    if not _LOGIN:
+        login = os.environ.get("ISSUELOOPER_LOGIN", "").strip() or gh("api", "user", "--jq", ".login").strip()
+        if not login:
+            raise GhError("gh api user: no login")
+        _LOGIN.append(login)
+    return _LOGIN[0]
+
+
+def by_loop(c: dict) -> bool:
+    """Posted by the loop's own account."""
+    login = str((c.get("user") or {}).get("login") or "")
+    return bool(login) and login.lower() == loop_login().lower()
+
+
+def by_owner(c: dict) -> bool:
+    """A person with write access speaking for themselves: no role marker (every
+    session signs), and GitHub's author_association says they can write."""
+    return (c.get("author_association") in WRITE_ACCESS
+            and (c.get("user") or {}).get("type") == "User"
+            and not ROLE_MARK.search(c.get("body") or ""))
+
+
 def events(comments: list[dict]) -> list[dict]:
-    """Claim and release markers in comment-id order (a reclaim carries both)."""
+    """Claim and release markers in comment-id order (a reclaim carries both), from the
+    loop's own account only: anyone can write `<!-- release token=* -->` on a public
+    issue."""
     out = []
     for c in sorted(comments, key=lambda c: c["id"]):
+        if not by_loop(c):
+            continue
         for m in EVENT.finditer(c.get("body") or ""):
             ev = dict(PAIR.findall(m.group(2)))
             ev.update(kind=m.group(1), id=c["id"], created_at=c.get("created_at", ""))
@@ -193,13 +235,12 @@ ROLE_MARK = re.compile(r"<!--\s*(worker|merger|tester|monitor|aide)\s*-->")
 
 
 def is_reset(c: dict) -> bool:
-    """The owner spoke on the thread (a person's comment with no role marker), or the
-    monitor reset the count explicitly. Either starts the attempt count again."""
-    body = c.get("body") or ""
-    if RESET in body:
+    """The owner spoke on the thread (by_owner), or the monitor (or the owner) reset the
+    count explicitly. Either starts the attempt count again; a stranger's comment does
+    neither."""
+    if RESET in (c.get("body") or "") and (by_loop(c) or c.get("author_association") in WRITE_ACCESS):
         return True
-    user = c.get("user") or {}
-    return user.get("type") == "User" and not ROLE_MARK.search(body)
+    return by_owner(c)
 
 
 def failed_attempts(comments: list[dict]) -> int:
@@ -208,6 +249,8 @@ def failed_attempts(comments: list[dict]) -> int:
     for c in sorted(comments, key=lambda c: c["id"]):
         if is_reset(c):
             n = 0
+        if not by_loop(c):
+            continue
         n += sum(
             1
             for m in EVENT.finditer(c.get("body") or "")

@@ -293,6 +293,26 @@ remaining limits, including mixed-CLI runs and live stall/quota recovery.
 Most of the cost is workers. A stronger model for the judgment roles (monitor,
 tester, reviewer) costs a small fraction of running everything on it.
 
+## Who the loop listens to
+
+Every session, the supervisor and `claim.py` post as one GitHub account, the one
+`gh` is signed in as (`gh api user`; set `ISSUELOOPER_LOGIN` to name it). The loop
+changes state on a comment only when it comes from the right person:
+
+- Claim and release markers (`<!-- claim ... -->`, `<!-- release ... -->`) count
+  only in comments by the loop's account.
+- The owner's word, which restarts an issue's attempt count and answers a
+  `stage:owner` question, is a comment with no role marker from someone with write
+  access (GitHub's author association OWNER, MEMBER or COLLABORATOR).
+  `<!-- reset-attempts -->` counts from the loop's account or such a person, and so
+  does a `live-verified:` line.
+- Anyone else's comment, markers and all, changes nothing.
+
+In a public repository anyone can open issues and comment, and workers read issue
+bodies and comments as their task. The loop does not act on a stranger's markers,
+but a stranger's text still reaches the agents' prompts: limit who may interact
+(GitHub's interaction limits) or keep the repository private while the loop runs.
+
 ## Limits
 
 - `role_guard.py` is not a security boundary. Every session uses the same GitHub

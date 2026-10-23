@@ -46,6 +46,9 @@ with open(state_path + ".lock", "w") as lk:
     fcntl.flock(lk, fcntl.LOCK_EX)
     s = json.load(open(state_path))
     out, write = None, False
+    if args[:2] == ["api", "user"]:
+        print(os.environ.get("FAKE_GH_LOGIN", "loop-bot"))
+        sys.exit(0)
     if args[0] == "api":
         method = "GET"
         if "-X" in args:
@@ -59,7 +62,9 @@ with open(state_path + ".lock", "w") as lk:
             n = re.search(r"/issues/(\d+)/comments$", path).group(1)
             body = json.loads(sys.stdin.read())["body"]
             s["next_id"] += 1
-            c = {"id": s["next_id"], "body": body, "created_at": iso()}
+            c = {"id": s["next_id"], "body": body, "created_at": iso(),
+                 "user": {"login": os.environ.get("FAKE_GH_LOGIN", "loop-bot"), "type": "User"},
+                 "author_association": "OWNER"}
             s["comments"].setdefault(n, []).append(c)
             s["issues"][n]["updated_at"] = iso()
             s["writes"].append(["comment", int(n)])
@@ -187,6 +192,9 @@ class Repo:
         return [c["body"] for c in self.load()["comments"].get(str(n), [])]
 
 
+LOOP_USER = {"login": "loop-bot", "type": "User"}
+
+
 def old_claim(
     cid: int, token: str, minutes: float, loop: str = "9", frm: str = "stage:ready"
 ) -> dict:
@@ -194,6 +202,8 @@ def old_claim(
         "id": cid,
         "created_at": ago(minutes),
         "body": f"<!-- worker -->\n<!-- claim loop={loop} token={token} from={frm} -->\nClaimed",
+        "user": LOOP_USER,
+        "author_association": "OWNER",
     }
 
 
@@ -292,6 +302,50 @@ def test_claim_named_issue() -> None:
         check(f"--issue {n} ({why}) exits 3", res.returncode, 3)
         check(f"--issue {n} ({why}) writes nothing", len(repo.load()["writes"]), before)
         check(f"--issue {n} ({why}) says why", said in res.stderr, True)
+
+
+def test_strangers_change_nothing() -> None:
+    """On a public repository anyone can comment: a stranger's release marker emptied
+    the claims, and a stranger's "hello" reset the attempt count."""
+    sys.path.insert(0, str(HERE))
+    import claim as cl
+    cl._LOGIN[:] = ["loop-bot"]
+    stranger = {"login": "drive-by", "type": "User"}
+
+    def c(cid, body, user=LOOP_USER, assoc="OWNER"):
+        return {"id": cid, "created_at": ago(1), "body": body, "user": user, "author_association": assoc}
+    claim_c = old_claim(1, "tok1", 1)
+    check("a stranger's release token=* does not cancel the claim",
+          [e["token"] for e in cl.active_claims([claim_c, c(2, "<!-- release token=* -->", stranger, "NONE")])],
+          ["tok1"])
+    check("nor does a stranger's own claim count",
+          cl.holds([c(0, "<!-- worker -->\n<!-- claim loop=1 token=evil from=stage:ready -->", stranger, "NONE"),
+                    claim_c], "tok1"), (True, "tok1"))
+    fail = "<!-- worker -->\n<!-- release token=x to=stage:triage fail=1 -->"
+    check("a stranger's failed releases are not attempts",
+          cl.failed_attempts([c(1, fail), c(2, fail, stranger, "NONE"), c(3, fail, stranger, "CONTRIBUTOR")]), 1)
+    check("a stranger's plain comment or reset marker does not reset the count",
+          (cl.is_reset(c(5, "hello", stranger, "NONE")), cl.is_reset(c(5, cl.RESET, stranger, "NONE"))),
+          (False, False))
+    check("the owner's plain comment (write access, no role marker) does",
+          (cl.is_reset(c(5, "Try the simpler layout.", {"login": "kaz", "type": "User"}, "OWNER")),
+           cl.is_reset(c(5, "Go ahead.", {"login": "teammate", "type": "User"}, "COLLABORATOR"))), (True, True))
+    check("the monitor's reset marker from the loop's account does; an agent's signed comment does not",
+          (cl.is_reset(c(5, "<!-- monitor -->\n" + cl.RESET)), cl.is_reset(c(5, "<!-- worker -->\nreleased"))),
+          (True, False))
+    check("a bot with write access is not the owner",
+          cl.is_reset(c(5, "ok", {"login": "ci[bot]", "type": "Bot"}, "MEMBER")), False)
+    cl._LOGIN[:] = []
+    repo = Repo([issue(4, ["stage:triage", "P1"])])
+    res = repo.run("claim", "--loop", "3", "--issue", "4")
+    token = json.loads(res.stdout)["token"]
+    s_ = repo.load()
+    s_["next_id"] += 1
+    s_["comments"]["4"].append({"id": s_["next_id"], "body": "<!-- release token=* -->", "created_at": ago(0),
+                                "user": stranger, "author_association": "NONE"})
+    repo.save(s_)
+    check("end to end: the loop's account comes from `gh api user`, and the claim still holds",
+          repo.run("check", "4", "--token", token).returncode, 0)
 
 
 def test_refusal_says_what_failed() -> None:
@@ -433,7 +487,8 @@ def test_finish_without_pr_releases_then_parks() -> None:
     s = repo.load()
     s["next_id"] += 1
     s["comments"]["8"].append(
-        {"id": s["next_id"], "body": "Try the simpler layout.", "created_at": ago(0), "user": {"type": "User"}}
+        {"id": s["next_id"], "body": "Try the simpler layout.", "created_at": ago(0), "user": LOOP_USER,
+         "author_association": "OWNER"}
     )
     repo.save(s)
     claim5 = repo.run("claim", "--loop", "5", "--claim-file", str(cf))
@@ -442,7 +497,8 @@ def test_finish_without_pr_releases_then_parks() -> None:
     s = repo.load()
     s["next_id"] += 1
     s["comments"]["8"].append(
-        {"id": s["next_id"], "body": "<!-- monitor -->\n<!-- reset-attempts -->\nRe-queued.", "created_at": ago(0)}
+        {"id": s["next_id"], "body": "<!-- monitor -->\n<!-- reset-attempts -->\nRe-queued.", "created_at": ago(0),
+         "user": LOOP_USER, "author_association": "OWNER"}
     )
     s["issues"]["8"]["labels"] = ["P1", "stage:triage"]
     repo.save(s)

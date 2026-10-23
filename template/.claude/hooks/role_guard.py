@@ -951,10 +951,12 @@ def check_issue_close(command: str) -> None:
         data = gh_json(["gh", "issue", "view", number, "--json", "comments"], repo)
         if not isinstance(data, dict):
             continue  # fail open: an unreachable thread is not evidence either way
+        # Only from someone who can write to the repository (the loop's own account
+        # is one): on a public repository anyone can type the line.
         bodies = [
             str(c.get("body") or "")
             for c in (data.get("comments") or [])
-            if isinstance(c, dict)
+            if isinstance(c, dict) and c.get("authorAssociation") in ("OWNER", "MEMBER", "COLLABORATOR")
         ]
         if any(LIVE_EVIDENCE.search(b) for b in bodies):
             continue
