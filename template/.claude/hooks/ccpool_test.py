@@ -338,6 +338,44 @@ def test_merger_loop_goes_back_to_a_worker() -> None:
            log[-1]), (True, True, "issue edit 2 --remove-label stage:pr --add-label stage:triage"))
 
 
+def test_pr_family_starts_afresh() -> None:
+    """A PR handed back after three merger sessions kept its family's failures (four
+    failed rebases, the hand-back, a merge), so the head the worker pushed next was
+    neither rebased nor merged: "still due after 0 session(s) (family)"."""
+    def at(head, mergeable="CONFLICTING", main="c" * 40):
+        return state([iss(7, ["stage:pr", "P0"])], prs=[pr(103, 7, head=head * 40, mergeable=mergeable)], main=main)
+    h = Rig(at("1"), family_max=6)
+    h.finish(h.step(0)[0].key, "left to a merger (a hunk changes existing lines)")
+    h.pool.book.family_starts["mrg:103"] = 6
+    h.pool.book.tries[f"merge:103@{'1' * 12}@{'c' * 12}"] = 1  # an earlier failed merge of this head
+    h.st = at("1", main="d" * 40)
+    check("six failures in the family: nothing starts", h.step(), [])
+    check("and the monitor hears which limit holds it",
+          [e for e in h.pool.events if e.startswith("stuck:")],
+          ["stuck: merger unit land PR #103 is still due, held: 6 failed session(s) of mrg:103 in all "
+           "reached POOL_FAMILY_MAX (6)"])
+    h.st = at("2", main="d" * 40)  # the worker pushed a new head
+    started = h.step()
+    check("a new head starts the family afresh: the rebase runs",
+          ([u.kind for u in started], h.pool.book.family_starts["mrg:103"]), (["rebase"], 1))
+    check("the old head's tries are gone", f"merge:103@{'1' * 12}@{'c' * 12}" in h.pool.book.tries, False)
+    h.finish(started[0].key, "left to a merger (a hunk changes existing lines)")
+    h.pool.book.merger_runs[103] = 3
+    started = h.step()
+    check("the merger loop still ends in a hand-back", [u.kind for u in started], ["handback"])
+    h.finish(started[0].key, "handed back after repeated conflicts")
+    check("the hand-back resets the family and the merger count",
+          (h.pool.book.family_starts["mrg:103"], h.pool.book.merger_runs[103],
+           any(k.startswith(("rebase:103@", "handback:103@")) for k in h.pool.book.tries)), (0, 0, False))
+    h2 = Rig(state([iss(1, ["stage:pr"])], prs=[pr(11, 1)]), key_tries=1)
+    u = h2.step()[0]
+    h2.finish(u.key, "failed (review gate exit 2)")
+    h2.step()
+    check("a key out of tries says so",
+          [e for e in h2.pool.events if e.startswith("stuck:")],
+          ["stuck: auto unit merge PR #11 is still due, held: 1 session(s) on this state reached POOL_KEY_TRIES (1)"])
+
+
 def test_no_merger_while_its_worker_runs() -> None:
     h = Rig(state([iss(1, ["stage:triage"])]))
     h.step()

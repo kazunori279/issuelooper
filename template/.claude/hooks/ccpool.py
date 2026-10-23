@@ -74,7 +74,8 @@ PR's head and main). A key never runs twice at once, never again after a clean
 exit, and at most POOL_KEY_TRIES times after failures; a role+number family runs
 one unit at a time and fails at most POOL_FAMILY_MAX times per supervisor lifetime
 (sessions that end ok do not count; workers, bounded by claim.py's failed attempts,
-and UX runs, one family per sha, are exempt).
+and UX runs, one family per sha, are exempt). A pull request's family starts afresh
+when its head changes and when it is handed back.
 
 SESSIONS
 
@@ -576,6 +577,7 @@ class Book:
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
+        self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         self.paused: dict[str, float] = {}  # role -> until (crash breaker)
         self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
         self.quota_streak = 0  # pauses in a row without a session ending ok
@@ -591,6 +593,16 @@ class Book:
 
     def role_counts(self) -> collections.Counter:
         return collections.Counter(u.role for u in self.running.values())
+
+    def reset_pr(self, n: int) -> None:
+        """Start PR n's family afresh: its failed starts and its keys' tries. A PR handed
+        back after three merger sessions kept the failures of its rebases, merges and
+        hand-back, so the head the worker then pushed was neither rebased nor merged
+        ("family") until the monitor closed the PR. merger_runs is left alone here: each
+        merger pushes a new head, and the merger loop is counted across those heads."""
+        self.family_starts.pop(f"mrg:{n}", None)
+        for k in [k for k in self.tries if re.match(rf"(?:merge|rebase|mrg|handback):{n}@", k)]:
+            del self.tries[k]
 
     def why_not(self, u: Unit, cfg: Config) -> str:
         if u.family in self.running:
@@ -687,6 +699,9 @@ def plan(
     seen_prs = set()
     for pr in sorted(st["prs"], key=lambda p: p["number"]):
         seen_prs.add(pr["number"])
+        if book.pr_heads.get(pr["number"], pr["head"]) != pr["head"]:
+            book.reset_pr(pr["number"])  # someone pushed: new work, not the old failures
+        book.pr_heads[pr["number"]] = pr["head"]
         n = pr_issue(pr)
         issue = open_by.get(n) if n is not None else None
         if pr["draft"] or issue is None:
@@ -767,6 +782,8 @@ def plan(
             )
     for k in set(book.unknown_since) - seen_prs:
         del book.unknown_since[k]
+    for k in set(book.pr_heads) - seen_prs:
+        del book.pr_heads[k]
 
     # Never beside a running UX run: a slow run outlasts the gap, and the overlapping
     # runs test the same app and file the same findings.
@@ -2322,6 +2339,8 @@ class Pool:
                 self.hurry_pr, self.hurry_until = u.number, now + 60
             if (u.kind == "merge" and outcome == "ok") or (u.kind == "handback" and outcome.startswith("handed back")):
                 b.merger_runs.pop(u.number, None)
+            if u.kind == "handback" and outcome.startswith("handed back"):
+                b.reset_pr(u.number)
             if outcome.startswith("startup crash"):
                 self.crashes[u.role] += 1
                 if self.crashes[u.role] >= self.cfg.crash_max:
@@ -2641,10 +2660,17 @@ class Pool:
         for u in stuck:
             if u.key not in self.flagged:
                 self.flagged.add(u.key)
-                self.event(
-                    f"stuck: {u.role} unit {u.kind} {self.label(u)} is still due after "
-                    f"{self.book.tries[u.key]} session(s) ({self.book.why_not(u, self.cfg)})"
-                )
+                why = self.book.why_not(u, self.cfg)
+                # Name the limit that holds it: "after 0 session(s) (family)" sent the
+                # monitor looking at a unit that had never run.
+                held = {
+                    "tries": f"{self.book.tries[u.key]} session(s) on this state reached POOL_KEY_TRIES "
+                             f"({self.cfg.key_tries})",
+                    "family": f"{self.book.family_starts[u.family]} failed session(s) of {u.family} in all "
+                              f"reached POOL_FAMILY_MAX ({self.cfg.family_max})",
+                    "done": "a session on this same state already ended cleanly",
+                }.get(why, why)
+                self.event(f"stuck: {u.role} unit {u.kind} {self.label(u)} is still due, held: {held}")
         idle = not self.book.running and not started and not self.deploying
         if idle and not self.idle_flagged:
             self.idle_flagged = True
