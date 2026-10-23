@@ -25,7 +25,8 @@ port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried;
 
 [sweep]
 command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
-slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time
+slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time (the main check below runs
+                             # in a lane of its own, beside these)
 fast_command = "uv sync --frozen -q && uv run pytest -q -x -p no:cacheprovider tests/unit"
                              # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit
                              # tests pass) run before a merge on a pull request that is behind main, merged with

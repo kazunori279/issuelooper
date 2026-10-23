@@ -647,6 +647,27 @@ def test_sweep_slots_run_side_by_side() -> None:
           ["lock", "lock.1", "lock.2"])
 
 
+def test_a_sweep_lane_is_not_a_slot() -> None:
+    """The main check held one of the sessions' four slots for over half the run."""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
+    wt = make_worktree(tmp)
+    lock = tmp / "lock"
+    env = sweep_env(tmp, lock, slots=1)
+    procs = [subprocess.Popen([sys.executable, str(SWEEP), *extra], cwd=wt, env=env, stdout=subprocess.PIPE,
+                              text=True) for extra in ([], ["--lane", "main"])]
+    rcs = [(p.communicate(timeout=60), p.returncode)[1] for p in procs]
+    starts, ends = spans_of(tmp)
+    check("a lane sweep runs beside the one slot in use", (rcs, starts[-1] < ends[0]), ([0, 0], True))
+    check("in its own lock file", sorted(x.name for x in tmp.glob("lock*")), ["lock", "lock.lane-main"])
+    (tmp / "spans").unlink()
+    results = run_sweeps(tmp, wt, env, 0)
+    procs = [subprocess.Popen([sys.executable, str(SWEEP), "--lane", "main"], cwd=wt, env=env,
+                              stdout=subprocess.PIPE, text=True) for _ in range(2)]
+    [p.communicate(timeout=60) for p in procs]
+    starts, ends = spans_of(tmp)
+    check("one at a time within the lane", (results, starts[-1] >= ends[0]), ([], True))
+
+
 def test_sweep_refuses_the_shared_checkout() -> None:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)

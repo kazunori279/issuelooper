@@ -125,8 +125,8 @@ first moved past the last deploy. Empty: no deploys.
 MAIN CHECK
 
 With POOL_MAIN_CHECK (on by default when SWEEP_COMMAND is set), each time origin/main
-moves the supervisor runs the full check suite on it in a worktree (sweep_locked.py,
-so it takes a sweep slot like any sweep), in the background, one run at a time: a
+moves the supervisor runs the full check suite on it in a worktree (sweep_locked.py
+--lane main: its own lock, not one of the SWEEP_SLOTS), in the background, one run at a time: a
 main that moved during a run is not checked, only the newest. A red main tells the
 monitor and files an issue `main is red: <first failing tests>` (type:bug, P0,
 stage:triage) with the failing tests, the commits since the last green main and the
@@ -2679,7 +2679,10 @@ class Pool:
                 time.sleep(2 + 2 * attempt)
             if git("worktree", "add", "-q", "--detach", wt, sha).returncode != 0:
                 return None, f"could not add a worktree at {sha[:12]}"
-            r = subprocess.run([sys.executable, str(HERE / "sweep_locked.py")], cwd=wt, env=dict(os.environ),
+            # In its own lane: it ran after every merge, and in a sweep slot it held one of
+            # the sessions' slots for over half the run.
+            r = subprocess.run([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"], cwd=wt,
+                               env=dict(os.environ),
                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3600)
             out = r.stdout + r.stderr
             if r.returncode == 0 and "green" in r.stdout:

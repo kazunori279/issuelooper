@@ -3,12 +3,18 @@
 
     python3 .claude/hooks/sweep_locked.py                  # from the worktree root
     python3 .claude/hooks/sweep_locked.py --update-pr 41   # ... then fix PR #41's body
+    python3 .claude/hooks/sweep_locked.py --lane main      # its own lock, not a slot
 
 One implementation of the sweep lock, shared by every worker, the merger's
 rebases and the supervisor's re-sweeps: `flock` on an open file that is never
 unlinked, and a deadline ($SWEEP_LOCK_DEADLINE_S, 30 minutes) after which the
 sweep is NOT run. The kernel drops the lock when this process exits, however it
 exits.
+
+With --lane NAME it takes the lock LOCK.lane-NAME instead of a slot: one sweep at a
+time in that lane, beside the SWEEP_SLOTS others. The supervisor's check of every new
+main runs in the lane `main`: in a slot it held one of four for over half the run,
+and session sweeps waited up to a quarter of an hour.
 
 It prints how long it waited for the slot and how long the sweep took, then
 sweep_run.py's own output: the `git:` provenance line, the `green:` line, and
@@ -81,6 +87,7 @@ def update_pr(pr: str, sha: str, green: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--update-pr", metavar="N", help="after a green, recorded sweep, fix PR #N's body")
+    ap.add_argument("--lane", metavar="NAME", help="take the lock LOCK.lane-NAME instead of a sweep slot")
     args = ap.parse_args()
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     root = top.stdout.strip() if top.returncode == 0 else os.getcwd()
@@ -97,7 +104,7 @@ def main() -> int:
     start = time.time()
     deadline = start + DEADLINE_S
     fd = None
-    names = [f"{LOCK}.{k}" for k in range(1, SLOTS)] + [LOCK]
+    names = [f"{LOCK}.lane-{args.lane}"] if args.lane else [f"{LOCK}.{k}" for k in range(1, SLOTS)] + [LOCK]
     while fd is None:
         for name in names:
             cand = os.open(name, os.O_CREAT | os.O_RDWR, 0o644)
