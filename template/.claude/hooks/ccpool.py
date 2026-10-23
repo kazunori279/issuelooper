@@ -6,7 +6,8 @@
     ccpool.py probe ROLE [--prompt TEXT]
                                   one session with ROLE's environment
 
-One process reads GitHub every POOL_POLL_S seconds (one GraphQL request) and turns
+One process reads GitHub every POOL_POLL_S seconds (one GraphQL request per 100 open
+issues or 60 open pull requests; a failed page fails the whole read) and turns
 the state into units of work. A unit starts the moment it appears; when it ends,
 the state is read again at once and the next unit starts. Settings come from the
 environment, with .issuelooper/config.toml filling what is not exported.
@@ -180,23 +181,28 @@ IGNORED = claimlib.IGNORED  # ux:proposed: a proposal waiting for the owner
 LINK = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|refs?)\s+#(\d+)\b")
 BRANCH = re.compile(r"^issue-(\d+)\b")
 
+# Open issues and open pull requests are read page by page ($ia, $pa: the cursors);
+# the recently closed issues and main come with the first page only.
 QUERY = """
-query($owner: String!, $name: String!) {
+query($owner: String!, $name: String!, $ia: String, $pa: String, $first: Boolean!) {
   repository(owner: $owner, name: $name) {
-    open: issues(states: OPEN, first: 100) {
+    open: issues(states: OPEN, first: 100, after: $ia) {
+      pageInfo { hasNextPage endCursor }
       nodes { number title body updatedAt labels(first: 30) { nodes { name } } comments { totalCount }
               issueDependenciesSummary { blockedBy } }
     }
-    closed: issues(states: CLOSED, first: 60, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    closed: issues(states: CLOSED, first: 60, orderBy: {field: UPDATED_AT, direction: DESC}) @include(if: $first) {
       nodes { number title closedAt stateReason labels(first: 30) { nodes { name } } }
     }
-    pullRequests(states: OPEN, first: 60) {
+    pullRequests(states: OPEN, first: 60, after: $pa) {
+      pageInfo { hasNextPage endCursor }
       nodes { number headRefName headRefOid body isDraft mergeable }
     }
-    main: ref(qualifiedName: "refs/heads/main") { target { oid } }
+    main: ref(qualifiedName: "refs/heads/main") @include(if: $first) { target { oid } }
   }
 }
 """
+MAX_PAGES = 50  # 5000 open issues; more is an error, not a quietly partial queue
 
 
 def env_int(name: str, default: int) -> int:
@@ -479,25 +485,35 @@ def fetch(cfg: Config) -> dict:
         or claimlib.gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
     )
     owner, name = repo.split("/", 1)
-    out = subprocess.run(
-        [
-            cfg.gh,
-            "api",
-            "graphql",
-            "-f",
-            f"query={QUERY}",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={name}",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(f"graphql: {out.stderr.strip()[-300:]}")
-    return normalize(json.loads(out.stdout))
+    # Every page, or none: a queue planned from the first 100 issues missed work, merges
+    # and blockers, and a failed page raises, so the poll counts as failed.
+    first, cursors, merged = True, {"open": None, "pullRequests": None}, None
+    for _ in range(MAX_PAGES):
+        args = [cfg.gh, "api", "graphql", "-f", f"query={QUERY}", "-F", f"owner={owner}", "-F", f"name={name}",
+                "-F", f"first={'true' if first else 'false'}"]
+        for var, key in (("ia", "open"), ("pa", "pullRequests")):
+            args += ["-f", f"{var}={cursors[key]}"] if cursors[key] else ["-F", f"{var}=null"]
+        out = subprocess.run(args, capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            raise RuntimeError(f"graphql: {out.stderr.strip()[-300:]}")
+        page = json.loads(out.stdout)
+        repo_data = page["data"]["repository"]
+        if merged is None:
+            merged = page
+        more = False
+        for key in ("open", "pullRequests"):
+            conn = repo_data[key]
+            if merged is not page:
+                merged["data"]["repository"][key]["nodes"] += conn["nodes"]
+            info = conn.get("pageInfo") or {}
+            # A finished connection is asked again after its last cursor, which reads as
+            # empty; asked from the start it would come back twice.
+            cursors[key] = info.get("endCursor") or cursors[key]
+            more = more or bool(info.get("hasNextPage"))
+        if not more:
+            return normalize(merged)
+        first = False
+    raise RuntimeError(f"graphql: more than {MAX_PAGES} pages of open issues or pull requests")
 
 
 def signature(st: dict) -> str:

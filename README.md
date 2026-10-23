@@ -25,7 +25,7 @@ runtime, per role.
    └──────────────────────────────────────────────────────────┘
                      │ stage:triage
                      ▼
- supervisor (ccpool.py, polls GitHub every 15 s, one GraphQL call)
+ supervisor (ccpool.py, polls GitHub every 15 s, GraphQL, every page)
    ├─ worker   one per claimable issue: failing test → fix → sweep → PR
    ├─ merge    no agent: review gate + merge gates → squash-merge → deploy
    ├─ merger   one per conflicting PR the supervisor could not rebase

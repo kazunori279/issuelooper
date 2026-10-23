@@ -588,6 +588,84 @@ def test_owner_questions_wait_for_the_owner() -> None:
     check("and so is every queue update", "never the answer" in ccpool.FEED_HEADER, True)
 
 
+FAKE_GH_PAGES = r"""#!/usr/bin/env python3
+import json, os, sys
+args = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a and not a.startswith("query="))
+with open(os.environ["FAKE_PAGES_LOG"], "a") as f:
+    f.write(json.dumps({k: args.get(k) for k in ("ia", "pa", "first")}) + "\n")
+first = args.get("first") == "true"
+if not first and os.environ.get("FAKE_PAGES_FAIL"):
+    print("HTTP 502", file=sys.stderr); sys.exit(1)
+def page(items, after, size):
+    start = int(after) if after not in (None, "null") else 0
+    chunk = items[start:start + size]
+    end = start + len(chunk)
+    return {"pageInfo": {"hasNextPage": end < len(items), "endCursor": str(end) if chunk else after},
+            "nodes": chunk}
+lab = lambda names: {"nodes": [{"name": n} for n in names]}
+issues = []
+for n in range(1, 151):
+    body = {150: "Blocked by: #3", 2: "Blocked by: #149"}.get(n, "")
+    labels = ["stage:pr"] if n == 140 else ["stage:triage", "P1"]
+    issues.append({"number": n, "title": f"issue {n}", "body": body, "updatedAt": "2026-10-09T10:00:00Z",
+                   "labels": lab(labels), "comments": {"totalCount": 0}})
+prs = [{"number": 1000 + k, "headRefName": f"issue-{200 + k}", "headRefOid": "b" * 40, "body": "",
+        "isDraft": False, "mergeable": "MERGEABLE"} for k in range(69)]
+prs.append({"number": 1140, "headRefName": "issue-140", "headRefOid": "c" * 40, "body": "Fixes #140",
+            "isDraft": False, "mergeable": "MERGEABLE"})
+repo = {"open": page(issues, args.get("ia"), 100), "pullRequests": page(prs, args.get("pa"), 60)}
+if first:
+    repo["closed"] = {"nodes": []}
+    repo["main"] = {"target": {"oid": "a" * 40}}
+print(json.dumps({"data": {"repository": repo}}))
+"""
+
+
+def test_fetch_reads_every_page() -> None:
+    """Open issues past the first 100 and open PRs past the first 60 were never read."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-pages-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_PAGES)
+    gh.chmod(0o755)
+    os.environ["FAKE_PAGES_LOG"] = str(d / "calls")
+    try:
+        cfg = ccpool.Config(logdir=d / "pool", gh=str(gh), repo="o/r", caps={r: 0 for r in ccpool.ROLES})
+        st = ccpool.fetch(cfg)
+        calls = [json.loads(x) for x in (d / "calls").read_text().splitlines()]
+        check("150 open issues and 70 open PRs, each once",
+              (len(st["open"]), len({i["number"] for i in st["open"]}), len(st["prs"]),
+               len({p["number"] for p in st["prs"]})), (150, 150, 70, 70))
+        check("two pages; the second asks after each cursor; closed and main come with the first",
+              calls, [{"ia": "null", "pa": "null", "first": "true"}, {"ia": "100", "pa": "60", "first": "false"}])
+        check("main from the first page", st["main"], "a" * 40)
+        check("the queue counts every open issue", ccpool.queue_snapshot(st)["open"], 150)
+        due, _ = ccpool.plan(st, ccpool.Book(), cfg, NOW)
+        workers = {u.number for u in due if u.role == "worker"}
+        check("a Blocked by: across pages holds both ways (#150 by #3, #2 by #149)",
+              (150 in workers, 2 in workers, 149 in workers, 3 in workers), (False, False, True, True))
+        check("a PR on the second page, for an issue on the second page, is merged",
+              [u.number for u in due if u.kind == "merge"], [1140])
+        os.environ["FAKE_PAGES_FAIL"] = "1"
+        try:
+            ccpool.fetch(cfg)
+            failed = False
+        except RuntimeError:
+            failed = True
+        check("a page that fails fails the whole read: nothing is planned from a partial queue", failed, True)
+        h = Rig(state(), gh=str(gh), repo="o/r")
+        h.pool.fetcher = lambda: ccpool.fetch(h.pool.cfg)
+        try:
+            h.step()
+            stepped = True
+        except RuntimeError:
+            stepped = False
+        check("and the poll fails before planning (run() logs it as poll_error)",
+              (stepped, (h.pool.cfg.logdir / "state.json").exists()), (False, False))
+    finally:
+        os.environ.pop("FAKE_PAGES_LOG", None)
+        os.environ.pop("FAKE_PAGES_FAIL", None)
+
+
 def test_signature_moves_with_the_queue() -> None:
     a = state([iss(1, ["stage:triage"])])
     b = state([iss(1, ["stage:doing"])])
