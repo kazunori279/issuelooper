@@ -245,7 +245,8 @@ refreshes every 15 seconds and shows, from the top:
 
 - **Health**: the supervisor, when it last read GitHub, the monitor's state, any
   quota pause, `main`, its last full check (green or red) and the deployed commit.
-- **Needs you**: a red `main`, decisions waiting at `stage:owner`, stuck work, an issue whose
+- **Needs you**: a red `main`, a file the live checks need missing from the shared
+  checkout (`.env`), decisions waiting at `stage:owner`, stuck work, an issue whose
   sessions failed twice in a row, a failed deploy, a monitor at a prompt or gone,
   GitHub read errors, updates piling up for the monitor. Each line says what to do.
 - **Agents**: every running session with its issue or PR, time against its

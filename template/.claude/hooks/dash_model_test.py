@@ -186,6 +186,7 @@ def fixture() -> pathlib.Path:
         "feed_pending": 2,
         "feed_pending_since": NOW - 1200,
         "main_check": {"sha": "b" * 40, "ok": False, "t": NOW - 30, "failing": ["tests/e2e/test_a.py::test_x"]},
+        "missing_files": [".env"],
         "ux_scores": [{"t": NOW - 900, "sha": "a", "score": 38}, {"t": NOW - 600, "sha": "b", "score": None},
                       {"t": NOW - 300, "sha": "c", "score": 58}, {"t": NOW - 100, "sha": "d", "score": 78}],
     }
@@ -279,8 +280,9 @@ def test_model() -> None:
             any("could not read GitHub" in w for w in whats),
             any("2 update(s) have waited" in w for w in whats),
             any("main is red at bbbbbbbb: tests/e2e/test_a.py::test_x" in w for w in whats),
+            any("The shared checkout is missing .env" in w for w in whats),
         ],
-        [True] * 8,
+        [True] * 9,
     )
     check(
         "red before yellow",

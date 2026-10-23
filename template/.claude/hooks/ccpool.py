@@ -271,6 +271,7 @@ class Config:
     deploy_cmd: str = ""
     deploy_timeout_s: float = 420
     live: bool = False
+    required_files: list = dataclasses.field(default_factory=list)  # in the shared checkout; see check_files
     ux: bool = False
     broker_sock: str = ""
     herdr_monitor: str = ""
@@ -357,6 +358,8 @@ class Config:
             deploy_cmd=e("POOL_DEPLOY_CMD", "").strip(),
             deploy_timeout_s=float(e("POOL_DEPLOY_TIMEOUT_S", "") or 420),
             live=env_flag("POOL_LIVE"),
+            required_files=[f.strip() for f in (e("POOL_REQUIRED_FILES", "") or (".env" if env_flag("POOL_LIVE") else ""))
+                            .split(",") if f.strip()],
             ux=env_flag("POOL_UX"),
             spec=env_flag("POOL_SPEC"),
             broker_sock=e("POOL_BROKER_SOCK", ""),
@@ -616,6 +619,7 @@ class Book:
         self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
         self.quota_streak = 0  # pauses in a row without a session ending ok
         self.live_entry: dict[int, str] = {}  # issue -> updatedAt when it entered stage:live
+        self.missing: list[str] = []  # required files gone from the shared checkout (Pool.check_files)
         self.last_ux_t = 0.0  # when the last UX run started
         self.last_spec_t = 0.0  # when the last spec check started
         self.extra_runs = 0  # idle UX runs and spec checks started (part of their keys)
@@ -716,7 +720,9 @@ def plan(
             units.append(
                 Unit("auto", "requeue", f"requeue:{n}@{i['updated']}", f"rcl:{n}", n, (1, n), {})
             )
-        elif "stage:live" in labels and cfg.live:
+        elif "stage:live" in labels and cfg.live and not book.missing:
+            # (While a file the live environment needs is missing, a tester could only
+            # report that it cannot run the check; the monitor hears it once instead.)
             # Keyed on this entry into stage:live (Pool.track_live), so a hand-back,
             # a reopen or a later merge for it gets a new check. Until a check of
             # this entry ends cleanly the key carries main too: one that never
@@ -2911,6 +2917,25 @@ class Pool:
                 self.events = lines + self.events
             self.log("feed_error", error=str(exc))
 
+    def check_files(self) -> None:
+        """Tell the monitor when a file the loop relies on goes missing from the shared
+        checkout, and when it is back: POOL_REQUIRED_FILES, by default .env when live
+        checks are on. In the sixth run .env disappeared; the live deploy stayed on an old
+        commit for 4.5 hours and nobody was told."""
+        root = repo_root()
+        missing = [f for f in self.cfg.required_files if not (root / f).exists()]
+        gone = [f for f in missing if f not in self.book.missing]
+        back = [f for f in self.book.missing if f not in missing]
+        self.book.missing = missing
+        if gone:
+            self.log("files_missing", files=gone)
+            self.event(f"the shared checkout is missing {', '.join(gone)} (only the owner has it): live checks are "
+                       "held and the live deploy cannot start; ask the owner to restore it, and do not close "
+                       "needs:live issues meanwhile")
+        if back:
+            self.log("files_back", files=back)
+            self.event(f"{', '.join(back)} is back in the shared checkout: live checks start again")
+
     def track_live(self, st: dict):
         """Remember each stage:live issue's updatedAt from when it entered stage:live;
         the live unit's key carries it. Leaving stage:live (a hand-back, a reopen, a new
@@ -2936,6 +2961,7 @@ class Pool:
         good, _ = self.deployments()
         with self.lock:
             self.track_live(st)
+            self.check_files()
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)
         started = [u for u in started if self.start(u)]  # none once stopping
@@ -2972,6 +2998,7 @@ class Pool:
             "feed_pending": len(self.events),
             "feed_pending_since": self.pending_since,
             "main_check": self.main_check_last,
+            "missing_files": self.book.missing,
             "ux_scores": self.ux_scores[-10:],
         }
         q = state["queue"]

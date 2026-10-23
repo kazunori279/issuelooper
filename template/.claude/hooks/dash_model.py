@@ -529,6 +529,12 @@ def attention(m: dict, state: dict, log: list[dict], now: float) -> list[dict]:
             f"Stuck: {key} keeps failing and will not be retried.",
             "Read its session.log; re-scope the issue",
         )
+    for f in state.get("missing_files") or []:
+        add(
+            "red",
+            f"The shared checkout is missing {f}: live checks are held and the live deploy cannot start.",
+            f"Restore {f} in the shared checkout",
+        )
     mc = h["main_check"]
     if mc.get("ok") is False:
         add(

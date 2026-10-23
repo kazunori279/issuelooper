@@ -39,6 +39,9 @@ command = ""                 # POOL_DEPLOY_CMD: run from the shared checkout aft
 
 [live]
 enabled = false              # POOL_LIVE: needs:live issues get a tester's live check after their merge
+# required_files = [".env"]  # POOL_REQUIRED_FILES: files the live environment needs in the shared checkout (default
+                             # .env when live checks are on); while one is missing, the monitor and the dashboard
+                             # say so and no live check starts
 
 [ux]
 enabled = false              # POOL_UX: a tester walks the deployed app as a user and files findings

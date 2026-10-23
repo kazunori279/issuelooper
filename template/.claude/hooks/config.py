@@ -55,6 +55,7 @@ KEYS = {
     ("deploy", "command"): "POOL_DEPLOY_CMD",
     ("deploy", "timeout_s"): "POOL_DEPLOY_TIMEOUT_S",
     ("live", "enabled"): "POOL_LIVE",
+    ("live", "required_files"): "POOL_REQUIRED_FILES",
     ("ux", "enabled"): "POOL_UX",
     ("ux", "gap_minutes"): "POOL_UX_GAP_MIN",
     ("ux", "idle_gap_minutes"): "POOL_UX_IDLE_GAP_MIN",

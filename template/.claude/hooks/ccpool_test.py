@@ -519,6 +519,44 @@ def test_reclaim_and_live() -> None:
     )
 
 
+def test_a_missing_env_file_is_noticed() -> None:
+    """The shared checkout's .env disappeared; the live deploy and live checks stopped for
+    hours and nobody was told."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-shared-"))
+    old = os.environ.get("SHARED_REPO_PATH")
+    os.environ["SHARED_REPO_PATH"] = str(root)
+    try:
+        h = Rig(state([iss(4, ["stage:live"])]), live=True, required_files=[".env"])
+        started = h.step()
+        check("no .env: the monitor hears it, and no live check starts",
+              ([u.kind for u in started], [e for e in h.pool.events if "missing .env" in e] != []), ([], True))
+        check("state.json carries it for the dashboard",
+              json.loads((h.pool.cfg.logdir / "state.json").read_text())["missing_files"], [".env"])
+        h.step()
+        check("said once", sum("missing .env" in e for e in h.pool.events), 1)
+        (root / ".env").write_text("KEY=1\n")
+        started = h.step()
+        check("back: the monitor hears it, and the live check starts",
+              ([u.kind for u in started], any(".env is back" in e for e in h.pool.events)), (["live"], True))
+    finally:
+        if old is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old
+    keep = {k: os.environ.pop(k, None) for k in ("POOL_LIVE", "POOL_REQUIRED_FILES")}
+    try:
+        check("live checks off: nothing required", ccpool.Config.from_env().required_files, [])
+        os.environ["POOL_LIVE"] = "1"
+        check("live checks on: .env", ccpool.Config.from_env().required_files, [".env"])
+        os.environ["POOL_REQUIRED_FILES"] = ".env, secrets/key.json"
+        check("POOL_REQUIRED_FILES names them", ccpool.Config.from_env().required_files, [".env", "secrets/key.json"])
+    finally:
+        for k, v in keep.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
 def test_live_off() -> None:
     st = state(
         [iss(4, ["stage:live"]), iss(6, ["stage:pr", "needs:live"])],
