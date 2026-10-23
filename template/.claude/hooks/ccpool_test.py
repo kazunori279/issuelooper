@@ -952,6 +952,21 @@ def test_deploy_safety_net() -> None:
     )
 
 
+def test_deploy_waits_for_mergers_at_most_the_grace() -> None:
+    """Each merger deferred the deploy again as main kept moving: 24 minutes without one."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-gracedeploy-"))
+    h = Rig(state(main="1" * 40), deploy_grace_s=300, deploy_cmd=f'echo "$DEPLOY_SHA" >> {d}/calls')
+    h.pool.book.running["mrg:5"] = ccpool.Unit("merger", "land", "mrg:5@x", "mrg:5", 5, (0, 5), {})
+    deployed_at = None
+    for k in range(1, 9):  # main moves every 60 s; a merger runs all along
+        h.st = state(main=str(k) * 40)
+        h.step(60)
+        if h.pool.deploy_tried and deployed_at is None:
+            deployed_at = k
+    check("deployed within the grace of the first undeployed main, mergers or not",
+          (deployed_at, sorted(h.pool.deploy_tried)), (6, ["6" * 40]))
+
+
 def test_deploy_retries_a_ref_lock() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-lockdeploy-"))
     # Fails once with git's ref-lock error, then deploys.

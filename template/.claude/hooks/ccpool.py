@@ -118,8 +118,9 @@ With POOL_DEPLOY_CMD set, the supervisor deploys origin/main whenever it moved a
 that sha was not deployed or tried yet: it runs the command with `bash -c` in the
 shared checkout, with DEPLOY_SHA=<sha>, for at most POOL_DEPLOY_TIMEOUT_S. A run
 that fails on git's "cannot lock ref" (another unit fetching into the same .git) is
-tried again after 5 s and 10 s. While a merger session is running it waits up to
-POOL_DEPLOY_GRACE_S, so one deploy carries both merges. Empty: no deploys.
+tried again after 5 s and 10 s. While a merger session is running it waits, so one
+deploy carries both merges, but never longer than POOL_DEPLOY_GRACE_S after main
+first moved past the last deploy. Empty: no deploys.
 
 MAIN CHECK
 
@@ -2287,7 +2288,7 @@ class Pool:
         self.red_failing: tuple = ()  # the failing tests last reported on it
         self.own_deployed = ""
         self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
-        self.main_seen: dict[str, float] = {}
+        self.undeployed_since = 0.0  # when main first moved past the last deploy started
         self.stopping = False
         self.halt = threading.Event()  # set with stopping, for sessions that wait
         self.clock = time.time
@@ -2585,10 +2586,13 @@ class Pool:
         good, tried = self.deployments()
         if main == good or main in tried:
             return
-        first = self.main_seen.setdefault(main, now)
+        # The grace counts from the first undeployed main, not from each new one: while
+        # mergers kept running and main kept moving, the deploy waited 24 minutes.
+        self.undeployed_since = self.undeployed_since or now
         mergers = self.book.role_counts()["merger"]
-        if mergers and now - first < self.cfg.deploy_grace_s:
+        if mergers and now - self.undeployed_since < self.cfg.deploy_grace_s:
             return
+        self.undeployed_since = 0.0
         self.deploying = True
         self.deploy_tried.add(main)
         threading.Thread(target=self.deploy, args=(main,), daemon=True).start()
