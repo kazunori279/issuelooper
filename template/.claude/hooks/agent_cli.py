@@ -61,6 +61,9 @@ class Cli:
     quota: re.Pattern = re.compile(r"(?!x)x")
     # Text on stderr that means the CLI's own time limit ended the run ('' = it has none).
     timeout_text = ""
+    # A last stderr line that means the agent's turn is over while the CLI waits for a
+    # background task it started (None = the CLI does not do that).
+    idle_wait: re.Pattern | None = None
 
     def first_turn(self, prompt: str, timeout_s: float) -> list[str]:
         raise NotImplementedError
@@ -150,6 +153,10 @@ class Agy(Cli):
         r"RESOURCE_EXHAUSTED|TPM quota exhausted|No spare capacity|\bcode 429\b"
     )
     timeout_text = "print timeout"
+    # When the model ends its turn while a command it ran is still going (a server, a
+    # sweep moved to the background), agy prints this and waits for the task, up to its
+    # print timeout; the model does not act again in that run.
+    idle_wait = re.compile(r"root agent idle; waiting up to .* for \d+ background task")
 
     def first_turn(self, prompt, timeout_s):
         return [

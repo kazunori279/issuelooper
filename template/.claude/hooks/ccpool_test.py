@@ -2477,6 +2477,54 @@ def stall_session(name, cli="agy"):
     return rc, timed_out, calls
 
 
+FAKE_AGY_IDLE = r"""#!/usr/bin/env python3
+import json, sys, time
+args = sys.argv[1:]
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(args) + "\n")
+if "--conversation" in args and not sys.argv[0].endswith("always"):
+    print(json.dumps({"event": "result", "result": {"response": "ran it in the foreground; done"}}), flush=True)
+    sys.exit(0)
+print(json.dumps({"event": "init", "conversation_id": "conv-9"}), flush=True)
+# A tool still running (no DONE), the turn over, and agy waiting for the background task.
+print(json.dumps({"event": "step_update", "step_update": {"step_index": 4, "state": "ACTIVE",
+      "step_type": "tool", "tool_name": "run_command"}}), flush=True)
+print("root agent idle; waiting up to 1h40m0s for 1 background task(s)", file=sys.stderr, flush=True)
+time.sleep(120)
+"""
+
+
+def test_idle_on_a_background_task_is_resumed() -> None:
+    """agy sessions sat until their 45-minute timeout with the turn over, waiting for a
+    background task (8 in one run); the tool still read as running, so no stall fired."""
+    for name, want_calls, nudged in (("agy-idle", 2, True), ("agy-idle-always", 3, True)):
+        d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-idle-"))
+        agy = d / name
+        agy.write_text(FAKE_AGY_IDLE)
+        agy.chmod(0o755)
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"worker": "60m"},
+                                         stall_s=0, background_idle_s=1), fetcher=state, spawn=False)
+        w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
+        w.dir.mkdir(parents=True)
+        t0 = time.time()
+        rc, _, timed_out = w.session("do issue 5", dict(os.environ, CCROLE_WORKER_CLI="agy"))
+        calls = [json.loads(x) for x in (d / f"{name}.calls").read_text().splitlines()]
+        if name == "agy-idle":
+            check("idle on a background task: resumed in the same conversation with a nudge, and finished",
+                  (rc, timed_out, len(calls), calls[1][-2:], "in the foreground" in calls[1][calls[1].index("--print") + 1]),
+                  (0, False, want_calls, ["--conversation", "conv-9"], nudged))
+        else:
+            check("still idle after two nudges: ended early, not at the timeout",
+                  (rc, len(calls), time.time() - t0 < 90,
+                   "ended: turn over, waiting on a background task" in (w.dir / "resumes.log").read_text()),
+                  (0, want_calls, True, True))
+    claude = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:6@x", "wrk:6", 6, (4,), {}), 2)
+    claude.cli = ccpool.agent_cli.get("claude")
+    claude.dir.mkdir(parents=True)
+    (claude.dir / "session.err").write_text("root agent idle; waiting up to 1h for 1 background task(s)\n")
+    check("a CLI without that state is never taken for it", claude.background_idle(0), None)
+
+
 def test_silent_model_is_resumed() -> None:
     rc, timed_out, calls = stall_session("agy-silent")
     check("silent after a finished step: resumed in the same conversation", (rc, timed_out, len(calls)), (0, False, 2))

@@ -85,7 +85,9 @@ CCROLE_<ROLE>_CLI > CCROLE_CLI > agy), started through ccrole.sh. A worker still
 going at POOL_WORKER_WRAP_S is resumed in the same conversation with a wrap-up
 prompt and POOL_WORKER_WRAP_BUDGET_S. A session whose model went silent after a
 finished step for POOL_STALL_S (POOL_STALL_FAST_S for a model whose name contains
-one of POOL_STALL_FAST_MODELS) is resumed (twice at most). A session that ends on a
+one of POOL_STALL_FAST_MODELS) is resumed (twice at most), and so is one whose CLI says
+the model's turn is over while it waits for a background task (agy), after
+POOL_BACKGROUND_IDLE_S (120); still idle after two nudges, it is ended early. A session that ends on a
 model quota error is resumed in the same conversation up to POOL_QUOTA_RESUMES
 times, each after a wait that doubles from POOL_QUOTA_WAIT_S up to
 POOL_QUOTA_WAIT_MAX_S; one that still ends on it is "quota error": no try spent and
@@ -289,6 +291,7 @@ class Config:
     quota_wait_s: float = 60
     quota_wait_max_s: float = 900
     stall_s: float = 600
+    background_idle_s: float = 120  # agy idle on a background task this long: resumed (Session.background_idle)
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
     kill_leftovers: bool = True  # kill what a session left running in its scratch paths
@@ -378,6 +381,7 @@ class Config:
             quota_wait_s=float(e("POOL_QUOTA_WAIT_S", "60")),
             quota_wait_max_s=float(e("POOL_QUOTA_WAIT_MAX_S", "900")),
             stall_s=float(e("POOL_STALL_S", "600")),
+            background_idle_s=float(e("POOL_BACKGROUND_IDLE_S", "") or 120),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
             kill_leftovers=env_flag("POOL_KILL_LEFTOVERS", True),
@@ -1386,6 +1390,7 @@ class Session(threading.Thread):
             resumes, rc = 0, None
             quota_k = 0  # resumes after a quota error, each after a doubling wait
             stall_k = 0  # resumes after the model went silent between steps
+            idle_k = 0  # resumes after the model's turn ended on a background task
             # A worker still going at POOL_WORKER_WRAP_S is cut and resumed in the same
             # conversation with a few minutes to commit and release: workers that ran
             # their full timeout were a quarter of all worker time, and most of them
@@ -1470,6 +1475,25 @@ class Session(threading.Thread):
                             "command you started is still running, stop it by its port or PID first."
                         ), max(120, hard - time.time()))
                         continue
+                    # The model ended its turn while a command it started still runs, and
+                    # agy waits for that task until its own limit; the model does not act
+                    # again. Eight sessions sat like that until their 45-minute timeout.
+                    conv = self.background_idle(cfg.background_idle_s) if cfg.background_idle_s else None
+                    if conv and idle_k < 2 and min(hard, ceiling) - time.time() > 120:
+                        idle_k += 1
+                        resume(conv, f"turn over, waiting on a background task for {cfg.background_idle_s:.0f} s", (
+                            "Your last turn ended while a command you started was still running in the background, "
+                            "and the session was restarted, which stopped that command. Run what you still need in "
+                            "the foreground and wait for it to finish (start servers with nohup and stop them by "
+                            "port before you end), then finish the task."
+                        ), max(120, hard - time.time()))
+                        continue
+                    if conv:
+                        with open(self.dir / "resumes.log", "a") as rl:
+                            rl.write(f"{time.time():.0f} ended: turn over, waiting on a background task\n")
+                        self.kill()
+                        rc = 0
+                        break
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
                     conv = self.quota_stalled(quiet=wait)
                     if conv and quota_k < cfg.quota_resumes and min(hard, ceiling) - time.time() > 120:
@@ -1541,6 +1565,24 @@ class Session(threading.Thread):
             return None
         events = self.events()
         return self.cli.session_id(events) if self.cli.model_stalled(events) else None
+
+    def background_idle(self, quiet: float):
+        """The session id when the CLI says the model's turn is over while it waits for a
+        background task (its stderr's last line), and nothing was written for `quiet` s;
+        else None."""
+        pattern = self.cli.idle_wait
+        err = self.dir / "session.err"
+        if pattern is None or not err.exists():
+            return None
+        try:
+            lines = [ln for ln in err.read_text(errors="replace")[-2000:].splitlines() if ln.strip()]
+            last = max(err.stat().st_mtime, (self.dir / "session.jsonl").stat().st_mtime
+                       if (self.dir / "session.jsonl").exists() else 0)
+        except OSError:
+            return None
+        if not lines or not pattern.search(lines[-1]) or time.time() - last < quiet:
+            return None
+        return self.conversation()
 
     def in_model_retry(self) -> bool:
         """Whether the CLI is retrying a failed model call inside the turn (agent_cli)."""
