@@ -38,6 +38,11 @@ Settings (environment, or .issuelooper/config.toml through config.py):
     REVIEW_EVENTS_FILE   the event log, default $POOL_LOGDIR/../review_events.jsonl,
                          else $REVIEW_DIR/events.jsonl.
 
+A pull request for a split issue the supervisor filed (signed <!-- merger -->,
+marked <!-- split -->) whose diff is over REVIEW_CHARS is shown with moved code
+summarized: a run of added lines that the diff also removes, and a run of removed
+lines, each become one `[moved ...]` / `[... removed]` line, so the new code fits.
+
 A keyword pre-scan of the added lines goes into the prompt as hints; the judge
 decides. Structural findings (long functions, copy-pasted blocks) are only logged:
 used as reject reasons they rejected many clean diffs.
@@ -324,6 +329,61 @@ def cap_diff(diff: str, limit: int) -> tuple[str, bool]:
     return out[:limit], cut or len(out) > limit
 
 
+SPLIT_MARK = "<!-- split -->"
+
+
+def is_split_issue(repo: str, issue: int | None) -> bool:
+    """A split issue the supervisor filed: signed <!-- merger --> and marked
+    <!-- split --> (or, filed before the mark, titled `Split ...`)."""
+    if not issue:
+        return False
+    try:
+        data = json.loads(gh_get(f"repos/{repo}/issues/{issue}"))
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+        return False
+    body = str(data.get("body") or "").lstrip()
+    return body.startswith("<!-- merger -->") and (SPLIT_MARK in body or str(data.get("title", "")).startswith("Split "))
+
+
+def summarize_moves(diff: str, min_lines: int = 3, min_chars: int = 80) -> tuple[str, int]:
+    """A split PR's diff with what it moves told in one line each: a run of added lines
+    that the diff also removes (indentation aside) becomes `+[moved: N lines ...]`, and a
+    run of removed lines `-[N lines removed]` (removed code cannot add what the review
+    looks for). Code added anew stays whole. Two split PRs were rejected because their
+    diff, each moved block in twice, was cut at REVIEW_CHARS. Returns (text, lines folded)."""
+    def text(ln: str) -> str:
+        return ln[1:].strip()
+
+    def change(ln: str, sign: str) -> bool:
+        return ln.startswith(sign) and not ln.startswith(sign * 3)
+
+    files = split_files(diff)
+    removed = {text(ln) for _, part in files for ln in part.splitlines() if change(ln, "-")}
+    out, folded = [], 0
+    for _, part in files:
+        lines = part.splitlines(keepends=True)
+        i = 0
+        while i < len(lines):
+            sign = lines[i][:1]
+            if sign not in "+-" or not change(lines[i], sign):
+                out.append(lines[i])
+                i += 1
+                continue
+            j = i
+            while j < len(lines) and change(lines[j], sign) and (sign == "-" or text(lines[j]) in removed | {""}):
+                j += 1
+            body = [text(x) for x in lines[i:j] if text(x)]
+            if len(body) >= min_lines and sum(map(len, body)) >= min_chars:
+                out.append(f"+[moved: {j - i} lines that this diff removes elsewhere, not repeated]\n" if sign == "+"
+                           else f"-[{j - i} lines removed]\n")
+                folded += j - i
+            else:
+                j = max(j, i + 1)
+                out.extend(lines[i:j])
+            i = j
+    return "".join(out), folded
+
+
 def diff_key(diff: str) -> str:
     """The diff without line numbers and blob ids: equal across a clean rebase."""
     keep = [ln for ln in diff.splitlines() if not ln.startswith(("index ", "@@"))]
@@ -582,7 +642,7 @@ def parse_verdict(reply) -> dict:
     }
 
 
-def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "") -> str:
+def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0) -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
@@ -594,7 +654,11 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "") -> 
         "FLAGS": "\n".join(f"- {f}" for f in flags) or "(none)",
         "LONGFN": "\n".join(f"- {f}" for f in longfn) or "(none)",
         "DUPES": "\n".join(f"- {f}" for f in dupes) or "(none)",
-        "TRUNC": f" (cut to {MAX_CHARS} characters)" if cut else "",
+        "TRUNC": "".join(
+            [f" (a split: {moved} moved or removed lines are summarized in `[...]` lines; the code they "
+             "stand for was on main before)" if moved else "",
+             f" (cut to {MAX_CHARS} characters)" if cut else ""]
+        ),
         "DIFF": text,
     }
     return re.sub(
@@ -757,9 +821,12 @@ def review(pr: int, hand: bool = True) -> int:
             functions=grown[:10],
         )
     dupes = duplicate_blocks(files)
-    text, cut = cap_diff(diff, MAX_CHARS)
+    shown, moved = diff, 0
+    if len(diff) > MAX_CHARS and is_split_issue(repo, issue):
+        shown, moved = summarize_moves(diff)
+    text, cut = cap_diff(shown, MAX_CHARS)
     prompt = build_prompt(
-        issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules
+        issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved
     )
     hints = {
         "key": key,
@@ -768,6 +835,7 @@ def review(pr: int, hand: bool = True) -> int:
         "dupes": len(dupes),
         "chars": len(text),
         "cut": cut,
+        "moved": moved,
     }
     by = judge_name()
     t0 = time.time()

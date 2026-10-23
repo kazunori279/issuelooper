@@ -1954,6 +1954,14 @@ def test_split_per_window_and_large_files() -> None:
     h2 = Rig(state(), split_lines=900, gh="true")
     h2.pool.record_large({"src/ok.py": 900})
     check("at the limit is not over it", h2.pool.book.split_filed, set())
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-splitmark-"))
+    (d / "gh").write_text(FAKE_GH_LOG)
+    (d / "gh").chmod(0o755)
+    h3 = Rig(state(), split_lines=900, gh=str(d / "gh"))
+    h3.pool.record_large({"src/big.py": 1200})
+    log = (d / "gh.log").read_text()
+    check("a split issue is signed and marked for the review gate, and asks for verbatim moves",
+          ("--body <!-- merger -->\n<!-- split -->" in log, "Move code as it is" in log), (True, True))
 
 
 def test_ux_runs_never_run_out() -> None:

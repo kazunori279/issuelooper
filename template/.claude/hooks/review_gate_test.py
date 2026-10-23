@@ -38,9 +38,10 @@ if "-X" in args:
 accept = args[args.index("-H") + 1] if "-H" in args else ""
 path = args[-1]
 m = re.fullmatch(r"repos/[^/]+/[^/]+/pulls/(\d+)", path)
-if not m:
+issue = re.fullmatch(r"repos/[^/]+/[^/]+/issues/(\d+)", path)
+if not m and not issue:
     print("not found", file=sys.stderr); sys.exit(1)
-name = m.group(1) + (".diff" if "diff" in accept else ".json")
+name = f"issue-{issue.group(1)}.json" if issue else m.group(1) + (".diff" if "diff" in accept else ".json")
 try:
     print(open(os.path.join(d, name)).read(), end="")
 except OSError:
@@ -377,6 +378,48 @@ try:
     unchanged = ("diff --git a/src/a.py b/src/a.py\n@@ -1,40 +1,41 @@\n" + " ctx\n" * 20 + "+new\n"
                  + " ctx\n" * 20)
     check("context far from a change is dropped", rg.compact(unchanged).count(" ctx"), 6)
+
+    # --- split PRs: moved code summarized ----------------------------------------------
+    moved_fn = [f"def helper_{k}(value):" if k % 5 == 0 else f"    total_{k} = compute(value, {k})" for k in range(60)]
+    split_diff = (
+        "diff --git a/src/big.py b/src/big.py\nindex 1..2 100644\n--- a/src/big.py\n+++ b/src/big.py\n"
+        "@@ -1,62 +1,3 @@\n import os\n-from x import compute\n" + "".join(f"-{ln}\n" for ln in moved_fn)
+        + "+from helpers import *\n"
+        + "diff --git a/src/helpers.py b/src/helpers.py\nnew file mode 100644\n--- /dev/null\n+++ b/src/helpers.py\n"
+        "@@ -0,0 +1,63 @@\n+from x import compute\n" + "".join(f"+    {ln}\n" for ln in moved_fn)
+        + "+def price_of(item):\n+    return item.get('price') or 19.99\n"
+    )
+    text, n = rg.summarize_moves(split_diff)
+    check("a split: the moved block is one line, the removed block one line, new code whole",
+          ("+[moved: 61 lines that this diff removes elsewhere, not repeated]" in text,
+           "-[61 lines removed]" in text, "or 19.99" in text, "total_7" in text, n),
+          (True, True, True, False, 122))
+    (GHDIR / "issue-140.json").write_text(json.dumps({
+        "title": "Split src/big.py: it is where parallel work collides",
+        "body": "<!-- merger -->\n<!-- split -->\n`src/big.py` has 900 lines on main."}))
+    (GHDIR / "issue-141.json").write_text(json.dumps({
+        "title": "Split it", "body": "<!-- worker -->\n<!-- split -->\nnot the supervisor's"}))
+    check("split issues are the supervisor's, by mark or by title",
+          (rg.is_split_issue("o/r", 140), rg.is_split_issue("o/r", 141), rg.is_split_issue("o/r", 999)),
+          (True, False, False))
+    keep_chars = rg.MAX_CHARS
+    rg.MAX_CHARS = 3000
+    try:
+        for n_pr, issue, sha in ((40, 140, "f" * 40), (41, 141, "e" * 40)):
+            (GHDIR / f"{n_pr}.json").write_text(json.dumps(
+                {"title": f"PR {n_pr}", "body": f"Fixes #{issue}", "head": {"sha": sha, "ref": f"issue-{issue}"}}))
+            (GHDIR / f"{n_pr}.diff").write_text(split_diff)
+            rg.review(n_pr, hand=False)
+            last = PROMPTS[-1]
+            if n_pr == 40:
+                check("a split PR over the limit: summarized, not cut",
+                      ("[moved: 61 lines" in last, "(a split: 122 moved or removed lines" in last, "cut to" in last,
+                       record(sha).get("moved")), (True, True, False, 122))
+            else:
+                check("any other PR over the limit is cut as before",
+                      ("[moved:" in last, "cut to 3000 characters" in last), (False, True))
+    finally:
+        rg.MAX_CHARS = keep_chars
 finally:
     os.environ.clear()
     os.environ.update(saved)
