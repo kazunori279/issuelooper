@@ -27,13 +27,13 @@ Your port is `$TST_PORT`, yours alone. Run the app from a clean extraction of
 the commit you are testing, never from a working tree:
 
 ```bash
-SHA=<the commit>; T=/tmp/tst-$TST_PORT-tree
+SHA=<the commit>; T=$ISSUELOOPER_TMP/tst-$TST_PORT-tree
 rm -rf "$T" && mkdir -p "$T" && git -C "$SHARED_REPO_PATH" archive "$SHA" | tar -x -C "$T"
 cd "$T"                                               # then the worktree setup from .issuelooper/project.md
 lsof -tiTCP:"$TST_PORT" -sTCP:LISTEN | xargs kill 2>/dev/null; sleep 1        # whatever an earlier run left on your port
 # start the app on $TST_PORT in the background, as .issuelooper/project.md says
 # (the mode that needs no credentials for a UX run; live mode for a live check),
-# with its log at /tmp/tst-$TST_PORT-server.log, then wait for it (never more than a minute):
+# with its log at $ISSUELOOPER_TMP/tst-$TST_PORT-server.log, then wait for it (never more than a minute):
 for i in $(seq 60); do curl -sf "localhost:$TST_PORT/" > /dev/null && break; sleep 1; done
 ```
 
@@ -43,7 +43,7 @@ sits there until the supervisor kills it. Stop it with `lsof -tiTCP:"$TST_PORT" 
 never with `pkill` or `killall`: they match command lines, yours included, and
 the guard refuses them.
 
-Keep databases and scratch files under `/tmp`. Stop the server and remove `$T`
+Keep databases and scratch files under `$ISSUELOOPER_TMP`. Stop the server and remove `$T`
 when you are done. The server log is half your evidence: a page that renders
 empty because the server threw is a different bug from one whose front end never
 asked.
@@ -80,7 +80,7 @@ the server and remove `$T`.
 The issue merged with `Refs #N` because its acceptance needs the live
 environment. Read the issue and its merged PR, start the app in live mode at the
 current `origin/main`, and drive what the issue asked for with a script
-(`/tmp/tst-$TST_PORT-live.py`). Look at your screenshots. Then comment once on
+(`$ISSUELOOPER_TMP/tst-$TST_PORT-live.py`). Look at your screenshots. Then comment once on
 the issue, signed `<!-- tester -->`: what you did, what you saw (quote the
 screen text), and, only when the behavior was right, a line of its own:
 
@@ -102,11 +102,10 @@ as people would use it, and report what gets in their way.
 When the project provides a journeys script (`[ux] journeys` in
 `.issuelooper/config.toml`; your prompt names it), run it from your extracted
 tree as `.issuelooper/project.md` says and do not write a journeys file of your
-own: any probes of your own go in `/tmp/tst-$TST_PORT-probes.py`.
+own: any probes of your own go in `$ISSUELOOPER_TMP/tst-$TST_PORT-probes.py`.
 
 Without such a script, your journeys live in
-`/tmp/issuelooper-<repository directory name>/ux/journeys.py` (your prompt names
-the path) and persist from run to run: the first run writes
+`$ISSUELOOPER_TMP/ux/journeys.py` (your prompt names the path) and persist from run to run: the first run writes
 them, later runs extend them. Read the spec, the test hooks the
 UI exposes, the journeys `.issuelooper/project.md` asks for, and the
 `owner-request` issues (`gh issue list --label owner-request --state all`), and
@@ -194,7 +193,7 @@ gh issue list --state all --search "<two or three key words> in:title" --json nu
 
 ```bash
 gh issue create --title "UX: <what the user sees, short>" --label type:bug --label P2 \
-  --label stage:triage --body-file /tmp/tst-$TST_PORT-issue.md
+  --label stage:triage --body-file $ISSUELOOPER_TMP/tst-$TST_PORT-issue.md
 ```
 
 Use `P1` instead of `P2` when a person would be stopped or misled by it. The

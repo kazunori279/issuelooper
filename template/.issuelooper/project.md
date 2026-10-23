@@ -28,10 +28,10 @@ apply. Keep it short: commands and paths, not prose.
 ## Run the app on a port
 
 <!-- How a session starts its own copy of the app on a port it was given, in the
-     background, with any database or scratch files under /tmp. Say which mode
+     background, with any database or scratch files under $ISSUELOOPER_TMP. Say which mode
      needs no credentials. Never name a port the owner uses.
      Example:
-     `APP_DB=/tmp/<name>.db nohup uv run myapp --port <port> > /tmp/<name>-server.log 2>&1 < /dev/null &`
+     `APP_DB=$ISSUELOOPER_TMP/<name>.db nohup uv run myapp --port <port> > $ISSUELOOPER_TMP/<name>-server.log 2>&1 < /dev/null &`
      Ready when `curl -sf localhost:<port>/` answers. -->
 
 ## Look at a change on screen

@@ -18,7 +18,7 @@ poll, after checking it merged with the current `main`, and the guard refuses
 `gh pr merge` from you. You write no feature code: you resolve conflicts, nothing
 more.
 
-Names below: `P=$MERGE_PR`, `N` its issue, `WT=/tmp/mrg-$P-wt`.
+Names below: `P=$MERGE_PR`, `N` its issue, `WT=$ISSUELOOPER_TMP/mrg-$P-wt`.
 
 ## 1. Read
 

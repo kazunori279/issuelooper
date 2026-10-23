@@ -27,7 +27,8 @@ Settings (environment, or .issuelooper/config.toml through config.py):
                          after that sends the issue to stage:owner instead.
     REVIEW_MAX_ERRORS    failed reviews (the judge failed or answered nonsense) of one
                          head before its issue goes to stage:owner, default 3.
-    REVIEW_DIR           where records go, default /tmp/issuelooper-review.
+    REVIEW_DIR           where records go, default $ISSUELOOPER_TMP/review (records in
+                         /tmp/issuelooper-review, from before the upgrade, are read too).
     REVIEW_PROMPT        another prompt file with the same <<...>> fields, default
                          review_prompt.md next to this script.
     REVIEW_FIXTURES      comma-separated globs of JSON test fixtures, relative to
@@ -115,7 +116,8 @@ def _paths(raw: str) -> tuple[str, ...]:
 
 GH = os.environ.get("CLAIM_GH", "gh")
 GATE_ON = os.environ.get("REVIEW_GATE", "on").strip().lower() not in ("off", "0", "false", "no")
-RECORDS = pathlib.Path(os.environ.get("REVIEW_DIR", "/tmp/issuelooper-review"))
+RECORD_DIRS = config.record_dirs("review")  # written to the first; read from all
+RECORDS = RECORD_DIRS[0]
 MAX_CHARS = int(os.environ.get("REVIEW_CHARS", "30000"))
 MAX_REJECTS = int(os.environ.get("REVIEW_MAX_REJECTS", "2"))
 MAX_ERRORS = int(os.environ.get("REVIEW_MAX_ERRORS", "3"))
@@ -248,7 +250,8 @@ def log_event(kind: str, **kv) -> None:
 
 def load_record(sha: str) -> dict | None:
     try:
-        rec = json.loads((RECORDS / f"{sha.lower()}.json").read_text())
+        rec = next((json.loads(f.read_text()) for f in (d / f"{sha.lower()}.json" for d in RECORD_DIRS)
+                    if f.exists()), None)
     except (OSError, ValueError):
         return None
     return rec if isinstance(rec, dict) else None

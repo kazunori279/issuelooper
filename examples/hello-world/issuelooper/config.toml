@@ -64,7 +64,8 @@ max_sessions = 4             # POOL_MAX_WORKERS: agent sessions running at once,
 worker_timeout = "20m"       # POOL_TIMEOUT_WORKER
 merger_timeout = "20m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
-tester_port_base = 8021      # TST_PORT: the first port handed to a tester
+# tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
+                             # the repository's path, so loops for two repositories rarely share ports
 
 [guard]
 secret_urls = []             # GUARD_SECRET_URLS: URL paths whose response holds a secret; fetching them unfiltered is refused

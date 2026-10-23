@@ -27,6 +27,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(HERE))
 import agent_cli  # noqa: E402
+import config  # noqa: E402
 import herdr_link  # noqa: E402
 
 HOUR = 3600.0
@@ -385,9 +386,7 @@ def cycle_times(log: list[dict], since: float, now: float) -> dict:
 
 
 def reviewer_usage(since: float) -> dict:
-    d = pathlib.Path(
-        os.environ.get("REVIEW_DIR", "").strip() or "/tmp/issuelooper-review"
-    )
+    d = config.record_dirs("review")[0]
     out = {"input": 0, "output": 0, "calls": 0, "verdicts": collections.Counter()}
     for f in d.glob("*.json"):
         r = read_json(f)

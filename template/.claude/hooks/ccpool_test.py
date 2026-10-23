@@ -25,6 +25,9 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+# The repository's scratch directory, for every case and every process they start.
+SCRATCH = os.path.realpath(tempfile.mkdtemp(prefix="ccpool-scratch-"))
+os.environ["ISSUELOOPER_TMP"] = SCRATCH
 import agent_cli  # noqa: E402
 import ccpool  # noqa: E402
 import claim_test  # noqa: E402
@@ -1332,7 +1335,7 @@ def test_main_check_reports_a_red_main() -> None:
               (ok, ccpool.failing_tests(out)), (False, ["tests/t.py::test_a"]))
         os.environ["SWEEP_COMMAND"] = "true"
         check("and green", real.sweep_main(sha)[0], True)
-        check("its worktree is gone", pathlib.Path(f"/tmp/issuelooper-main-{sha[:12]}").exists(), False)
+        check("its worktree is gone", pathlib.Path(f"{SCRATCH}/main-{sha[:12]}").exists(), False)
     finally:
         for k, v in keep.items():
             os.environ.pop(k, None)
@@ -1377,11 +1380,11 @@ def test_ux_journeys_and_score() -> None:
     ux = ccpool.Unit("tester", "ux", "ux:abc", "tst:ux:abc", None, (2, 0, 0), {"sha": "a" * 40, "deployed": True})
     own = ccpool.tester_prompt(ux, 8021, "60m")
     check("no journeys script: the tester keeps its own per repository, not in a shared /tmp/ux",
-          (f"/tmp/issuelooper-{ccpool.repo_root().name}/ux/journeys.py" in own, "/tmp/ux/" in own), (True, False))
+          (f"{SCRATCH}/ux/journeys.py" in own, "/tmp/ux/" in own), (True, False))
     given = ccpool.tester_prompt(ux, 8021, "60m", "ux/journeys.py")
     check("the project's script: run it from the tree, write none, probes in a scratch file",
           ("`ux/journeys.py`, from your extracted tree" in given, "do not write a journeys file" in given,
-           "/tmp/tst-8021-probes.py" in given, "/tmp/issuelooper-" in given), (True, True, True, False))
+           f"{SCRATCH}/tst-8021-probes.py" in given, f"{SCRATCH}/ux/" in given), (True, True, True, False))
     check("the report's first line is the score", ("`Score: N/100`" in own, "`Score: N/100`" in given), (True, True))
     old = os.environ.pop("POOL_UX_JOURNEYS", None)
     try:
@@ -1415,13 +1418,13 @@ def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""
     seq = 900000 + os.getpid() % 90000
-    inside = pathlib.Path(tempfile.mkdtemp(prefix=f"wrk-{seq}-7-", dir="/tmp"))
-    outside = pathlib.Path(tempfile.mkdtemp(prefix=f"wrk-{seq + 1}-7-", dir="/tmp"))
+    inside = pathlib.Path(tempfile.mkdtemp(prefix=f"wrk-{seq}-7-", dir=SCRATCH))
+    outside = pathlib.Path(tempfile.mkdtemp(prefix=f"wrk-{seq + 1}-7-", dir=SCRATCH))
     procs = [subprocess.Popen(["sleep", "60"], cwd=str(c), start_new_session=True) for c in (inside, outside)]
     try:
         h = Rig(state())
         w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:7@x", "wrk:7", 7, (4,), {}), seq)
-        check("a worker's scratch paths", w.scratch_prefixes()[0], f"/tmp/wrk-{seq}-")
+        check("a worker's scratch paths", w.scratch_prefixes(), [f"{SCRATCH}/wrk-{seq}-"])
         killed = w.kill_leftovers()
         check("the process in the session's paths is killed", (killed, procs[0].wait(timeout=10) != 0),
               ([procs[0].pid], True))
@@ -1436,7 +1439,8 @@ def test_leftover_processes_are_killed() -> None:
         t.port = 8121
         a = ccpool.Session(h.pool, ccpool.Unit("auto", "merge", "merge:12@x", "mrg:12", 12, (0,), {}), 5)
         check("a merger's, a tester's, none for a unit without an agent",
-              (m.scratch_prefixes()[0], t.scratch_prefixes()[0], a.scratch_prefixes()), ("/tmp/mrg-12-", "/tmp/tst-8121-", []))
+              (m.scratch_prefixes()[0], t.scratch_prefixes()[0], a.scratch_prefixes()),
+              (f"{SCRATCH}/mrg-12-", f"{SCRATCH}/tst-8121-", []))
     finally:
         for p in procs:
             if p.poll() is None:
@@ -2230,6 +2234,30 @@ def test_auto_merge_resweeps_outside_the_merge_lock() -> None:
           (outcome, len(calls), "pr merge" in log), ("refused by the merge gates (handed back)", 1, False))
 
 
+def test_scratch_paths_are_the_repositorys() -> None:
+    """Fixed names under /tmp collided across repositories: a leftover /tmp/mrg-121-auto
+    from another loop failed one rebase eight times (#5)."""
+    claim = {"issue": 5, "token": "t", "from": "stage:triage", "title": "x"}
+    text = ccpool.worker_prompt(claim, "3", "45m", "u")
+    m = ccpool.merger_prompt(
+        ccpool.Unit("merger", "land", "k", "f", 9, (0,), {"issue": 2, "head": "c" * 40, "mergeable": "X"}), "45m")
+    t = ccpool.tester_prompt(ccpool.Unit("tester", "live", "k", "f", 4, (2,), {"title": "x"}), 8021, "60m")
+    check("every prompt names paths under the repository's scratch directory, none under /tmp itself",
+          (f"{SCRATCH}/wrk-3-5-wt" in text, f"{SCRATCH}/mrg-9-wt" in m, f"{SCRATCH}/tst-8021-" in t,
+           any(f"/tmp/{x}-" in y for x in ("wrk", "mrg", "tst") for y in (text, m, t))),
+          (True, True, True, False))
+    check("the supervisor's own worktrees too", ccpool.scratch("mrg-121-auto"), f"{SCRATCH}/mrg-121-auto")
+    import shutil
+    shutil.rmtree(SCRATCH)
+    Rig(state())
+    check("the pool makes the directory", pathlib.Path(SCRATCH).is_dir(), True)
+    for role in ("worker", "merger", "tester"):
+        skill = (HERE.parent / "skills" / f"issuelooper-{role}" / "SKILL.md").read_text()
+        check(f"the {role} skill's scratch paths are under $ISSUELOOPER_TMP",
+              ("/tmp/wrk-" in skill or "/tmp/mrg-" in skill or "/tmp/tst-" in skill, "$ISSUELOOPER_TMP/" in skill),
+              (False, True))
+
+
 def test_worker_prompt_points_to_the_project() -> None:
     claim = {"issue": 5, "token": "t", "from": "stage:triage", "title": "x"}
     text = ccpool.worker_prompt(claim, "1", "45m", "u")
@@ -2701,7 +2729,7 @@ def test_end_to_end_with_fake_github() -> None:
         POOL_REVIEW_CMD=str(review),
         POOL_GUARD_CMD=str(guard),
         POOL_MAIN_CHECK="0",  # it would fetch into this checkout
-        POOL_KILL_LEFTOVERS="0",  # its sessions' paths (/tmp/wrk-1-*) may be a real loop's on this machine
+        POOL_KILL_LEFTOVERS="0",  # nothing to kill: its sessions start no processes
     )
     proc = subprocess.Popen(
         [sys.executable, str(HERE / "ccpool.py"), "run"],

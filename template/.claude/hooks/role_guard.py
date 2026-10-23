@@ -110,10 +110,10 @@ NO_VERIFY = re.compile(r"\bgit\b[^|;&]*\b(?:commit|push)\b[^|;&]*--no-verify\b")
 
 ROLE_DIR = pathlib.Path.home() / ".claude" / "cc-role"
 HEARTBEAT_FILE = pathlib.Path(
-    os.environ.get("ROLE_GUARD_HEARTBEAT_FILE", "/tmp/issuelooper-guard.last")
+    os.environ.get("ROLE_GUARD_HEARTBEAT_FILE", "") or config.scratch_root() / "guard.last"
 )
 RUNS_DIR = pathlib.Path(
-    os.environ.get("ROLE_GUARD_RUNS_DIR", "/tmp/issuelooper-guard-runs")
+    os.environ.get("ROLE_GUARD_RUNS_DIR", "") or config.scratch_root() / "guard-runs"
 )
 
 # A write is anything that changes state. Reads — view, list, plain api, search —
@@ -717,7 +717,7 @@ def kill_by_pattern_check(command: str) -> None:
             "contains its prompt, so a pattern that names your server can match, and kill, "
             "this session too.\n\n"
             "Stop a server by its port or its PID instead: `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, or start it "
-            "with `... & echo $! > /tmp/<name>.pid` and later `kill $(cat /tmp/<name>.pid)`."
+            "with `... & echo $! > $ISSUELOOPER_TMP/<name>.pid` and later `kill $(cat $ISSUELOOPER_TMP/<name>.pid)`."
         )
 
 
@@ -763,7 +763,7 @@ def git_checkout_check(command: str, cwd: str | None) -> None:
                 "wrong checkout; one stash left the shared checkout conflicted and stopped every merge.\n\n"
                 "Commit work in progress on your issue branch instead (`git commit -m \"WIP ...\"`, "
                 "amended or squashed later). To see origin/main without your change, add a second "
-                "worktree: `git -C \"$SHARED_REPO_PATH\" worktree add --detach /tmp/<your prefix>-base-wt origin/main`."
+                "worktree: `git -C \"$SHARED_REPO_PATH\" worktree add --detach $ISSUELOOPER_TMP/<your prefix>-base-wt origin/main`."
             )
         if sub not in CHECKOUT_WRITES:
             continue
@@ -815,7 +815,7 @@ def refuse_unreadable_body(role: str) -> None:
         "(--input -, -F body=@-, stdin pipes or heredocs) are refused.\n\n"
         "Every session authenticates as the same GitHub login, so the "
         "marker is the only thing in the timeline that says which of you acted. "
-        "Write the body to /tmp/<role>-<N>-body.md and pass --body-file."
+        "Write the body to $ISSUELOOPER_TMP/<role>-<N>-body.md and pass --body-file."
     )
 
 
@@ -998,7 +998,6 @@ SWEEP_WAIVER = re.compile(
 # The sweep runner, vendored with the framework. A PR head that has it can be
 # swept, so its body must carry the sweep's `green:` line or a sweep waiver.
 SWEEP_RUNNER = ".claude/hooks/sweep_run.py"
-SWEEP_RECORD_DIR_DEFAULT = "/tmp/issuelooper-sweep"
 SWEEP_HOW = "`python3 .claude/hooks/sweep_locked.py` in your worktree"
 
 
@@ -1006,14 +1005,13 @@ def load_sweep_record(sha: str) -> dict | None:
     """The provenance record sweep_run.py writes for a full, green sweep started
     from a clean tree at `sha`. None when there is none, or when it cannot be
     read, which for the gate means the same thing."""
-    record_dir = pathlib.Path(
-        os.environ.get("SWEEP_RECORD_DIR") or SWEEP_RECORD_DIR_DEFAULT
-    )
-    try:
-        record = json.loads((record_dir / f"{sha.lower()}.json").read_text())
-    except (OSError, ValueError):
-        return None
-    return record if isinstance(record, dict) else None
+    for record_dir in config.record_dirs("sweep"):
+        try:
+            record = json.loads((record_dir / f"{sha.lower()}.json").read_text())
+        except (OSError, ValueError):
+            continue
+        return record if isinstance(record, dict) else None
+    return None
 
 
 # Gate 3. `Fail-before` written only as a rule in a skill stays prose: across a run
@@ -1451,9 +1449,7 @@ def check_pr_merge(command: str) -> None:
                 # real line measured on a dirty tree before the commit fails here.
                 record = load_sweep_record(head_sha)
                 if record is None:
-                    record_dir = (
-                        os.environ.get("SWEEP_RECORD_DIR") or SWEEP_RECORD_DIR_DEFAULT
-                    )
+                    record_dir = config.record_dirs("sweep")[0]
                     block(
                         f"{target} has no sweep record for its head `{head_sha[:7]}`.\n\n"
                         f"The sweep writes `{record_dir}/<sha>.json` only for a full, green "
@@ -1608,10 +1604,9 @@ FAIL_BEFORE_HOW = (
 
 # Gate 5, the review gate. `.claude/hooks/review_gate.py --pr N` has a second
 # model read the diff and writes its verdict for the PR's head sha to
-# $REVIEW_DIR/<sha>.json. pass, skipped (no production file), error (the judge
-# failed: fail open) and cap (rejected too often already) let the merge go
-# ahead; reject and no record do not. REVIEW_GATE=off (or 0) skips the gate.
-REVIEW_DIR_DEFAULT = "/tmp/issuelooper-review"
+# $REVIEW_DIR/<sha>.json (config.record_dirs). pass, skipped (no production file)
+# and override (the owner's) let the merge go ahead; anything else does not.
+# REVIEW_GATE=off (or 0) skips the gate.
 REVIEW_ALLOWS = {"pass", "skipped", "override"}  # review_gate.ALLOWS
 
 
@@ -1627,11 +1622,13 @@ def review_gate_on() -> bool:
 def review_gate_check(pr: str, head_sha: str, target: str) -> None:
     if not review_gate_on() or not head_sha:
         return
-    record_dir = pathlib.Path(os.environ.get("REVIEW_DIR") or REVIEW_DIR_DEFAULT)
-    try:
-        record = json.loads((record_dir / f"{head_sha.lower()}.json").read_text())
-    except (OSError, ValueError):
-        record = None
+    record = None
+    for record_dir in config.record_dirs("review"):
+        try:
+            record = json.loads((record_dir / f"{head_sha.lower()}.json").read_text())
+            break
+        except (OSError, ValueError):
+            continue
     verdict = record.get("verdict") if isinstance(record, dict) else None
     if verdict in REVIEW_ALLOWS:
         return

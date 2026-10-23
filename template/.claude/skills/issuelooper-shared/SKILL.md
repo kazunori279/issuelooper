@@ -134,8 +134,11 @@ marker is the only record of who spoke. The guard refuses an unsigned write.
 
 ## Limits for every session
 
-- Write files only in your own worktree or scratch paths under `/tmp` (the
-  tester also writes under `.ux/`, which git ignores). Never edit
+- Write files only in your own worktree or scratch paths under `$ISSUELOOPER_TMP`,
+  this repository's scratch directory (the tester also writes under `.ux/`, which
+  git ignores). If it is unset, set it first:
+  `export ISSUELOOPER_TMP=$(python3 "$SHARED_REPO_PATH/.claude/hooks/config.py" tmp); mkdir -p "$ISSUELOOPER_TMP"`.
+  Never edit
   `$SHARED_REPO_PATH`, `.claude/`, `.agents/`, `.issuelooper/`, `CLAUDE.md` or
   `AGENTS.md`.
 - Never print a secret. Credentials stay where `.issuelooper/project.md` says;

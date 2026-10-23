@@ -90,7 +90,7 @@ after three merger sessions (main kept moving) goes back to a worker, a file tha
 conflicting gets an issue to split it (the review gate summarizes the blocks such a
 split moves verbatim, so its diff fits), and a deploy that lost a race with another
 `git fetch` is tried again. Servers and test runs a session left running in its
-scratch paths under `/tmp` are killed when it ends. Issues blocked by an open issue (a `Blocked by:` line
+scratch paths are killed when it ends. Issues blocked by an open issue (a `Blocked by:` line
 or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the
 files that name the issue's backticked names and requirement ids (`[spec]
 id_pattern`), so it reads less to find its way. When workers run out of issues,
@@ -109,7 +109,9 @@ repository, and starts its report with `Score: N/100`, which the supervisor logs
   aides run in (or set `[monitor] host = "broker"` for a headless monitor).
 - A check suite that one command runs (`make verify`, say). The merge gates
   expect pytest for the per-issue tests.
-- Linux or macOS. Worktrees and scratch files go under `/tmp`.
+- Linux or macOS. Worktrees and scratch files go under one directory per repository,
+  `/tmp/issuelooper-<repository directory>-<hash of its path>/` (`ISSUELOOPER_TMP`;
+  `python3 .claude/hooks/config.py tmp` prints it).
   See [macOS validation](docs/macos-verification.md) for the tested environment
   and remaining limits. Server examples also use `lsof`.
 
@@ -337,8 +339,12 @@ but a stranger's text still reaches the agents' prompts: limit who may interact
 - Agent sessions run with their CLI's permission prompts off
   (`--dangerously-skip-permissions`), because the guard is the gate. Run the loop
   on a machine or VM dedicated to it.
-- One loop per machine: worktree and lock paths under `/tmp` are not namespaced
-  per repository.
+- One loop per GitHub repository. Loops for different repositories can share a
+  machine: each keeps its worktrees, scratch files and sweep and review records
+  under its own `ISSUELOOPER_TMP`, and picks its own tester ports unless
+  `[pool] tester_port_base` says otherwise. They share the machine's sweep slots
+  (`[sweep] slots` counts sweeps across all of them) and its cores, and the
+  project's own run and deploy commands must not use the same ports.
 
 ## Layout
 

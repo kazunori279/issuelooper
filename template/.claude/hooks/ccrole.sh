@@ -27,6 +27,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # No .claude/hooks/__pycache__/ in the shared checkout: the merge gate needs it clean.
 export PYTHONDONTWRITEBYTECODE=1
 [ -f "$HERE/config.py" ] && eval "$(python3 "$HERE/config.py" env 2>/dev/null || true)"
+# This repository's scratch directory (config.py: one per repository, under /tmp).
+[ -n "${ISSUELOOPER_TMP:-}" ] && mkdir -p "$ISSUELOOPER_TMP"
 
 ROLE_DIR="$HOME/.claude/cc-role"
 VALID="monitor merger tester reviewer aide worker"

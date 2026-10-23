@@ -10,6 +10,13 @@ variable always wins over the file.
     python3 config.py env        print `export NAME=value` lines for a shell
     python3 config.py get NAME   print one variable's value after the file is applied
     python3 config.py check      parse the file and list unknown keys
+    python3 config.py tmp        print this repository's scratch directory
+
+Scratch files (worktrees, sweep and review records, a tester's tree) live under one
+directory per repository, $ISSUELOOPER_TMP, by default
+/tmp/issuelooper-<repository directory name>-<8 hex digits of its path's hash>;
+apply() and `env` export it. Fixed names such as /tmp/mrg-121-auto collided across
+repositories and runs: a leftover from another loop failed one rebase eight times.
 
 The keys and the variables they set are in KEYS below; `[env]` passes any other
 variable through as written.
@@ -17,6 +24,7 @@ variable through as written.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 import shlex
@@ -78,6 +86,39 @@ def repo_root() -> pathlib.Path:
     return pathlib.Path(shared) if shared else HERE.parents[1]
 
 
+def _path_hash(root: pathlib.Path | None) -> tuple[str, int]:
+    r = (root or repo_root()).resolve()
+    return r.name, int(hashlib.sha1(str(r).encode()).hexdigest()[:8], 16)
+
+
+def scratch_root(root: pathlib.Path | None = None) -> pathlib.Path:
+    """This repository's scratch directory: $ISSUELOOPER_TMP, else one named for the
+    repository's path under /tmp. Not created here."""
+    v = os.environ.get("ISSUELOOPER_TMP", "").strip()
+    if v:
+        return pathlib.Path(v)
+    name, h = _path_hash(root)
+    return pathlib.Path("/tmp") / f"issuelooper-{name}-{h:08x}"
+
+
+def record_dirs(kind: str) -> list[pathlib.Path]:
+    """Where the sweep ("sweep", $SWEEP_RECORD_DIR) or review ("review", $REVIEW_DIR)
+    records go: the first is written; readers also look in the rest, the one directory
+    all repositories shared before scratch_root, so records made before an upgrade
+    still count."""
+    name = {"sweep": "SWEEP_RECORD_DIR", "review": "REVIEW_DIR"}[kind]
+    if os.environ.get(name, "").strip():
+        return [pathlib.Path(os.environ[name].strip())]
+    return [scratch_root() / kind, pathlib.Path(f"/tmp/issuelooper-{kind}")]
+
+
+def tester_port_base(root: pathlib.Path | None = None) -> int:
+    """The first tester port when TST_PORT is not set: 8021-8099, picked by the
+    repository's path, so two loops on one machine rarely start on the same port
+    (testers step by POOL_TESTER_PORT_STEP, 100, from it)."""
+    return 8021 + 2 * (_path_hash(root)[1] % 40)
+
+
 def load(root: pathlib.Path | None = None) -> dict:
     """The parsed config file, or {} when there is none."""
     path = (root or repo_root()) / CONFIG_REL
@@ -130,17 +171,19 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
 
 def apply(root: pathlib.Path | None = None) -> dict[str, str]:
     """Set every variable the config names that the environment does not already have.
-    Returns what it set. A missing or unreadable file sets nothing."""
+    Returns what it set. A missing or unreadable file sets nothing but ISSUELOOPER_TMP."""
     try:
         values, _ = env_from(load(root))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"issuelooper config: {exc}", file=sys.stderr)
-        return {}
+        values = {}
     set_now = {}
     for name, v in values.items():
         if name not in os.environ:
             os.environ[name] = v
             set_now[name] = v
+    if not os.environ.get("ISSUELOOPER_TMP", "").strip():
+        os.environ["ISSUELOOPER_TMP"] = set_now["ISSUELOOPER_TMP"] = str(scratch_root(root))
     return set_now
 
 
@@ -150,6 +193,11 @@ def main(argv: list[str]) -> int:
         values, _ = env_from(load())
         for name, v in values.items():
             print(f"export {name}={shlex.quote(os.environ.get(name, v))}")
+        if "ISSUELOOPER_TMP" not in values:
+            print(f"export ISSUELOOPER_TMP={shlex.quote(str(scratch_root()))}")
+        return 0
+    if cmd == "tmp":
+        print(scratch_root())
         return 0
     if cmd == "get" and len(argv) == 3:
         apply()

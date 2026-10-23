@@ -25,7 +25,7 @@ When the run is green, started from a clean tree on a commit, and left HEAD and
 the tree as it found them, it also writes the provenance record that
 `role_guard.py` reads at merge time (Gate 2):
 
-    $SWEEP_RECORD_DIR/<sha>.json   (default /tmp/issuelooper-sweep)
+    $SWEEP_RECORD_DIR/<sha>.json   (default $ISSUELOOPER_TMP/sweep)
     {"sha": ..., "command": ..., "areas": {"unit": 21, "e2e": 23}, "total": 44,
      "started_at": ..., "finished_at": ...}
 
@@ -53,7 +53,6 @@ import config  # noqa: E402
 
 ROOT = HERE.parents[1]
 DEFAULT_COMMAND = "make verify"
-DEFAULT_RECORD_DIR = "/tmp/issuelooper-sweep"
 # The area a run with no pytest summary reports, so its green line and its record
 # still have the `<total> green: <area> <n>` shape Gate 2 parses.
 NO_PYTEST_AREA = "sweep"
@@ -147,7 +146,7 @@ def sweep_line(counts: dict[str, int], before: int | None) -> str:
 def write_sweep_record(
     sha: str, command: str, counts: dict[str, int], started_at: str, finished_at: str
 ) -> Path:
-    record_dir = Path(os.environ.get("SWEEP_RECORD_DIR") or DEFAULT_RECORD_DIR)
+    record_dir = config.record_dirs("sweep")[0]
     record_dir.mkdir(parents=True, exist_ok=True)
     record = {
         "sha": sha,

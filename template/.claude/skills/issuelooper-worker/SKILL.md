@@ -17,7 +17,7 @@ supervisor merges your PR once the merge gates and the review gate pass, so the
 PR body has to carry everything they check.
 
 Names below: `K=$WRK_K`, `N` your issue, `T` your claim token,
-`WT=/tmp/wrk-$K-$N-wt`, scratch files `/tmp/wrk-$K-$N-*`. Write nowhere else.
+`WT=$ISSUELOOPER_TMP/wrk-$K-$N-wt`, scratch files `$ISSUELOOPER_TMP/wrk-$K-$N-*`. Write nowhere else.
 
 ## 1. Read the issue
 
@@ -40,7 +40,7 @@ The tester's live check after the merge is the gate, but a change it sends back
 costs a whole round (one live issue once took six worker sessions this way). In
 your worktree, start the app in live mode on a free port, in the background, as
 *Live mode* in `.issuelooper/project.md` says (it names where the credentials
-come from), with its log at `/tmp/wrk-$K-$N-live.log`. Drive the issue's steps at
+come from), with its log at `$ISSUELOOPER_TMP/wrk-$K-$N-live.log`. Drive the issue's steps at
 least twice (in each language the issue concerns), read the screenshots and the
 server log, stop the server with `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, and remove any credential
 link you made in the worktree before you commit. Say what the live environment
@@ -63,8 +63,8 @@ cd "$WT"            # then run the worktree setup from .issuelooper/project.md
   newest comments on the PR, fix what they ask, and update that PR (step 6).
 - Never edit `$SHARED_REPO_PATH` itself: Gate 0 refuses every merge while it is
   dirty, which stops everyone's work from landing.
-- `already checked out at /tmp/wrk-J-N-wt`: an earlier attempt died. Remove it
-  (`git -C "$SHARED_REPO_PATH" worktree remove --force /tmp/wrk-J-N-wt`) and retry.
+- `already checked out at $ISSUELOOPER_TMP/wrk-J-N-wt`: an earlier attempt died. Remove it
+  (`git -C "$SHARED_REPO_PATH" worktree remove --force $ISSUELOOPER_TMP/wrk-J-N-wt`) and retry.
 - `cannot lock ref` or `index.lock exists`: another session is writing the
   shared `.git`. Wait five seconds and retry.
 
@@ -118,8 +118,8 @@ the app from your worktree on a free port, in the background, as *Run the app on
 a port* says, and wait until it answers. Write a short script that replays **the
 exact steps** of the issue's reproduction, or of the report your prompt quotes,
 step by step from a fresh start, not a shortcut to the end state. Save
-screenshots under `/tmp/wrk-$K-$N-shots/`, before your change (on `origin/main`, from
-a second worktree: `git -C "$SHARED_REPO_PATH" worktree add --detach /tmp/wrk-$K-$N-base-wt origin/main`;
+screenshots under `$ISSUELOOPER_TMP/wrk-$K-$N-shots/`, before your change (on `origin/main`, from
+a second worktree: `git -C "$SHARED_REPO_PATH" worktree add --detach $ISSUELOOPER_TMP/wrk-$K-$N-base-wt origin/main`;
 never `git stash`, which the guard refuses) and after it, the last one
 showing the state the issue is about. Open them and compare: the symptom is gone,
 and nothing next to it broke (overlap, cut-off text, a control that moved). Fix
@@ -150,7 +150,7 @@ again. A wait of a few minutes for a sweep slot is normal; never delete a lock.
 ```bash
 python3 .claude/hooks/claim.py check $N --token $T     # exit 4: another session holds it; stop, no PR
 git push --force -u origin "HEAD:issue-$N"
-gh pr create --base main --head "issue-$N" --title "<the symptom, short> (#$N)" --body-file /tmp/wrk-$K-$N-pr.md
+gh pr create --base main --head "issue-$N" --title "<the symptom, short> (#$N)" --body-file $ISSUELOOPER_TMP/wrk-$K-$N-pr.md
 gh issue edit $N --add-label stage:pr --remove-label stage:doing,stage:triage,stage:ready,stage:owner
 ```
 
@@ -192,7 +192,7 @@ That is the whole GitHub footprint of a normal unit: the PR and one label edit.
 
 Commit what you have on `issue-$N` (the supervisor pushes it for the next
 worker). Say once on the issue what blocked you and what is left
-(`gh issue comment $N --body-file /tmp/wrk-$K-$N-body.md`, body starting
+(`gh issue comment $N --body-file $ISSUELOOPER_TMP/wrk-$K-$N-body.md`, body starting
 `<!-- worker -->`), then give the claim back:
 
 ```bash

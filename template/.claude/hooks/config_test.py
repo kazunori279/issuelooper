@@ -93,6 +93,34 @@ with tempfile.TemporaryDirectory() as d:
     ).stdout
     check("env cli", "export SWEEP_COMMAND='make verify'" in out, True)
 
+# One scratch directory per repository (#5), and a tester port base picked by its path.
+saved = dict(os.environ)
+try:
+    os.environ.pop("ISSUELOOPER_TMP", None)
+    a = config.scratch_root(pathlib.Path("/srv/x/app"))
+    b = config.scratch_root(pathlib.Path("/srv/y/app"))
+    check("named for the repository, under /tmp", (str(a).startswith("/tmp/issuelooper-app-"), a != b), (True, True))
+    check("the same path, the same directory", config.scratch_root(pathlib.Path("/srv/x/app")), a)
+    ports = {config.tester_port_base(pathlib.Path(f"/srv/r{k}")) for k in range(50)}
+    check("tester ports 8021-8099, varying by repository", (min(ports) >= 8021, max(ports) <= 8099, len(ports) > 10),
+          (True, True, True))
+    os.environ.pop("SWEEP_RECORD_DIR", None)
+    os.environ["ISSUELOOPER_TMP"] = "/tmp/mine"
+    check("ISSUELOOPER_TMP names it", str(config.scratch_root()), "/tmp/mine")
+    check("records go under it; the old shared directory is read too",
+          [str(d) for d in config.record_dirs("sweep")], ["/tmp/mine/sweep", "/tmp/issuelooper-sweep"])
+    os.environ["SWEEP_RECORD_DIR"] = "/x/records"
+    check("an explicit record directory is the only one", [str(d) for d in config.record_dirs("sweep")], ["/x/records"])
+    os.environ.pop("ISSUELOOPER_TMP", None)
+    with tempfile.TemporaryDirectory() as d:
+        set_now = config.apply(pathlib.Path(d))
+        check("apply() exports it, even with no config file",
+              (set_now.get("ISSUELOOPER_TMP"), os.environ.get("ISSUELOOPER_TMP")),
+              (str(config.scratch_root(pathlib.Path(d))),) * 2)
+finally:
+    os.environ.clear()
+    os.environ.update(saved)
+
 if failures:
     print("\n".join(failures))
     sys.exit(1)

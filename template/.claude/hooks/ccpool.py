@@ -61,7 +61,7 @@ UNITS
           POOL_SPEC_GAP_MIN passed; never two at once. Each tester gets its own port.
           A UX run walks the project's journeys script (POOL_UX_JOURNEYS, a path
           in the repository) when there is one, else journeys it keeps in
-          /tmp/issuelooper-<repository directory>/ux/; the score on its report's
+          $ISSUELOOPER_TMP/ux/; the score on its report's
           first line (`Score: N/100`) is logged and shown on the dashboard.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
@@ -97,8 +97,8 @@ wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session. Whatever
 paused, a session is killed at POOL_TIMEOUT_CEILING (1.5) times its timeout of wall
 clock, and counts as timed out. When a
 session ends, processes still running with a working directory in its scratch paths
-(a worker's /tmp/wrk-<seq>-*, a merger's /tmp/mrg-<pr>-*, a tester's
-/tmp/tst-<port>-*) are killed and logged (leftovers_killed); POOL_KILL_LEFTOVERS=0
+(a worker's wrk-<seq>-*, a merger's mrg-<pr>-*, a tester's tst-<port>-*, all under
+$ISSUELOOPER_TMP) are killed and logged (leftovers_killed); POOL_KILL_LEFTOVERS=0
 turns that off.
 
 A worker's prompt quotes its issue (the body and the newest comments) and a map of
@@ -143,7 +143,9 @@ the broker socket with everything since the last one. Not before the monitor's
 first turn (the owner's kickoff), and not more often than POOL_MONITOR_MIN_GAP_S.
 
 Logs: POOL_LOGDIR (default $ISSUELOOPER_RUN/pool): pool.jsonl, state.json, one
-directory per session, deploy.log and deploys.jsonl.
+directory per session, deploy.log and deploys.jsonl. Worktrees and scratch files go
+under the repository's own scratch directory, $ISSUELOOPER_TMP (config.scratch_root),
+which every session inherits.
 """
 
 from __future__ import annotations
@@ -238,6 +240,11 @@ def gap_s(name: str, default_min: float) -> float:
     if os.environ.get(f"{name}_S", "").strip():
         return float(os.environ[f"{name}_S"])
     return float(os.environ.get(f"{name}_MIN", "") or default_min) * 60
+
+
+def scratch(name: str) -> str:
+    """A path under this repository's scratch directory ($ISSUELOOPER_TMP)."""
+    return str(config.scratch_root() / name)
 
 
 def ux_gap_s() -> float:
@@ -393,7 +400,7 @@ class Config:
             worker_wrap_s=float(e("POOL_WORKER_WRAP_S", "2100")),
             # 12 min: workers on slower models ran out of 8 before they had pushed.
             worker_wrap_budget_s=float(e("POOL_WORKER_WRAP_BUDGET_S", "720")),
-            tst_port=env_int("TST_PORT", 8021),
+            tst_port=env_int("TST_PORT", config.tester_port_base()),
             tst_port_step=env_int("POOL_TESTER_PORT_STEP", 100),
             ccrole=e("POOL_CCROLE", str(HERE / "ccrole.sh")),
             render=e("POOL_RENDER", f"python3 {HERE / 'ccloop_render.py'}"),
@@ -1007,7 +1014,7 @@ side, one per claimable issue (pool cap: {pool}). The supervisor has already cla
 Work on #{n} only; do not claim or touch any other issue. Read the issue and its newest
 comments first: an issue that was closed and reopened says there why it came back.
 {pr_text}
-Your paths: worktree /tmp/wrk-{k}-{n}-wt on branch {branch}, scratch files /tmp/wrk-{k}-{n}-*.
+Your paths: worktree {scratch(f"wrk-{k}-{n}-wt")} on branch {branch}, scratch files {scratch(f"wrk-{k}-{n}-")}*.
 {PROJECT} says how to set up a worktree, run the app and where tests go. Put your tests
 in new files named for the issue (such as test_issue_{n}.py in the right test directory);
 never append to a shared test file (that is what makes pull requests conflict).
@@ -1041,7 +1048,7 @@ def merger_prompt(u: Unit, timeout: str) -> str:
 The supervisor merges mergeable pull requests itself; this one conflicts with main, so
 resolving it is yours. The merge stays the supervisor's: the guard refuses `gh pr merge`
 from a merger session, and any write to a PR but #{pr}.
-1. Rebase onto origin/main in /tmp/mrg-{pr}-wt and resolve the conflicts so that both this
+1. Rebase onto origin/main in {scratch(f"mrg-{pr}-wt")} and resolve the conflicts so that both this
    change and what landed on main survive ({PROJECT} says how to set up a worktree).
    Then run `python3 .claude/hooks/sweep_locked.py --update-pr {pr}` there and push with
    --force-with-lease.
@@ -1069,7 +1076,7 @@ Budget: hard wall-clock timeout of {timeout}."""
 def ux_journeys_path() -> str:
     """Where a tester keeps its own journeys when the project has none: per repository,
     so they neither leak into another loop on the machine nor come from one."""
-    return f"/tmp/issuelooper-{repo_root().name}/ux/journeys.py"
+    return scratch("ux/journeys.py")
 
 
 SCORE_LINE = re.compile(r"(?i)\bscore\b\W*(\d{1,3})\s*/\s*100\b")
@@ -1092,7 +1099,7 @@ def ux_score(report: pathlib.Path) -> int | None:
 def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
     rules = (
         f"\n\nYour port is $TST_PORT={port}, yours alone (never the port the project's own run "
-        f"command uses; scratch files and any app database under /tmp/tst-{port}-*). Stop every "
+        f"command uses; scratch files and any app database under {scratch(f'tst-{port}-')}*). Stop every "
         "server you started before you finish. Stay inside your unit. Issues labeled ux:proposed "
         "are proposals waiting for the owner: do not test, comment on or relabel them."
         f"\nBudget: hard wall-clock timeout of {timeout}."
@@ -1134,7 +1141,7 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
     if journeys:
         walk = (f"run the project's journeys, `{journeys}`, from your extracted tree as {PROJECT} says "
                 "(do not write a journeys file of your own; put any probes of your own in "
-                f"/tmp/tst-{port}-probes.py)")
+                f"{scratch(f'tst-{port}-probes.py')})")
     else:
         walk = (f"walk the user journeys in {ux_journeys_path()} (this repository's, kept from run to run; "
                 "write or extend them first if they do not cover what the spec and the recent owner "
@@ -1157,12 +1164,13 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
 
 def review_record(head: str) -> dict:
     """The review gate's record for HEAD ({} if none)."""
-    d = pathlib.Path(os.environ.get("REVIEW_DIR", "") or "/tmp/issuelooper-review")
-    try:
-        rec = json.loads((d / f"{head}.json").read_text())
-    except (OSError, ValueError):
-        return {}
-    return rec if isinstance(rec, dict) else {}
+    for d in config.record_dirs("review"):
+        try:
+            rec = json.loads((d / f"{head}.json").read_text())
+        except (OSError, ValueError):
+            continue
+        return rec if isinstance(rec, dict) else {}
+    return {}
 
 
 def review_reason(head: str) -> str:
@@ -1581,7 +1589,7 @@ class Session(threading.Thread):
 
     def scratch_prefixes(self) -> list[str]:
         """Where this session's worktrees and scratch files live, as the prompts and
-        skills name them: /tmp/wrk-<seq>-*, /tmp/mrg-<pr>-*, /tmp/tst-<port>-*."""
+        skills name them: wrk-<seq>-*, mrg-<pr>-*, tst-<port>-* under $ISSUELOOPER_TMP."""
         u = self.unit
         if u.role == "worker":
             name = f"wrk-{self.seq}-"
@@ -1591,7 +1599,8 @@ class Session(threading.Thread):
             name = f"tst-{self.port}-"
         else:
             return []
-        return sorted({f"{t}/{name}" for t in ("/tmp", os.path.realpath("/tmp"))})
+        root = str(config.scratch_root())
+        return sorted({f"{t}/{name}" for t in (root, os.path.realpath(root))})
 
     def kill_leftovers(self) -> list[int]:
         """Kill the processes still running in this session's scratch paths: servers and
@@ -1715,7 +1724,7 @@ class Session(threading.Thread):
             outcome = "ok"
 
         if u.role == "worker":
-            self.save_wip(f"/tmp/wrk-{self.seq}-*-wt")
+            self.save_wip(scratch(f"wrk-{self.seq}-*-wt"))
             args = [
                 sys.executable,
                 str(HERE / "claim.py"),
@@ -1730,9 +1739,9 @@ class Session(threading.Thread):
             if outcome != "ok":
                 args += ["--reason", f"the worker session {outcome}"]
             self.sh(args, dict(env, CC_ROLE="worker"), "finish")
-            self.cleanup(f"/tmp/wrk-{self.seq}-*-wt")
+            self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
         elif u.role == "merger":
-            self.cleanup(f"/tmp/mrg-{u.number}-wt")
+            self.cleanup(scratch(f"mrg-{u.number}-wt"))
         return outcome
 
     # --- units without an agent ---
@@ -1908,7 +1917,7 @@ class Session(threading.Thread):
             return ""
         root = str(repo_root())
         main = self.git(root, "rev-parse", "origin/main").stdout.strip()
-        wt = f"/tmp/fresh-{pr}"
+        wt = scratch(f"fresh-{pr}")
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
         try:
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
@@ -1942,7 +1951,7 @@ class Session(threading.Thread):
         """fast_check on main itself, once per sha."""
         cache = self.pool.main_checks
         if main not in cache:
-            root, wt = str(repo_root()), f"/tmp/fresh-main-{main[:12]}"
+            root, wt = str(repo_root()), scratch(f"fresh-main-{main[:12]}")
             subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
             try:
                 if self.git(root, "worktree", "add", "-q", "--detach", wt, main).returncode != 0:
@@ -1974,15 +1983,14 @@ class Session(threading.Thread):
             return True
         if SWEEP_WAIVED.search(r.stdout):
             return False
-        records = pathlib.Path(os.environ.get("SWEEP_RECORD_DIR") or "/tmp/issuelooper-sweep")
-        return not (records / f"{head}.json").exists()
+        return not any((d / f"{head}.json").exists() for d in config.record_dirs("sweep"))
 
     def resweep(self, pr: int, branch: str, head: str, env: dict) -> tuple[bool, str]:
         """Run the sweep at the PR's head in a worktree and update the PR body
         (sweep_locked.py --update-pr): (ended green at that head, its output)."""
         if not branch:
             return False, ""
-        root, wt = str(repo_root()), f"/tmp/mrg-{pr}-sweep"
+        root, wt = str(repo_root()), scratch(f"mrg-{pr}-sweep")
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
         try:
             self.git(root, "fetch", "-q", "origin", branch)
@@ -2035,7 +2043,7 @@ class Session(threading.Thread):
         if not branch:
             return "skipped (no branch)"
         root = str(repo_root())
-        wt = f"/tmp/mrg-{pr}-auto"
+        wt = scratch(f"mrg-{pr}-auto")
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
         try:
             for attempt in range(3):  # other units fetch into the same .git (ref lock)
@@ -2220,7 +2228,7 @@ class Session(threading.Thread):
                 self.pool.log("wip_saved", session=self.seq, issue=n, ok=r.returncode == 0)
 
     def cleanup(self, pattern: str):
-        """Remove the session's worktrees, rescuing unpushed work to /tmp/<wt>-rescued.diff."""
+        """Remove the session's worktrees, rescuing unpushed work to <wt>-rescued.diff beside them."""
         root = str(repo_root())
         for wt in glob.glob(pattern):
             git = ["git", "-C", wt]
@@ -2239,7 +2247,7 @@ class Session(threading.Thread):
                 diff = subprocess.run(
                     git + ["diff", "origin/main"], capture_output=True, text=True
                 ).stdout
-                pathlib.Path(f"/tmp/{pathlib.Path(wt).name}-rescued.diff").write_text(diff)
+                pathlib.Path(f"{wt}-rescued.diff").write_text(diff)
                 self.pool.log("rescued", session=self.seq, path=wt)
             if (
                 subprocess.run(
@@ -2293,6 +2301,7 @@ class Pool:
         self.halt = threading.Event()  # set with stopping, for sessions that wait
         self.clock = time.time
         cfg.logdir.mkdir(parents=True, exist_ok=True)
+        config.scratch_root().mkdir(parents=True, exist_ok=True)
         seqf = cfg.logdir / "seq"
         try:
             self.seq = int(seqf.read_text())
@@ -2667,7 +2676,7 @@ class Pool:
         """The sweep at sha in a worktree: (True green, False red, None when it could not
         run; its output)."""
         root = str(repo_root())
-        wt = f"/tmp/issuelooper-main-{sha[:12]}"
+        wt = scratch(f"main-{sha[:12]}")
 
         def git(*a):
             return subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, timeout=300)

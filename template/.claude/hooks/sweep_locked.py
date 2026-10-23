@@ -47,6 +47,8 @@ config.apply()
 
 RUNNER = ".claude/hooks/sweep_run.py"
 LOCK = os.environ.get("SWEEP_LOCK", "/tmp/issuelooper-sweep.lock")
+# The slots are the machine's, shared by every loop on it (unlike the scratch files under
+# $ISSUELOOPER_TMP): they share out its cores, and a lock file left behind holds nothing.
 # SWEEP_SLOTS sweeps may run at once (a full suite is mostly single-threaded, so a
 # many-core host can run several). Slot 0 is LOCK itself and is tried last; slot k
 # is LOCK.k.
@@ -73,7 +75,8 @@ def update_pr(pr: str, sha: str, green: str) -> int:
         body = BODY_GREEN.sub(green, body, count=1)
     else:
         body = body.rstrip("\n") + f"\n\n{green}\n"
-    path = f"/tmp/issuelooper-sweep-pr-{pr}-body.md"
+    config.scratch_root().mkdir(parents=True, exist_ok=True)
+    path = str(config.scratch_root() / f"sweep-pr-{pr}-body.md")
     with open(path, "w") as fh:
         fh.write(body)
     done = subprocess.run([GH, "pr", "edit", pr, "--body-file", path], capture_output=True, text=True)

@@ -31,7 +31,7 @@ Ports 8000 and 8001 are the owner's (`.issuelooper/deploy.sh` serves main there)
 never run `make run` or `make scripted`.
 
 - Scripted (no credentials):
-  `GOOGLE_MAPS_API_KEY= SESSIONS_DB=/tmp/<name>.db CONCIERGE_SCRIPT=spec/fixtures/script.json nohup uv run concierge --port <port> > /tmp/<name>-server.log 2>&1 < /dev/null &`
+  `GOOGLE_MAPS_API_KEY= SESSIONS_DB=$ISSUELOOPER_TMP/<name>.db CONCIERGE_SCRIPT=spec/fixtures/script.json nohup uv run concierge --port <port> > $ISSUELOOPER_TMP/<name>-server.log 2>&1 < /dev/null &`
 - Ready when `curl -sf localhost:<port>/` answers.
 
 ## Look at a change on screen
@@ -70,7 +70,7 @@ your own:
    the first answer, answer every question, and never show "Not delivered", a
    stuck status or a dead input. A step that fails in one of the two runs is a bug.
 3. **Your own probes.** Then up to six actions of your own, in a short Playwright
-   script at `/tmp/tst-$TST_PORT-probes.py` (scratch, not a journeys file), on
+   script at `$ISSUELOOPER_TMP/tst-$TST_PORT-probes.py` (scratch, not a journeys file), on
    whatever looked wrong or untested in the journeys, and every
    `owner-request` that shipped, with a screenshot after each.
 
@@ -85,7 +85,7 @@ Acceptance that needs the real Gemini Live model (live answers, real tool
 calls). Start the app without `CONCIERGE_SCRIPT`, with credentials through a
 symlink into the tree or worktree (`ln -sf "$SHARED_REPO_PATH/.env" .env`;
 a worker removes it before committing):
-`SESSIONS_DB=/tmp/<name>-live.db nohup uv run concierge --port <port> > /tmp/<name>-live.log 2>&1 < /dev/null &`.
+`SESSIONS_DB=$ISSUELOOPER_TMP/<name>-live.db nohup uv run concierge --port <port> > $ISSUELOOPER_TMP/<name>-live.log 2>&1 < /dev/null &`.
 A worker checking a `needs:live` change drives it in English and Japanese when
 the issue concerns language.
 

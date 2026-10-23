@@ -46,7 +46,7 @@ gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many
 idle_gap_minutes = 10        # POOL_UX_IDLE_GAP_MIN: while no worker or merger has work, another UX run after this many minutes
 journeys = ""                # POOL_UX_JOURNEYS: the project's journeys script, a path in the repository (such as
                              # "ux/journeys.py"; project.md says how to run it); empty = the tester writes and keeps
-                             # its own in /tmp/issuelooper-<repository directory>/ux/
+                             # its own in $ISSUELOOPER_TMP/ux/
 
 [spec]
 enabled = false              # POOL_SPEC: while no worker or merger has work, or half of max_sessions is idle, a
@@ -67,7 +67,8 @@ max_sessions = 8             # POOL_MAX_WORKERS: agent sessions running at once,
 worker_timeout = "45m"       # POOL_TIMEOUT_WORKER
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
-tester_port_base = 8021      # TST_PORT: the first port handed to a tester
+# tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
+                             # the repository's path, so loops for two repositories rarely share ports
 
 [guard]
 secret_urls = []             # GUARD_SECRET_URLS: URL paths whose response holds a secret; fetching them unfiltered is refused
