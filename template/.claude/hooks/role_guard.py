@@ -719,6 +719,68 @@ def kill_by_pattern_check(command: str) -> None:
         )
 
 
+# One `git` call: its global options (-C <dir>, -c <k=v>, --long[=v]) and its subcommand.
+GIT_CALL = re.compile(
+    r"""\bgit((?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)|--[\w-]+(?:=\S+)?))*)\s+([a-z][\w-]*)"""
+)
+GIT_C_DIR = re.compile(r"""-C\s+("[^"]*"|'[^']*'|[^\s;&|]+)""")
+CD_DIR = re.compile(r"""(?:^|[;&|(\n])\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|)]+)""")
+# Subcommands that change the checkout they run in: its files, index, HEAD or branch.
+CHECKOUT_WRITES = {
+    "reset", "checkout", "switch", "restore", "clean", "rebase", "merge", "pull", "commit",
+    "cherry-pick", "revert", "am", "apply", "rm", "mv", "stash",
+}
+
+
+def is_shared_dir(path: str | None) -> bool:
+    """Whether a directory, as written in a command, is the shared checkout. None is a
+    command with no `cd` or `-C`: it runs in the session's working directory, which is
+    the shared checkout unless the host says otherwise (agy starts each command there)."""
+    if path is None:
+        return True
+    path = path.strip("\"'")
+    if path.rstrip("/") in ("$SHARED_REPO_PATH", "${SHARED_REPO_PATH}"):
+        return True
+    if "$" in path or not path.startswith(("/", "~")):
+        return False  # another variable or a relative path: not known to be it
+    shared = get_shared_repo_dir()
+    return bool(shared) and os.path.realpath(os.path.expanduser(path)) == os.path.realpath(shared)
+
+
+def git_checkout_check(command: str, cwd: str | None) -> None:
+    """No `git stash` anywhere, and nothing that changes the shared checkout. A worker's
+    `git stash push` in its worktree (the stash is one stack, refs/stash, for the shared
+    checkout and every worktree) left the shared checkout conflicted; merges stopped on
+    Gate 0 for ten minutes, until the worker ran `reset --hard` there."""
+    for m in GIT_CALL.finditer(command):
+        sub = m.group(2)
+        if sub == "stash":
+            block(
+                "`git stash` is refused. The stash is one stack shared by the shared checkout and "
+                "every worktree (refs/stash), so what one session stashes another can pop into the "
+                "wrong checkout; one stash left the shared checkout conflicted and stopped every merge.\n\n"
+                "Commit work in progress on your issue branch instead (`git commit -m \"WIP ...\"`, "
+                "amended or squashed later). To see origin/main without your change, add a second "
+                "worktree: `git -C \"$SHARED_REPO_PATH\" worktree add --detach /tmp/<your prefix>-base-wt origin/main`."
+            )
+        if sub not in CHECKOUT_WRITES:
+            continue
+        dirs = GIT_C_DIR.findall(m.group(1))
+        if dirs:
+            where = dirs[-1]
+        else:
+            cds = [c for c in CD_DIR.finditer(command) if c.start() < m.start()]
+            where = cds[-1].group(1) if cds else cwd
+        if is_shared_dir(where):
+            block(
+                f"`git {sub}` would change the shared checkout ($SHARED_REPO_PATH). The supervisor "
+                "merges and deploys from it, and Gate 0 stops every merge while it is not clean.\n\n"
+                "Run git in your own worktree: `cd <your worktree> && git ...` in the same command, "
+                "or `git -C <your worktree> ...`. If the shared checkout itself is dirty or "
+                "conflicted, say so on your issue and leave it to the owner."
+            )
+
+
 def secret_check(command: str) -> None:
     """Refuse an unfiltered fetch of a $GUARD_SECRET_URLS path. Binds every role."""
     if not FETCHERS.search(command):
@@ -1821,6 +1883,9 @@ def main(raw: str) -> None:
     # Before the write test, because this one is not a `gh` write.
     secret_check(command)
     kill_by_pattern_check(command)
+    if role in ROLES:
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        git_checkout_check(command, cwd or None)
 
     if role == "worker":
         worker_git_check(command)

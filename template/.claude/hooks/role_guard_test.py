@@ -60,10 +60,14 @@ def run(
     role: str = "monitor",
     host: str = CLAUDE,
     extra_env: dict | None = None,
+    cwd: str | None = None,
 ) -> tuple[str, str]:
-    """Returns (verdict, reason), verdict in {"allow", "refuse"}."""
+    """Returns (verdict, reason), verdict in {"allow", "refuse"}. cwd: Claude Code's
+    working directory for the call (agy sends none)."""
     if host == CLAUDE:
         payload = {"tool_input": {"command": command}, "session_id": "test-session"}
+        if cwd:
+            payload["cwd"] = cwd
     else:
         payload = {
             "toolCall": {"name": "run_command", "args": {"CommandLine": command}},
@@ -1753,7 +1757,8 @@ def test_worker_git_boundaries() -> None:
     check("worker staging .issuelooper/ is refused", verdict, "refuse")
     verdict, _ = run("git commit --no-verify -m fix", role="worker")
     check("worker --no-verify is refused", verdict, "refuse")
-    verdict, _ = run("git add src tests && git commit -m 'fix the weather card'", role="worker")
+    verdict, _ = run("git add src tests && git commit -m 'fix the weather card'", role="worker",
+                     cwd="/tmp/wrk-3-12-wt")
     check("worker committing project files is allowed", verdict, "allow")
     verdict, _ = run("git push origin main", role="merger")
     check("the push rule is the worker's only (merger unchanged)", verdict, "allow")
@@ -1761,6 +1766,41 @@ def test_worker_git_boundaries() -> None:
     check("a command ends at a newline: `main` on the next line is not the push's", verdict, "allow")
     verdict, _ = run("cd /tmp/wrk-3-12-wt\ngit push origin HEAD:main", role="worker")
     check("a push to main on its own line is still refused", verdict, "refuse")
+
+
+def test_git_stash_and_the_shared_checkout() -> None:
+    # A worker's `git stash push` in its worktree left the shared checkout conflicted
+    # (worktrees share refs/stash with it), and merges stopped on Gate 0.
+    for role in ("worker", "merger", "tester", "monitor", "aide"):
+        for cmd in ("cd /tmp/wrk-3-12-wt && git stash push -u -q", "git -C /tmp/wrk-3-12-wt stash",
+                    "git stash pop", "cd /tmp/x\ngit -c user.name=x stash list"):
+            verdict, reason = run(cmd, role=role)
+            check(f"{cmd!r} is refused for {role}", verdict, "refuse")
+        check(f"the refusal for {role} says to commit work in progress", "Commit work in progress" in reason, True)
+    verdict, _ = run("git stash list", role="")
+    check("a session with no role (the owner's own) is not bound", verdict, "allow")
+    shared = os.environ["SHARED_REPO_PATH"]
+    for cmd in (f"git -C {shared} reset --hard HEAD", 'git -C "$SHARED_REPO_PATH" checkout -- src/a.py',
+                f"cd {shared} && git clean -fd", "git reset --hard origin/main", "git pull --rebase",
+                "cd /tmp/wrk-3-12-wt && git status; cd $SHARED_REPO_PATH; git commit -am x"):
+        verdict, reason = run(cmd, role="worker")
+        check(f"changing the shared checkout is refused: {cmd!r}", verdict, "refuse")
+    check("and the refusal says where to run git", "your own worktree" in reason, True)
+    verdict, _ = run("git reset --hard origin/main", role="worker", cwd=shared)
+    check("Claude Code's cwd at the shared checkout counts too", verdict, "refuse")
+    for cmd in ('git -C "$SHARED_REPO_PATH" fetch -q origin main',
+                'git -C "$SHARED_REPO_PATH" worktree add -B issue-12 /tmp/wrk-3-12-wt origin/main',
+                'git -C "$SHARED_REPO_PATH" archive abc | tar -x -C /tmp/tst-8021-tree',
+                "cd /tmp/wrk-3-12-wt && git reset --hard origin/main && git rebase origin/main",
+                'git -C "$WT" rebase origin/main', "git status", "git log --oneline -3 origin/main"):
+        verdict, _ = run(cmd, role="worker")
+        check(f"allowed: {cmd!r}", verdict, "allow")
+    verdict, _ = run("git commit -m 'fix'", role="worker", cwd="/tmp/wrk-3-12-wt")
+    check("a bare commit in Claude Code's worktree cwd is allowed", verdict, "allow")
+    verdict, _ = run("cd /tmp/wrk-3-12-wt && git commit -m fix", role="worker", host=AGY)
+    check("agy: a commit after cd into the worktree is allowed", verdict, "allow")
+    verdict, _ = run("git commit -m fix", role="worker", host=AGY)
+    check("agy: a bare commit runs in the shared checkout and is refused", verdict, "refuse")
 
 
 def test_worker_pr_create_is_gated_and_signed() -> None:

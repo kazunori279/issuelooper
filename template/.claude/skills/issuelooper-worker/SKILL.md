@@ -118,8 +118,9 @@ the app from your worktree on a free port, in the background, as *Run the app on
 a port* says, and wait until it answers. Write a short script that replays **the
 exact steps** of the issue's reproduction, or of the report your prompt quotes,
 step by step from a fresh start, not a shortcut to the end state. Save
-screenshots under `/tmp/wrk-$K-$N-shots/`, before your change (on `origin/main`,
-from a `git stash` of your work or a second checkout) and after it, the last one
+screenshots under `/tmp/wrk-$K-$N-shots/`, before your change (on `origin/main`, from
+a second worktree: `git -C "$SHARED_REPO_PATH" worktree add --detach /tmp/wrk-$K-$N-base-wt origin/main`;
+never `git stash`, which the guard refuses) and after it, the last one
 showing the state the issue is about. Open them and compare: the symptom is gone,
 and nothing next to it broke (overlap, cut-off text, a control that moved). Fix
 what you see, then stop the server by its port (`lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, never
