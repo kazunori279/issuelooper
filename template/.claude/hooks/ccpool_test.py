@@ -2115,7 +2115,8 @@ def test_ux_runs_never_run_out() -> None:
     )
 
 
-def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, record: bool = False):
+def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, record: bool = False,
+                    main_check: dict | None = None):
     """auto_merge with a fake resweep that notes whether the merge lock was held, a gh
     whose `pr view` prints `body` (None: gh pr view fails), and a guard script."""
     calls = []
@@ -2149,6 +2150,7 @@ def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, 
             ccpool.Config(logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=str(guard)),
             fetcher=state, spawn=False,
         )
+        pool.main_check_last = main_check or {}
         u = ccpool.Unit("auto", "merge", "merge:9@x", "mrg:9", 9, (0, 9),
                         {"issue": 2, "head": "c" * 40, "mergeable": "MERGEABLE", "branch": "issue-2"})
         w = ccpool.Session(pool, u, 1)
@@ -2167,6 +2169,26 @@ def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, 
 ALLOW_SH = "echo '{\"decision\": \"allow\"}'\n"
 SWEEP_REFUSED_ONCE = ("if [ -e {d}/once ]; then " + ALLOW_SH.strip() + "; else touch {d}/once; "
                       "echo '{\"decision\": \"block\", \"reason\": \"No sweep record for this head.\"}'; fi\n")
+
+
+def test_a_red_resweep_on_a_red_main_is_held() -> None:
+    """PR #159 was handed back for the two tests that had just turned main red."""
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    refuse = "echo '{\"decision\": \"block\", \"reason\": \"does not match Sweep SHA\"}'\n"
+    red = {"sha": "d" * 40, "ok": False, "failing": ["tests/e2e/test_issue_20.py::test_map",
+                                                     "tests/e2e/test_issue_20.py::test_mobile"]}
+    outcome, calls, log, pool = resweep_session(stale, refuse, sweep_ok=False, main_check=red)
+    check("main fails the same tests: held, not handed back, the monitor hears it",
+          (outcome, "pr comment" in log, "issue edit" in log, any("not handed back" in e for e in pool.events)),
+          ("held (main dddddddd is red with the same failures)", False, False, True))
+    other = {**red, "failing": ["tests/e2e/test_issue_14.py::test_restart"]}
+    outcome, _, log, _ = resweep_session(stale, refuse, sweep_ok=False, main_check=other)
+    check("main red on other tests: the PR's own failure, handed back",
+          (outcome, "pr comment 9" in log), ("refused by the merge gates (handed back)", True))
+    outcome, _, _, _ = resweep_session(stale, refuse, sweep_ok=False, main_check={**red, "ok": True})
+    check("main green: handed back", outcome, "refused by the merge gates (handed back)")
+    outcome, _, _, _ = resweep_session(stale, refuse, sweep_ok=False)
+    check("no main check yet: handed back, as before", outcome, "refused by the merge gates (handed back)")
 
 
 def test_auto_merge_resweeps_outside_the_merge_lock() -> None:

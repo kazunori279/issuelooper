@@ -1814,7 +1814,10 @@ class Session(threading.Thread):
             # without a sweep, and re-sweeping it (5-10 minutes) under the lock held every
             # other merge, whose PRs then conflicted again and got mergers of their own.
             if swept is None and (attempt or self.needs_sweep(pr, head)):
-                swept, _ = self.resweep(pr, branch, head, env)
+                swept, out = self.resweep(pr, branch, head, env)
+                held = "" if swept else self.red_like_main(pr, out)
+                if held:
+                    return held
             with self.pool.merge_lock:
                 # A head swept on an older main says nothing about the merged result: one PR
                 # moved an import, another (swept before it) still used it, GitHub saw no
@@ -1849,6 +1852,19 @@ class Session(threading.Thread):
         )
         self.note_large_files(pr)
         return "ok"
+
+    def red_like_main(self, pr: int, out: str) -> str:
+        """'' unless the re-sweep's failures are main's own: the latest main check is red
+        and fails every test (or reason) this sweep failed. Then the PR is held, not handed
+        back; a later poll sweeps it again. PR #159 was handed back for the two tests that
+        had just turned main red, as the merged-tree check already avoids (main_ok)."""
+        failing = failing_tests(out)
+        last = self.pool.main_check_last
+        if not failing or last.get("ok") is not False or not set(failing) <= set(last.get("failing") or []):
+            return ""
+        self.pool.event(f"PR #{pr} not handed back: its sweep fails only where main {str(last.get('sha'))[:8]} "
+                        f"fails too ({', '.join(failing[:3])}); tried again on a later poll")
+        return f"held (main {str(last.get('sha'))[:8]} is red with the same failures)"
 
     def land(self, pr: int, n: int, head: str, verdict: dict) -> str:
         """Act on the gates' verdict, under the merge lock: '' once merged, else the
@@ -2689,7 +2705,7 @@ class Pool:
     def main_checked(self, sha: str, ok: bool | None, out: str):
         failing = failing_tests(out) if ok is False else []
         with self.lock:
-            self.main_check_last = {"sha": sha, "ok": ok, "t": round(time.time(), 1), "failing": failing[:5]}
+            self.main_check_last = {"sha": sha, "ok": ok, "t": round(time.time(), 1), "failing": failing[:50]}
         self.log("main_check", sha=sha[:12], ok=ok, failing=failing[:5])
         if ok is None:
             return  # it could not run; the next main gets a check

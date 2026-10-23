@@ -75,7 +75,9 @@ supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
 background, one run at a time. A red `main` tells the monitor and files an issue
 titled `main is red: <failing tests>` (P0) with the failing tests, the commits since
 the last green `main` and the end of the output; the next green `main` closes it.
-Merges do not wait for it. `[sweep] main_check = false` turns it off.
+Merges do not wait for it, and a PR whose re-sweep fails only where that red `main`
+fails is held for a later try rather than handed back. `[sweep] main_check = false`
+turns it off.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
