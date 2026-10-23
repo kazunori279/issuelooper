@@ -1994,8 +1994,8 @@ class Session(threading.Thread):
         """POOL_FAST_CHECK_CMD in a worktree: (passed, the tail of its output)."""
         cfg = self.pool.cfg
         try:
-            r = subprocess.run(["bash", "-c", cfg.fast_check_cmd], cwd=wt, env=env, stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=cfg.fast_check_s)
+            r = self.pool.run_owned(["bash", "-c", cfg.fast_check_cmd], cfg.fast_check_s, cwd=wt, env=env,
+                                    stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return False, f"the fast check timed out after {cfg.fast_check_s:.0f} s"
         return r.returncode == 0, (r.stdout + r.stderr).strip()[-1500:]
@@ -2094,9 +2094,8 @@ class Session(threading.Thread):
             self.git(root, "fetch", "-q", "origin", branch)
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
                 return False, ""
-            r = subprocess.run(
-                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)],
-                cwd=wt, env=env, capture_output=True, text=True, timeout=2400,
+            r = self.pool.run_owned(
+                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)], 2400, cwd=wt, env=env,
             )
             self.note(f"resweep exit {r.returncode}: {(r.stdout + r.stderr).strip()[-400:]}")
             return r.returncode == 0 and "green" in r.stdout, r.stdout + r.stderr
@@ -2176,9 +2175,8 @@ class Session(threading.Thread):
                     self.git(wt, "add", f, check=True)
                 r = self.git(wt, *diff3, "rebase", "--continue", env=gitenv)
             self.pool.record_conflicts(pr, files_seen)
-            sweep = subprocess.run(
-                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)],
-                cwd=wt, env=env, capture_output=True, text=True, timeout=2400,
+            sweep = self.pool.run_owned(
+                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)], 2400, cwd=wt, env=env,
             )
             self.note(f"sweep exit {sweep.returncode}: {(sweep.stdout + sweep.stderr).strip()[-600:]}")
             if sweep.returncode != 0 or "green" not in sweep.stdout:
@@ -2387,6 +2385,8 @@ class Pool:
         self.main_checks: dict[str, bool] = {}  # main sha -> its fast check passed
         self.main_check_sha = ""  # the newest main a full check started on
         self.main_check_running = False
+        self.main_check_thread: threading.Thread | None = None
+        self.owned: set[subprocess.Popen] = set()  # the supervisor's own long commands (run_owned)
         self.main_check_last: dict = {}  # {sha, ok, t, failing}: the last full check that finished
         self.main_green = ""  # the last main whose full check was green
         self.red_issue: int | None = None  # the open `main is red` issue
@@ -2760,7 +2760,8 @@ class Pool:
             if not self.cfg.main_check or not main or self.main_check_running or main == self.main_check_sha:
                 return
             self.main_check_running, self.main_check_sha = True, main
-        threading.Thread(target=self.check_main, args=(main,), daemon=True).start()
+        self.main_check_thread = threading.Thread(target=self.check_main, args=(main,), daemon=True)
+        self.main_check_thread.start()
 
     def check_main(self, sha: str):
         try:
@@ -2791,9 +2792,8 @@ class Pool:
                 return None, f"could not add a worktree at {sha[:12]}"
             # In its own lane: it ran after every merge, and in a sweep slot it held one of
             # the sessions' slots for over half the run.
-            r = subprocess.run([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"], cwd=wt,
-                               env=dict(os.environ),
-                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3600)
+            r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"], 3600, cwd=wt,
+                               env=dict(os.environ), stdin=subprocess.DEVNULL)
             out = r.stdout + r.stderr
             if r.returncode == 0 and "green" in r.stdout:
                 return True, out
@@ -3207,15 +3207,49 @@ class Pool:
         deadline = time.time() + timeout
         for w in list(self.sessions.values()):
             w.join(timeout=max(0.0, deadline - time.time()))
+        if self.main_check_thread is not None:  # so it removes its worktree
+            self.main_check_thread.join(timeout=max(0.0, deadline - time.time()))
 
     def stop(self, *_):
-        with self.lock:  # Session.session starts its process under this lock
+        with self.lock:  # Session.session and run_owned start their processes under this lock
             self.stopping = True
             self.halt.set()
             sessions = list(self.sessions.values())
+            owned = list(self.owned)
         self.wake.set()
         for w in sessions:
             w.kill()
+        for proc in owned:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    def run_owned(self, args: list[str], timeout: float, **kw) -> subprocess.CompletedProcess:
+        """subprocess.run for the supervisor's own long commands (the main check, re-sweeps,
+        fast checks), in a process group of their own that stop() ends: a main check went
+        on for six minutes after `issuelooper stop --all`. Output captured as text; once
+        stopping, nothing starts."""
+        kw.setdefault("stdout", subprocess.PIPE)
+        kw.setdefault("stderr", subprocess.PIPE)
+        with self.lock:
+            if self.stopping:
+                return subprocess.CompletedProcess(args, -signal.SIGTERM, "", "stopped with the supervisor")
+            proc = subprocess.Popen(args, start_new_session=True, text=True, **kw)
+            self.owned.add(proc)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.communicate()
+            raise
+        finally:
+            with self.lock:
+                self.owned.discard(proc)
+        return subprocess.CompletedProcess(args, proc.returncode, out or "", err or "")
 
 
 def cmd_run(_a) -> int:

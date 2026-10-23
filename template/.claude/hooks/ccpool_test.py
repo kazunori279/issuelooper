@@ -2026,6 +2026,42 @@ def test_stop_catches_a_session_still_starting() -> None:
     check("a session running when stop() comes is killed", (rc != 0, time.time() - t0 < 25), (True, True))
 
 
+def test_stop_ends_the_supervisors_own_commands() -> None:
+    """A main check went on for six minutes after `stop --all` (and left its worktree)."""
+    h = Rig(state())
+    pool = h.pool
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-owned-"))
+    result = {}
+
+    def check_main():
+        result["r"] = pool.run_owned(["bash", "-c", f"sleep 30; touch {d}/finished"], 120)
+        result["after"] = True  # where the worktree would be removed
+    pool.main_check_thread = threading.Thread(target=check_main, daemon=True)
+    pool.main_check_thread.start()
+    for _ in range(50):
+        if pool.owned:
+            break
+        time.sleep(0.05)
+    t0 = time.time()
+    pool.stop()
+    pool.drain(timeout=10)
+    check("stop() ends a running supervisor command, and drain() waits for its thread",
+          (result.get("r") is not None and result["r"].returncode != 0, result.get("after"), time.time() - t0 < 5,
+           (d / "finished").exists()), (True, True, True, False))
+    r = pool.run_owned(["bash", "-c", f"touch {d}/started"], 10)
+    check("once stopping, none starts", (r.returncode != 0, (d / "started").exists()), (True, False))
+    fresh = Rig(state()).pool
+    check("otherwise it runs and returns its output",
+          (fresh.run_owned(["bash", "-c", "echo hi; echo err >&2; exit 3"], 10).returncode,
+           fresh.run_owned(["bash", "-c", "echo hi"], 10).stdout), (3, "hi\n"))
+    try:
+        fresh.run_owned(["bash", "-c", "sleep 5"], 0.5)
+        timed = False
+    except subprocess.TimeoutExpired:
+        timed = True
+    check("a timeout raises, as subprocess.run's does", timed, True)
+
+
 def test_stop_lets_sessions_release_their_claims() -> None:
     """`issuelooper stop` kills the sessions; each must still save its work and put its
     claim back, without a failed attempt, before the supervisor exits. Otherwise a
