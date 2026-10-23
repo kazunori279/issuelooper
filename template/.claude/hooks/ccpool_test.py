@@ -2178,7 +2178,7 @@ def test_ux_runs_never_run_out() -> None:
 
 
 def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, record: bool = False,
-                    main_check: dict | None = None):
+                    main_check: dict | None = None, sweeps: list | None = None):
     """auto_merge with a fake resweep that notes whether the merge lock was held, a gh
     whose `pr view` prints `body` (None: gh pr view fails), and a guard script."""
     calls = []
@@ -2187,6 +2187,8 @@ def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, 
 
     def fake(self, pr, branch, head, env):
         calls.append((pr, branch, head, self.pool.merge_lock.locked()))
+        if sweeps:
+            return sweeps.pop(0)
         return sweep_ok, "FAILED tests/e2e/test_issue_20.py::test_map - boom\n" if not sweep_ok else "281 green"
 
     ccpool.Session.resweep = fake
@@ -2251,6 +2253,26 @@ def test_a_red_resweep_on_a_red_main_is_held() -> None:
     check("main green: handed back", outcome, "refused by the merge gates (handed back)")
     outcome, _, _, _ = resweep_session(stale, refuse, sweep_ok=False)
     check("no main check yet: handed back, as before", outcome, "refused by the merge gates (handed back)")
+
+
+RED_SWEEP = ("tests/unit .....F\nFAILED tests/unit/test_issue_50.py::test_cli_exits - AssertionError\n"
+             "1 failed, 64 passed in 14.50s\n\n== sweep is red ==\n   `make verify` exited 2\n")
+
+
+def test_a_red_resweep_is_handed_back_with_its_failures() -> None:
+    """PRs #110, #126 and #140 were handed back with "does not match Sweep SHA" or "missing
+    the green line" when their re-sweep was red; the failing tests were not named."""
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    outcome, calls, log, pool = resweep_session(stale, ALLOW_SH, sweeps=[(False, RED_SWEEP), (False, RED_SWEEP)])
+    check("handed back for the red sweep, not by the gates, never merged",
+          (outcome, "pr merge" in log, "Sweep SHA" in log.split("pr comment 9", 1)[-1].split("issue edit")[0]),
+          ("sweep red at the head (handed back)", False, False))
+    check("the comment names the failing test and quotes the output",
+          ("tests/unit/test_issue_50.py::test_cli_exits" in log, "1 failed, 64 passed" in log), (True, True))
+    outcome, _, log, _ = resweep_session(stale, "echo '{\"decision\": \"block\", \"reason\": "
+                                                "\"does not match Sweep SHA\"}'\n", sweep_ok=False)
+    check("a re-sweep that did not run (no red sweep in its output): the gates decide, as before",
+          outcome, "refused by the merge gates (handed back)")
 
 
 def test_auto_merge_resweeps_outside_the_merge_lock() -> None:

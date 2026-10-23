@@ -1835,6 +1835,8 @@ class Session(threading.Thread):
                 held = "" if swept else self.red_like_main(pr, out)
                 if held:
                     return held
+                if swept is False and "== sweep is red ==" in out:
+                    return self.sweep_hand_back(pr, n, head, out)
             with self.pool.merge_lock:
                 # A head swept on an older main says nothing about the merged result: one PR
                 # moved an import, another (swept before it) still used it, GitHub saw no
@@ -1869,6 +1871,20 @@ class Session(threading.Thread):
         )
         self.note_large_files(pr)
         return "ok"
+
+    def sweep_hand_back(self, pr: int, n: int, head: str, out: str) -> str:
+        """Hand the PR back for its red sweep, with what failed. Handed back by the gates
+        instead, the comment said "does not match Sweep SHA" or "missing the green line",
+        and the worker had to find the failing tests itself (PRs #110, #126, #140)."""
+        failing = failing_tests(out)
+        self.hand_back(pr, n, (
+            f"**Not merged: the sweep at this head ({head[:8]}) is red.** The supervisor ran the full "
+            "check suite on it before the merge, and these fail (main does not fail them):\n\n"
+            + ("\n".join(f"- `{t}`" for t in failing[:20]) or "- (no test named; see the output)")
+            + "\n\nThe end of the output:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3) + "\n```\n\n"
+            "Fix it in your worktree, then sweep and push."))
+        self.pool.log("handback", pr=pr, issue=n, by="sweep", reason=(failing or ["the sweep is red"])[0][:200])
+        return "sweep red at the head (handed back)"
 
     def red_like_main(self, pr: int, out: str) -> str:
         """'' unless the re-sweep's failures are main's own: the latest main check is red
