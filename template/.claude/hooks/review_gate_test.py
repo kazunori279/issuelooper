@@ -411,6 +411,31 @@ try:
         (cut, "is_legacy_mock" in text, text.startswith("diff --git a/src/places.py"), "tests/test_big.py" in text),
         (True, True, True, True),
     )
+    gone = rg.left_out(tests + long_prod, text)
+    check("what was left out: the test file, the production file whole",
+          gone, [("tests/test_big.py", "cut", False)])
+    check("and the prompt says so", rg.cut_note(gone),
+          "; every production file is whole; left out of other files: `tests/test_big.py` (cut)")
+    many = diff_for([(f"tests/test_{k}.py", ["x" * 300] * 10) for k in range(30)] + [("src/a.py", ["y"] * 5)])
+    text, _ = rg.cap_diff(many, 3000)
+    note = rg.cut_note(rg.left_out(many, text))
+    check("many test files left out: named, then counted", ("every production file is whole" in note,
+          "(omitted)" in note, "more" in note), (True, True, True))
+    huge = diff_for([("src/one.py", ["z" * 100] * 80), ("src/two.py", ["w" * 100] * 80)])
+    text, _ = rg.cap_diff(huge, 6000)
+    check("production cut: the prompt names it", rg.cut_note(rg.left_out(huge, text)),
+          "; production files not whole: `src/one.py` (cut), `src/two.py` (cut)")
+    serve(7, "a7" * 20, [("src/a.py", ["price = item.get('price')"]), ("tests/test_a.py", ["x" * 100] * 60)])
+    keep_chars = rg.MAX_CHARS
+    rg.MAX_CHARS = 2500
+    try:
+        REPLY["value"] = '{"verdict": "pass", "reason": "fine"}'
+        rg.review(7, hand=False)
+    finally:
+        rg.MAX_CHARS = keep_chars
+    check("a review over the limit: the prompt and the record say what was left out",
+          ("(cut to 2500 characters; every production file is whole; left out of other files: `tests/test_a.py` (cut))"
+           in PROMPTS[-1], record("a7" * 20)["left_out"]), (True, ["tests/test_a.py (cut)"]))
     unchanged = ("diff --git a/src/a.py b/src/a.py\n@@ -1,40 +1,41 @@\n" + " ctx\n" * 20 + "+new\n"
                  + " ctx\n" * 20)
     check("context far from a change is dropped", rg.compact(unchanged).count(" ctx"), 6)

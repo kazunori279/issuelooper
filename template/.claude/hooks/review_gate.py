@@ -424,6 +424,29 @@ def summarize_moves(diff: str, min_lines: int = 4, min_chars: int = 60) -> tuple
     return "".join(out), folded
 
 
+def left_out(diff: str, text: str) -> list[tuple[str, str, bool]]:
+    """What cap_diff left out of `text`: (path, "cut" or "omitted", production?) for each
+    file whose part is not whole in it."""
+    out = []
+    for path, part in split_files(diff):
+        if compact(part) in text or part in text:
+            continue
+        head = part.splitlines()[0] if part else ""
+        out.append((path, "cut" if head and head in text else "omitted", is_prod(path)))
+    return out
+
+
+def cut_note(gone: list[tuple[str, str, bool]]) -> str:
+    """The prompt's account of what is not in the diff it shows. Ordinary PRs passed on
+    diffs cut at REVIEW_CHARS; in the fifth run only test files were cut, but the
+    prompt only said "cut", so the judge could not tell."""
+    prod = [f"`{p}` ({how})" for p, how, is_p in gone if is_p]
+    rest = [f"`{p}` ({how})" for p, how, is_p in gone if not is_p]
+    more = f" and {len(rest) - 20} more" if len(rest) > 20 else ""
+    return (f"; production files not whole: {', '.join(prod)}" if prod else "; every production file is whole") + (
+        f"; left out of other files: {', '.join(rest[:20])}{more}" if rest else "")
+
+
 def diff_key(diff: str) -> str:
     """The diff without line numbers and blob ids: equal across a clean rebase."""
     keep = [ln for ln in diff.splitlines() if not ln.startswith(("index ", "@@"))]
@@ -682,7 +705,7 @@ def parse_verdict(reply) -> dict:
     }
 
 
-def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0) -> str:
+def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "") -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
@@ -697,7 +720,7 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
         "TRUNC": "".join(
             [f" (a split: {moved} lines it moves verbatim are summarized in `[moved verbatim ...]` lines; "
              "the code they stand for is unchanged from main)" if moved else "",
-             f" (cut to {MAX_CHARS} characters)" if cut else ""]
+             f" (cut to {MAX_CHARS} characters{note})" if cut else ""]
         ),
         "DIFF": text,
     }
@@ -898,8 +921,9 @@ def review(pr: int, hand: bool = True) -> int:
     if len(diff) > MAX_CHARS and is_split_issue(repo, issue):
         shown, moved = summarize_moves(diff)
     text, cut = cap_diff(shown, MAX_CHARS)
+    gone = left_out(shown, text) if cut else []
     prompt = build_prompt(
-        issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved
+        issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone)
     )
     hints = {
         "key": key,
@@ -909,6 +933,7 @@ def review(pr: int, hand: bool = True) -> int:
         "chars": len(text),
         "cut": cut,
         "moved": moved,
+        "left_out": [f"{p} ({how})" for p, how, _ in gone][:30],
     }
     by = judge_name()
     t0 = time.time()
