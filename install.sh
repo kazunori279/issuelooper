@@ -3,17 +3,20 @@
 #
 #   ./install.sh <repo-dir>              install, create the labels, commit (no push)
 #   ./install.sh <repo-dir> --upgrade    replace the framework files, keep .issuelooper/
-#   options: --no-labels  skip creating the GitHub labels
-#            --no-commit  leave the changes staged instead of committing
+#   options: --no-labels    skip creating the GitHub labels
+#            --no-commit    leave the changes staged instead of committing
+#            --force        overwrite files at the framework's paths that are not an
+#                           earlier install's (listed and refused otherwise)
 #
-# What it writes into <repo-dir>:
+# What it writes into <repo-dir>, and the only files it stages:
 #   .claude/hooks/                 the supervisor, guard, sweep, review gate and launcher
 #   .claude/skills/issuelooper-*   what each role's agent reads
 #   .claude/settings.json          the role_guard hook for Claude Code (merged)
 #   .agents/                       the same hook, skills and rules for agy (merged)
-#   .githooks/                     protect .claude/ and main (only if absent)
+#   .githooks/                     protect .claude/ and main (only files that are absent)
 #   .issuelooper/                  config.toml, project.md, review_rules.md (only if absent)
 #   docs/agent-framework.md, a section in CLAUDE.md, .gitignore entries
+# Other files under those directories, tracked or not, are neither changed nor staged.
 set -euo pipefail
 
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -21,18 +24,19 @@ say() { printf '%s\n' "$*"; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TPL="$HERE/template"
-upgrade=0 labels=1 commit=1 repo=""
+upgrade=0 labels=1 commit=1 force=0 repo=""
 for a in "$@"; do
   case "$a" in
     --upgrade) upgrade=1 ;;
     --no-labels) labels=0 ;;
     --no-commit) commit=0 ;;
+    --force) force=1 ;;
     -h|--help) awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; exit 0 ;;
     -*) die "unknown option $a" ;;
     *) [ -z "$repo" ] || die "one repository at a time"; repo="$a" ;;
   esac
 done
-[ -n "$repo" ] || die "usage: install.sh <repo-dir> [--upgrade] [--no-labels] [--no-commit]"
+[ -n "$repo" ] || die "usage: install.sh <repo-dir> [--upgrade] [--no-labels] [--no-commit] [--force]"
 REPO="$(cd "$repo" && pwd -P)" || die "no such directory: $repo"
 
 # --- prerequisites ---------------------------------------------------------------
@@ -45,11 +49,60 @@ if [ -e "$REPO/.claude/hooks/ccpool.py" ] && [ "$upgrade" = 0 ]; then
   die "$REPO already has issuelooper; run with --upgrade to replace the framework files"
 fi
 
-# --- framework files (replaced on upgrade) -----------------------------------------
-mkdir -p "$REPO/.claude/hooks" "$REPO/.claude/skills" "$REPO/.agents/rules" "$REPO/.agents/skills" "$REPO/docs"
+# --- what this run writes, and what it would overwrite ---------------------------------
+# managed: the paths written (relative to REPO), the only ones staged at the end.
+# A path that already holds something else is a conflict: on a first install any
+# different file, on an upgrade an untracked one (an earlier install's are tracked).
+managed=() conflicts=() unstaged_note=()
+tracked() { git -C "$REPO" ls-files --error-unmatch -- "$1" >/dev/null 2>&1; }
+claim_path() {  # <template file or ""> <path in REPO>
+  local src="$1" rel="$2" dst="$REPO/$2"
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    if [ -z "$src" ] || ! cmp -s "$src" "$dst"; then
+      if [ "$upgrade" = 0 ] || ! tracked "$rel"; then conflicts+=("$rel"); fi
+    fi
+  fi
+  managed+=("$rel")
+}
+hook_files=()
 for f in "$TPL"/.claude/hooks/*; do
   # The tests stay in the issuelooper repository.
   case "$(basename "$f")" in __pycache__|.ruff_cache|*_test.py) continue ;; esac
+  hook_files+=("$f")
+  claim_path "$f" ".claude/hooks/$(basename "$f")"
+done
+for d in "$TPL"/.claude/skills/issuelooper-*; do
+  name="$(basename "$d")"
+  while IFS= read -r f; do
+    claim_path "$f" ".claude/skills/$name/${f#"$d"/}"
+  done < <(find "$d" -type f)
+  # The directory is replaced whole: a file in it the template does not have is lost.
+  if [ -d "$REPO/.claude/skills/$name" ]; then
+    while IFS= read -r f; do
+      rel=".claude/skills/$name/${f#"$REPO/.claude/skills/$name"/}"
+      [ -e "$d/${f#"$REPO/.claude/skills/$name"/}" ] && continue
+      if [ "$upgrade" = 0 ] || ! tracked "$rel"; then conflicts+=("$rel"); fi
+      managed+=("$rel")  # an earlier install's file the template dropped: staged as deleted
+    done < <(find "$REPO/.claude/skills/$name" -type f)
+  fi
+  link=".agents/skills/$name"
+  if [ -e "$REPO/$link" ] || [ -L "$REPO/$link" ]; then
+    if [ "$(readlink "$REPO/$link" || true)" != "../../.claude/skills/$name" ] \
+      && { [ "$upgrade" = 0 ] || ! tracked "$link"; }; then conflicts+=("$link"); fi
+  fi
+  managed+=("$link")
+done
+claim_path "$TPL/.agents/rules/issuelooper.md" ".agents/rules/issuelooper.md"
+claim_path "$TPL/docs/agent-framework.md" "docs/agent-framework.md"
+if [ "${#conflicts[@]}" -gt 0 ] && [ "$force" = 0 ]; then
+  die "these paths already hold files that are not issuelooper's; nothing was written:
+$(printf '    %s\n' "${conflicts[@]}")
+  Move them away, or rerun with --force to overwrite them."
+fi
+
+# --- framework files (replaced on upgrade) -----------------------------------------
+mkdir -p "$REPO/.claude/hooks" "$REPO/.claude/skills" "$REPO/.agents/rules" "$REPO/.agents/skills" "$REPO/docs"
+for f in "${hook_files[@]}"; do
   cp -a "$f" "$REPO/.claude/hooks/"
 done
 for d in "$TPL"/.claude/skills/issuelooper-*; do
@@ -98,21 +151,30 @@ for e in load(tpl / ".agents/skills.json")["entries"]:
         entries.append(e)
 p.write_text(json.dumps(cur, indent=2) + "\n")
 PY
+managed+=(".claude/settings.json" ".agents/hooks.json" ".agents/skills.json")
 
 # --- project files (never overwritten) ---------------------------------------------
 mkdir -p "$REPO/.issuelooper"
 for f in config.toml project.md review_rules.md; do
-  [ -e "$REPO/.issuelooper/$f" ] || cp "$TPL/.issuelooper/$f" "$REPO/.issuelooper/$f"
+  if [ ! -e "$REPO/.issuelooper/$f" ]; then
+    cp "$TPL/.issuelooper/$f" "$REPO/.issuelooper/$f"
+    managed+=(".issuelooper/$f")
+  fi
 done
-if [ -d "$REPO/.githooks" ]; then
-  for f in pre-commit pre-push; do
-    [ -e "$REPO/.githooks/$f" ] || cp "$TPL/.githooks/$f" "$REPO/.githooks/$f"
-  done
-else
-  cp -a "$TPL/.githooks" "$REPO/.githooks"
-fi
+mkdir -p "$REPO/.githooks"
+for f in pre-commit pre-push; do
+  if [ ! -e "$REPO/.githooks/$f" ]; then
+    cp -a "$TPL/.githooks/$f" "$REPO/.githooks/$f"
+    managed+=(".githooks/$f")
+  fi
+done
 git -C "$REPO" config core.hooksPath .githooks
 
+# .gitignore and CLAUDE.md get lines appended. One that was untracked before holds
+# the project's own text, so it is left unstaged for the owner to look at.
+for f in .gitignore CLAUDE.md; do
+  if [ ! -e "$REPO/$f" ] || tracked "$f"; then managed+=("$f"); else unstaged_note+=("$f"); fi
+done
 touch "$REPO/.gitignore"
 for line in ".issuelooper/run/" ".ux/" "__pycache__/"; do
   grep -qxF "$line" "$REPO/.gitignore" || printf '%s\n' "$line" >> "$REPO/.gitignore"
@@ -156,7 +218,16 @@ EOF
 fi
 
 # --- commit ------------------------------------------------------------------------
-git -C "$REPO" add .claude .agents .githooks .issuelooper docs/agent-framework.md CLAUDE.md .gitignore
+# Exactly the paths written above (-A: a skill file the template dropped is staged as
+# deleted); nothing else under .claude/, .agents/, .githooks/ or .issuelooper/.
+stage=()
+for f in "${managed[@]}"; do
+  if [ -e "$REPO/$f" ] || [ -L "$REPO/$f" ] || tracked "$f"; then stage+=("$f"); fi
+done
+git -C "$REPO" add -A -- "${stage[@]}"
+for f in "${unstaged_note[@]+"${unstaged_note[@]}"}"; do
+  say "$f was untracked; issuelooper's lines were appended to it but it is not staged: review and commit it yourself"
+done
 if [ "$commit" = 1 ]; then
   msg="Install issuelooper"; [ "$upgrade" = 1 ] && msg="Upgrade issuelooper"
   ISSUELOOPER_CONFIG_OK=1 git -C "$REPO" commit -q -m "$msg"

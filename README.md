@@ -140,6 +140,12 @@ herdr --session your-repo                       # then, in a herdr pane:
 .claude/hooks/issuelooper start                 # the monitor, an aide and the supervisor
 ```
 
+`install.sh` writes the framework's files and stages exactly those: other files
+under `.claude/`, `.agents/`, `.githooks/` and `.issuelooper/`, tracked or not, are
+left alone, and an untracked `CLAUDE.md` or `.gitignore` it appends to is left
+unstaged. A file at one of its paths that is not an earlier install's (on an
+upgrade, an untracked one) is listed and nothing is written; `--force` overwrites.
+
 `start` opens a herdr tab named `issuelooper` and the loop runs from there. The
 next section is the guide to working with it.
 
