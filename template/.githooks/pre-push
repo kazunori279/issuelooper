@@ -2,6 +2,7 @@
 # main moves only through merges: never delete it, never force-push over it.
 zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
 status=0
+refs=$(cat)  # read once: the chained hook below gets the same lines
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ -z "$local_ref" ] && continue
     case "$remote_ref" in
@@ -23,5 +24,9 @@ while read -r local_ref local_sha remote_ref remote_sha; do
             status=1
         fi
     fi
-done
-exit $status
+done <<REFS
+$refs
+REFS
+[ "$status" = 0 ] || exit "$status"
+# Then the hook the repository had before (install.sh --chain-hooks).
+{ [ -z "$refs" ] || printf '%s\n' "$refs"; } | "$(dirname "$0")/_chain" pre-push "$@"

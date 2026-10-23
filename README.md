@@ -145,6 +145,13 @@ under `.claude/`, `.agents/`, `.githooks/` and `.issuelooper/`, tracked or not, 
 left alone, and an untracked `CLAUDE.md` or `.gitignore` it appends to is left
 unstaged. A file at one of its paths that is not an earlier install's (on an
 upgrade, an untracked one) is listed and nothing is written; `--force` overwrites.
+It points `core.hooksPath` at `.githooks`. If the repository already runs git hooks
+(another `core.hooksPath`, such as Husky's, or hooks in `.git/hooks`), it stops and
+names them: `--chain-hooks` makes `.githooks` run them after its own checks (the
+directory is recorded in this clone's `git config issuelooper.chainedHooksPath`;
+other clones run the same command or set it themselves), and `--keep-hooks` leaves
+`core.hooksPath` alone, for you to call `.githooks/pre-commit` and
+`.githooks/pre-push` from your own hooks.
 
 `start` opens a herdr tab named `issuelooper` and the loop runs from there. The
 next section is the guide to working with it.

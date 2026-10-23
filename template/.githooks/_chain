@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run the hook this repository had before issuelooper set core.hooksPath to .githooks.
+# install.sh --chain-hooks records where those hooks live in
+# `git config issuelooper.chainedHooksPath` (local to this clone); without it, or
+# without such a hook, this does nothing.
+#   _chain <hook name> [args...]    stdin is passed through
+name=$1
+shift
+dir=$(git config --get issuelooper.chainedHooksPath 2>/dev/null) || exit 0
+[ -n "$dir" ] && [ -f "$dir/$name" ] && [ -x "$dir/$name" ] || exit 0
+exec "$dir/$name" "$@"

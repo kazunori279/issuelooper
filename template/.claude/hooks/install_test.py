@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The installer: symlinked checkout paths (macOS /tmp), staging only what it writes,
-and reporting conflicts before it overwrites."""
+reporting conflicts before it overwrites, and keeping the repository's own git hooks."""
 import os
 import pathlib
 import subprocess
@@ -76,7 +76,7 @@ class InstallTest(unittest.TestCase):
         for path, text in private.items():
             self.assertEqual((repo / path).read_text(), text)
         self.assertTrue({".claude/hooks/ccpool.py", ".claude/skills/issuelooper-worker/SKILL.md",
-                         ".agents/skills/issuelooper-worker", ".githooks/pre-commit",
+                         ".agents/skills/issuelooper-worker", ".githooks/pre-commit", ".githooks/_chain",
                          ".issuelooper/config.toml", ".claude/settings.json", ".gitignore", "CLAUDE.md"} <= staged)
         self.assertFalse(any(p.endswith("_test.py") for p in staged))
 
@@ -128,6 +128,79 @@ class InstallTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(".claude/skills/issuelooper-worker/my-notes.md", result.stderr)
         self.assertEqual(notes.read_text(), "mine\n")
+
+    def hooks_dir(self, repo, where):
+        d = repo / where
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("pre-commit", "commit-msg", "pre-push"):
+            (d / name).write_text(f'#!/bin/sh\necho ran >> "{self.base}/{name}.ran"\n')
+            (d / name).chmod(0o755)
+        return d
+
+    def test_a_custom_hooks_path_is_kept_running(self):
+        repo = self.repo()
+        self.hooks_dir(repo, ".husky")
+        git(repo, "config", "core.hooksPath", ".husky")
+        result = self.install(repo)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(".husky", result.stderr)
+        self.assertIn("--chain-hooks", result.stderr)
+        self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".husky")
+        self.assertFalse((repo / ".claude").exists())
+
+        result = self.install(repo, "--chain-hooks")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".githooks")
+        self.assertEqual(git(repo, "config", "issuelooper.chainedHooksPath").strip(), ".husky")
+        # install.sh's own commit ran .githooks, which ran the project's hooks after its own.
+        self.assertTrue((self.base / "pre-commit.ran").exists())
+        self.assertTrue((self.base / "commit-msg.ran").exists())
+        self.assertIn(".githooks/commit-msg", git(repo, "ls-files"))
+        # issuelooper's own check still refuses first, and then the project's hook does not run.
+        (self.base / "pre-commit.ran").unlink()
+        (repo / ".claude/hooks/x.txt").write_text("x\n")
+        git(repo, "add", ".claude/hooks/x.txt")
+        refused = subprocess.run(["git", "-C", str(repo), "commit", "-qm", "x"], capture_output=True, text=True,
+                                 env={k: v for k, v in self.env.items() if k != "ISSUELOOPER_CONFIG_OK"})
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse((self.base / "pre-commit.ran").exists())
+        # pre-push hands the project's hook the same ref lines it read.
+        refs = ("refs/heads/x 1111111111111111111111111111111111111111 "
+                "refs/heads/x 0000000000000000000000000000000000000000\n")
+        (repo / ".husky/pre-push").write_text(f'#!/bin/sh\ncat > "{self.base}/pre-push.stdin"\n')
+        push = subprocess.run([str(repo / ".githooks/pre-push"), "origin", "url"], input=refs, cwd=repo,
+                              capture_output=True, text=True)
+        self.assertEqual(push.returncode, 0, push.stderr)
+        self.assertEqual((self.base / "pre-push.stdin").read_text(), refs)
+
+    def test_hooks_in_git_hooks_are_kept_running(self):
+        repo = self.repo()
+        hooks = pathlib.Path(git(repo, "rev-parse", "--git-path", "hooks").strip())
+        hooks = hooks if hooks.is_absolute() else repo / hooks
+        (hooks / "pre-commit").write_text(f'#!/bin/sh\necho ran >> "{self.base}/pre-commit.ran"\n')
+        (hooks / "pre-commit").chmod(0o755)
+        result = self.install(repo)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pre-commit", result.stderr)
+        self.assertEqual(git(repo, "config", "--get", "core.hooksPath", check=False).strip(), "")
+        result = self.install(repo, "--chain-hooks")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.base / "pre-commit.ran").exists())
+
+    def test_keep_hooks_leaves_the_hooks_path_alone(self):
+        repo = self.repo()
+        self.hooks_dir(repo, ".husky")
+        git(repo, "config", "core.hooksPath", ".husky")
+        result = self.install(repo, "--keep-hooks", "--no-commit")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".husky")
+        self.assertIn(".githooks/pre-commit and .githooks/pre-push", result.stdout)
+
+    def test_sample_hooks_alone_need_no_option(self):
+        repo = self.repo()  # git init leaves only *.sample hooks
+        result = self.install(repo, "--no-commit")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".githooks")
 
 
 if __name__ == "__main__":

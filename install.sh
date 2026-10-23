@@ -7,6 +7,10 @@
 #            --no-commit    leave the changes staged instead of committing
 #            --force        overwrite files at the framework's paths that are not an
 #                           earlier install's (listed and refused otherwise)
+#            --chain-hooks  the repository already runs git hooks: point core.hooksPath
+#                           at .githooks and have it run those hooks after its own
+#            --keep-hooks   the repository already runs git hooks: leave core.hooksPath
+#                           alone (run .githooks/pre-commit and pre-push from your hooks)
 #
 # What it writes into <repo-dir>, and the only files it stages:
 #   .claude/hooks/                 the supervisor, guard, sweep, review gate and launcher
@@ -24,19 +28,21 @@ say() { printf '%s\n' "$*"; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TPL="$HERE/template"
-upgrade=0 labels=1 commit=1 force=0 repo=""
+upgrade=0 labels=1 commit=1 force=0 hooks_mode="" repo=""
 for a in "$@"; do
   case "$a" in
     --upgrade) upgrade=1 ;;
     --no-labels) labels=0 ;;
     --no-commit) commit=0 ;;
     --force) force=1 ;;
+    --chain-hooks) hooks_mode=chain ;;
+    --keep-hooks) hooks_mode=keep ;;
     -h|--help) awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; exit 0 ;;
     -*) die "unknown option $a" ;;
     *) [ -z "$repo" ] || die "one repository at a time"; repo="$a" ;;
   esac
 done
-[ -n "$repo" ] || die "usage: install.sh <repo-dir> [--upgrade] [--no-labels] [--no-commit] [--force]"
+[ -n "$repo" ] || die "usage: install.sh <repo-dir> [--upgrade] [--no-labels] [--no-commit] [--force] [--chain-hooks|--keep-hooks]"
 REPO="$(cd "$repo" && pwd -P)" || die "no such directory: $repo"
 
 # --- prerequisites ---------------------------------------------------------------
@@ -47,6 +53,32 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "python3 3.
 command -v gh >/dev/null || die "the GitHub CLI (gh) is required"
 if [ -e "$REPO/.claude/hooks/ccpool.py" ] && [ "$upgrade" = 0 ]; then
   die "$REPO already has issuelooper; run with --upgrade to replace the framework files"
+fi
+
+# --- the git hooks the repository already runs ---------------------------------------
+# issuelooper's hooks need core.hooksPath=.githooks. Switching it silently would stop
+# whatever ran before (Husky's hooks, a secret scanner in .git/hooks), so an existing
+# setup is reported and needs --chain-hooks or --keep-hooks.
+cur_hooks="$(git -C "$REPO" config --get core.hooksPath || true)"
+prev_dir="${cur_hooks:-$(git -C "$REPO" rev-parse --git-path hooks)}"  # relative to the repository root, or absolute
+prev_hooks=()
+if [ "$cur_hooks" != ".githooks" ] && [ -n "$prev_dir" ]; then
+  case "$prev_dir" in /*) abs_prev="$prev_dir" ;; *) abs_prev="$REPO/$prev_dir" ;; esac
+  if [ -d "$abs_prev" ]; then
+    for h in "$abs_prev"/*; do
+      name="$(basename "$h")"
+      case "$name" in *.sample|_*|.*) continue ;; esac
+      [ -f "$h" ] && [ -x "$h" ] && prev_hooks+=("$name")
+    done
+  fi
+fi
+if [ "${#prev_hooks[@]}" -gt 0 ] && [ -z "$hooks_mode" ]; then
+  die "$REPO already runs git hooks from $prev_dir: ${prev_hooks[*]}.
+  issuelooper's hooks (keep agent sessions from committing .claude/ and from force-pushing
+  main) need core.hooksPath=.githooks, which would stop those from running. Rerun with
+    --chain-hooks  core.hooksPath=.githooks, which runs the hooks above after its own, or
+    --keep-hooks   core.hooksPath stays as it is; call .githooks/pre-commit and
+                   .githooks/pre-push from your own pre-commit and pre-push hooks."
 fi
 
 # --- what this run writes, and what it would overwrite ---------------------------------
@@ -162,13 +194,29 @@ for f in config.toml project.md review_rules.md; do
   fi
 done
 mkdir -p "$REPO/.githooks"
-for f in pre-commit pre-push; do
+for f in pre-commit pre-push _chain; do
   if [ ! -e "$REPO/.githooks/$f" ]; then
     cp -a "$TPL/.githooks/$f" "$REPO/.githooks/$f"
     managed+=(".githooks/$f")
   fi
 done
-git -C "$REPO" config core.hooksPath .githooks
+if [ "$hooks_mode" = keep ]; then
+  say "core.hooksPath left at ${cur_hooks:-the default (.git/hooks)}: run .githooks/pre-commit and .githooks/pre-push from your own hooks"
+elif [ "$cur_hooks" != ".githooks" ]; then
+  if [ "$hooks_mode" = chain ] && [ "${#prev_hooks[@]}" -gt 0 ]; then
+    git -C "$REPO" config issuelooper.chainedHooksPath "$prev_dir"
+    # A hook .githooks has no file for would stop running: give it one that only chains.
+    for h in "${prev_hooks[@]}"; do
+      if [ ! -e "$REPO/.githooks/$h" ]; then
+        printf '#!/bin/sh\n# Runs the repository'"'"'s own %s hook (install.sh --chain-hooks).\nexec "$(dirname "$0")/_chain" %s "$@"\n' "$h" "$h" > "$REPO/.githooks/$h"
+        chmod 755 "$REPO/.githooks/$h"
+        managed+=(".githooks/$h")
+      fi
+    done
+    say "core.hooksPath is now .githooks; it runs the hooks in $prev_dir after its own (${prev_hooks[*]})"
+  fi
+  git -C "$REPO" config core.hooksPath .githooks
+fi
 
 # .gitignore and CLAUDE.md get lines appended. One that was untracked before holds
 # the project's own text, so it is left unstaged for the owner to look at.

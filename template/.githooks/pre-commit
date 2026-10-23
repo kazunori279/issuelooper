@@ -26,4 +26,5 @@ LIST
     fi
 fi
 
-exit 0
+# Then the hook the repository had before (install.sh --chain-hooks).
+exec "$(dirname "$0")/_chain" pre-commit "$@"
