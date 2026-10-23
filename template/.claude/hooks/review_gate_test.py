@@ -415,21 +415,39 @@ try:
                  + " ctx\n" * 20)
     check("context far from a change is dropped", rg.compact(unchanged).count(" ctx"), 6)
 
-    # --- split PRs: moved code summarized ----------------------------------------------
+    # --- split PRs: only verbatim moves are summarized --------------------------------
+    def two_files(removed: list[str], added: list[str]) -> str:
+        return ("diff --git a/src/big.py b/src/big.py\nindex 1..2 100644\n--- a/src/big.py\n+++ b/src/big.py\n"
+                f"@@ -1,{len(removed) + 1} +1,2 @@\n import os\n" + "".join(f"-{ln}\n" for ln in removed)
+                + "+from helpers import *\n"
+                + "diff --git a/src/helpers.py b/src/helpers.py\nnew file mode 100644\n--- /dev/null\n"
+                f"+++ b/src/helpers.py\n@@ -0,0 +1,{len(added)} @@\n" + "".join(f"+{ln}\n" for ln in added))
+
     moved_fn = [f"def helper_{k}(value):" if k % 5 == 0 else f"    total_{k} = compute(value, {k})" for k in range(60)]
-    split_diff = (
-        "diff --git a/src/big.py b/src/big.py\nindex 1..2 100644\n--- a/src/big.py\n+++ b/src/big.py\n"
-        "@@ -1,62 +1,3 @@\n import os\n-from x import compute\n" + "".join(f"-{ln}\n" for ln in moved_fn)
-        + "+from helpers import *\n"
-        + "diff --git a/src/helpers.py b/src/helpers.py\nnew file mode 100644\n--- /dev/null\n+++ b/src/helpers.py\n"
-        "@@ -0,0 +1,63 @@\n+from x import compute\n" + "".join(f"+    {ln}\n" for ln in moved_fn)
-        + "+def price_of(item):\n+    return item.get('price') or 19.99\n"
-    )
+    split_diff = two_files(["from x import compute"] + moved_fn,
+                           ["from x import compute"] + moved_fn
+                           + ["def price_of(item):", "    return item.get('price') or 19.99"])
     text, n = rg.summarize_moves(split_diff)
-    check("a split: the moved block is one line, the removed block one line, new code whole",
-          ("+[moved: 61 lines that this diff removes elsewhere, not repeated]" in text,
-           "-[61 lines removed]" in text, "or 19.99" in text, "total_7" in text, n),
+    check("a verbatim move: one line on each side, new code whole",
+          ("+[moved verbatim: 61 lines from src/big.py, not repeated]" in text,
+           "-[moved verbatim: 61 lines to src/helpers.py, not repeated]" in text, "or 19.99" in text,
+           "total_7" in text, n),
           (True, True, True, False, 122))
+    guarded = ["def save(user, record):", "    require_admin(user)", "    db.write(record)",
+               "    audit.log(user, record)", "    return record"]
+    reordered = [guarded[0], guarded[2], guarded[1], guarded[3], guarded[4]]
+    text, n = rg.summarize_moves(two_files(guarded, reordered))
+    check("calls reordered on the way (the check after the write): nothing folded",
+          (n, "+    db.write(record)\n+    require_admin(user)" in text), (0, True))
+    reindented = ["    " + ln for ln in guarded]
+    text, n = rg.summarize_moves(two_files(guarded, reindented))
+    check("re-indented on the way (now inside another block): nothing folded",
+          (n, "+        require_admin(user)" in text), (0, True))
+    text, n = rg.summarize_moves(two_files(guarded, ["def save(user, record):", "    return record"]))
+    check("a removal that is not a move (the check is gone): shown in full",
+          (n, "-    require_admin(user)" in text, "removed]" in text), (0, True, False))
+    text, n = rg.summarize_moves(two_files(guarded, guarded + guarded))
+    check("a block added twice: only one copy is the move", (n, text.count("+    require_admin(user)")), (10, 1))
     (GHDIR / "issue-140.json").write_text(json.dumps({
         "title": "Split src/big.py: it is where parallel work collides",
         "body": "<!-- merger -->\n<!-- split -->\n`src/big.py` has 900 lines on main."}))
@@ -449,11 +467,17 @@ try:
             last = PROMPTS[-1]
             if n_pr == 40:
                 check("a split PR over the limit: summarized, not cut",
-                      ("[moved: 61 lines" in last, "(a split: 122 moved or removed lines" in last, "cut to" in last,
-                       record(sha).get("moved")), (True, True, False, 122))
+                      ("[moved verbatim: 61 lines" in last, "(a split: 122 lines it moves verbatim" in last,
+                       "cut to" in last, record(sha).get("moved")), (True, True, False, 122))
             else:
                 check("any other PR over the limit is cut as before",
-                      ("[moved:" in last, "cut to 3000 characters" in last), (False, True))
+                      ("[moved" in last, "cut to 3000 characters" in last), (False, True))
+        (GHDIR / "42.json").write_text(json.dumps(
+            {"title": "PR 42", "body": "Fixes #140", "head": {"sha": "d" * 40, "ref": "issue-140"}}))
+        (GHDIR / "42.diff").write_text(two_files(moved_fn, ["    " + ln for ln in moved_fn]))
+        rg.review(42, hand=False)
+        check("a split that re-indents what it moves stays over the limit: cut, as before",
+              ("[moved" in PROMPTS[-1], "cut to 3000 characters" in PROMPTS[-1]), (False, True))
     finally:
         rg.MAX_CHARS = keep_chars
 finally:

@@ -42,9 +42,11 @@ Settings (environment, or .issuelooper/config.toml through config.py):
                          else $REVIEW_DIR/events.jsonl.
 
 A pull request for a split issue the supervisor filed (signed <!-- merger -->,
-marked <!-- split -->) whose diff is over REVIEW_CHARS is shown with moved code
-summarized: a run of added lines that the diff also removes, and a run of removed
-lines, each become one `[moved ...]` / `[... removed]` line, so the new code fits.
+marked <!-- split -->) whose diff is over REVIEW_CHARS is shown with the blocks it
+moves verbatim (same lines, indentation and order, removed in one place and added in
+another) summarized in one `[moved verbatim ...]` line each, so the new code fits.
+Anything else stays in the diff; if it is still too long, it is cut and rejected as
+unreadable, as for any PR.
 
 A keyword pre-scan of the added lines goes into the prompt as hints; the judge
 decides. Structural findings (long functions, copy-pasted blocks) are only logged:
@@ -359,42 +361,66 @@ def is_split_issue(repo: str, issue: int | None) -> bool:
     return body.startswith("<!-- merger -->") and (SPLIT_MARK in body or str(data.get("title", "")).startswith("Split "))
 
 
-def summarize_moves(diff: str, min_lines: int = 3, min_chars: int = 80) -> tuple[str, int]:
-    """A split PR's diff with what it moves told in one line each: a run of added lines
-    that the diff also removes (indentation aside) becomes `+[moved: N lines ...]`, and a
-    run of removed lines `-[N lines removed]` (removed code cannot add what the review
-    looks for). Code added anew stays whole. Two split PRs were rejected because their
-    diff, each moved block in twice, was cut at REVIEW_CHARS. Returns (text, lines folded)."""
-    def text(ln: str) -> str:
-        return ln[1:].strip()
-
+def summarize_moves(diff: str, min_lines: int = 4, min_chars: int = 60) -> tuple[str, int]:
+    """A split PR's diff with each block it moves verbatim told in one line: a run of at
+    least min_lines added lines that the diff also removes as a run, with the same text,
+    indentation and order, becomes `+[moved verbatim: N lines from <file>]`, and the run
+    it came from `-[moved verbatim: N lines to <file>]`. Everything else stays: code
+    added anew, lines reordered or re-indented on the way, and removals that are not
+    moves (a removed check is a change the review must see). Two split PRs were rejected
+    because their diff, each moved block in twice, was cut at REVIEW_CHARS. Returns
+    (text, lines folded)."""
     def change(ln: str, sign: str) -> bool:
         return ln.startswith(sign) and not ln.startswith(sign * 3)
 
     files = split_files(diff)
-    removed = {text(ln) for _, part in files for ln in part.splitlines() if change(ln, "-")}
-    out, folded = [], 0
-    for _, part in files:
-        lines = part.splitlines(keepends=True)
+    parts = [(path, part.splitlines(keepends=True)) for path, part in files]
+    # Every removed line, by its exact text: (file index, line index).
+    removed: dict[str, list[tuple[int, int]]] = {}
+    for f, (_, lines) in enumerate(parts):
+        for i, ln in enumerate(lines):
+            if change(ln, "-"):
+                removed.setdefault(ln[1:], []).append((f, i))
+    used: set[tuple[int, int]] = set()  # removed lines already matched to a move
+    folds: dict[tuple[int, int], tuple[int, str]] = {}  # (file, first line) -> (length, marker)
+    for f, (path, lines) in enumerate(parts):
         i = 0
         while i < len(lines):
-            sign = lines[i][:1]
-            if sign not in "+-" or not change(lines[i], sign):
-                out.append(lines[i])
+            if not change(lines[i], "+"):
                 i += 1
                 continue
-            j = i
-            while j < len(lines) and change(lines[j], sign) and (sign == "-" or text(lines[j]) in removed | {""}):
-                j += 1
-            body = [text(x) for x in lines[i:j] if text(x)]
-            if len(body) >= min_lines and sum(map(len, body)) >= min_chars:
-                out.append(f"+[moved: {j - i} lines that this diff removes elsewhere, not repeated]\n" if sign == "+"
-                           else f"-[{j - i} lines removed]\n")
-                folded += j - i
+            best = (0, None)
+            for rf, ri in removed.get(lines[i][1:], []):
+                rlines = parts[rf][1]
+                k = 0
+                while (i + k < len(lines) and ri + k < len(rlines) and change(lines[i + k], "+")
+                       and change(rlines[ri + k], "-") and lines[i + k][1:] == rlines[ri + k][1:]
+                       and (rf, ri + k) not in used):
+                    k += 1
+                if k > best[0]:
+                    best = (k, (rf, ri))
+            k, src = best
+            body = [ln[1:].strip() for ln in lines[i:i + k] if ln[1:].strip()]
+            if src and k >= min_lines and sum(map(len, body)) >= min_chars:
+                rf, ri = src
+                used.update((rf, ri + j) for j in range(k))
+                folds[(f, i)] = (k, f"+[moved verbatim: {k} lines from {parts[rf][0]}, not repeated]\n")
+                folds[(rf, ri)] = (k, f"-[moved verbatim: {k} lines to {path}, not repeated]\n")
+                i += k
             else:
-                j = max(j, i + 1)
-                out.extend(lines[i:j])
-            i = j
+                i += 1
+    out, folded = [], 0
+    for f, (_, lines) in enumerate(parts):
+        i = 0
+        while i < len(lines):
+            if (f, i) in folds:
+                k, marker = folds[(f, i)]
+                out.append(marker)
+                folded += k
+                i += k
+            else:
+                out.append(lines[i])
+                i += 1
     return "".join(out), folded
 
 
@@ -669,8 +695,8 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
         "LONGFN": "\n".join(f"- {f}" for f in longfn) or "(none)",
         "DUPES": "\n".join(f"- {f}" for f in dupes) or "(none)",
         "TRUNC": "".join(
-            [f" (a split: {moved} moved or removed lines are summarized in `[...]` lines; the code they "
-             "stand for was on main before)" if moved else "",
+            [f" (a split: {moved} lines it moves verbatim are summarized in `[moved verbatim ...]` lines; "
+             "the code they stand for is unchanged from main)" if moved else "",
              f" (cut to {MAX_CHARS} characters)" if cut else ""]
         ),
         "DIFF": text,
