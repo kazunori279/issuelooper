@@ -278,8 +278,12 @@ for f in "${unstaged_note[@]+"${unstaged_note[@]}"}"; do
 done
 if [ "$commit" = 1 ]; then
   msg="Install issuelooper"; [ "$upgrade" = 1 ] && msg="Upgrade issuelooper"
-  ISSUELOOPER_CONFIG_OK=1 git -C "$REPO" commit -q -m "$msg"
-  say "committed: $(git -C "$REPO" log -1 --format='%h %s') (not pushed)"
+  if git -C "$REPO" diff --cached --quiet; then
+    say "nothing to commit: the framework files are already up to date"
+  else
+    ISSUELOOPER_CONFIG_OK=1 git -C "$REPO" commit -q -m "$msg"
+    say "committed: $(git -C "$REPO" log -1 --format='%h %s') (not pushed)"
+  fi
 fi
 
 cat <<EOF

@@ -106,6 +106,15 @@ class InstallTest(unittest.TestCase):
         self.assertIn(".claude/private-notes.txt", self.untracked(repo))
         self.assertEqual((repo / ".issuelooper/config.toml").read_text(), "# the owner's settings\n")
 
+    def test_an_upgrade_with_nothing_new_succeeds(self):
+        repo = self.repo()
+        self.assertEqual(self.install(repo).returncode, 0)
+        head = git(repo, "rev-parse", "HEAD")
+        result = self.install(repo, "--upgrade")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("already up to date", result.stdout)
+        self.assertEqual(git(repo, "rev-parse", "HEAD"), head)
+
     def test_conflicts_are_reported_before_writing(self):
         repo = self.repo()
         (repo / ".claude/hooks").mkdir(parents=True)
