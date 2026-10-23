@@ -1855,6 +1855,38 @@ def test_git_stash_and_the_shared_checkout() -> None:
     check("agy: a bare commit runs in the shared checkout and is refused", verdict, "refuse")
 
 
+def test_files_in_the_shared_checkout() -> None:
+    # The shared checkout's .env (only the owner has it) disappeared in a run and live
+    # checks stopped for hours; workers link it into their worktrees and remove the link.
+    shared = os.environ["SHARED_REPO_PATH"]
+    for cmd in ("rm -f .env", 'rm "$SHARED_REPO_PATH/.env"', "mv .env .env.bak", f"rm -f {shared}/.env",
+                'cp /tmp/x.py "${SHARED_REPO_PATH}/src/a.py"', "echo KEY=1 > .env", "printf x >>.env",
+                'ln -sf "$SHARED_REPO_PATH/.env" .env', 'ln -sf /a/.env "$SHARED_REPO_PATH/.env"',
+                "uv sync && rm -rf src/old", 'unlink "$SHARED_REPO_PATH/.env"'):
+        verdict, reason = run(cmd, role="worker", host=AGY)
+        check(f"refused (it runs in, or names, the shared checkout): {cmd!r}", verdict, "refuse")
+    check("the refusal says to name the worktree", "rm -f \"$WT/.env\"" in reason, True)
+    for cmd in ('cd "$WT"\nrm -f .env', 'cd "$WT"; ln -sf "$SHARED_REPO_PATH/.env" .env'):
+        verdict, reason = run(cmd, role="worker", host=AGY)
+        check(f"refused (if the cd fails it runs in the shared checkout): {cmd!r}",
+              (verdict, "not checked" in reason), ("refuse", True))
+    verdict, _ = run("rm -f .env", role="worker", cwd=shared)
+    check("Claude Code's cwd at the shared checkout counts too", verdict, "refuse")
+    for cmd in ('cd "$WT" && rm -f .env', 'rm -f "$WT/.env"', 'ln -sf "$SHARED_REPO_PATH/.env" "$WT/.env"',
+                'cd "$WT" || exit 1\nrm -f .env', 'set -e\ncd "$WT"\nrm -f .env',
+                'cd /tmp/issuelooper-x/wrk-3-12-wt && ln -sf "$SHARED_REPO_PATH/.env" .env && uv run app',
+                'rm -rf "$SHARED_REPO_PATH/.ux/abc123/live-1"', 'rm -rf "$ISSUELOOPER_TMP/tst-8021-tree"',
+                "cat > $ISSUELOOPER_TMP/body.md <<'MD'\nThen rm -f .env in your worktree.\nMD\nwc -l $ISSUELOOPER_TMP/body.md",
+                "python3 -c 'import os; print(1)' > /dev/null 2>&1", 'cp "$SHARED_REPO_PATH/.env.example" "$WT/.env"',
+                "ls -la .env", "uv run pytest -q 2>&1 | tail -5"):
+        verdict, _ = run(cmd, role="worker", host=AGY)
+        check(f"allowed: {cmd!r}", verdict, "allow")
+    verdict, _ = run("rm -f .env", role="worker", cwd="/tmp/issuelooper-x/wrk-3-12-wt")
+    check("a bare rm in Claude Code's worktree cwd is allowed", verdict, "allow")
+    verdict, _ = run("rm -f .env", role="", host=AGY)
+    check("a session with no role (the owner's own) is not bound", verdict, "allow")
+
+
 def test_worker_pr_create_is_gated_and_signed() -> None:
     def body_file(text: str) -> str:
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:

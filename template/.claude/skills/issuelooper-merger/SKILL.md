@@ -36,7 +36,7 @@ merge, and the hold is not yours to argue.
 ```bash
 git -C "$SHARED_REPO_PATH" fetch -q origin main "<headRefName>"
 git -C "$SHARED_REPO_PATH" worktree add -B "<headRefName>" "$WT" "origin/<headRefName>"
-cd "$WT"                        # then the worktree setup from .issuelooper/project.md
+cd "$WT" || exit 1              # then the worktree setup from .issuelooper/project.md
 git rebase origin/main          # resolve: edit, git add <file>, git rebase --continue
 ```
 

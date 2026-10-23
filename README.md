@@ -45,8 +45,11 @@ Every agent session gets its role from the environment (`CC_ROLE`, set by
 `ccrole.sh`), and a hook on every shell command (`role_guard.py`) enforces what
 that role may do on GitHub: which labels it may set, who may merge or close, and
 that every write carries the role's marker. It also refuses `git stash` (one stash
-stack is shared by every worktree) and git commands that would change the shared
-checkout the supervisor merges and deploys from. A pull request merges only when:
+stack is shared by every worktree), and git commands and `rm`, `mv`, `cp`, `ln` or
+redirections that would change the shared checkout the supervisor merges and
+deploys from (it holds what only the owner has, such as `.env`); a relative path
+after a `cd` that is not checked (`cd X && ...`, `cd X || exit 1`) counts as the
+shared checkout's. A pull request merges only when:
 
 | Gate | Requires |
 |---|---|

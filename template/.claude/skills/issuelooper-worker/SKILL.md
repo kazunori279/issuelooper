@@ -52,7 +52,7 @@ did under *Checked on screen*. Never print the credentials or commit them.
 git -C "$SHARED_REPO_PATH" fetch -q origin main
 git -C "$SHARED_REPO_PATH" worktree prune
 git -C "$SHARED_REPO_PATH" worktree add -B "issue-$N" "$WT" origin/main
-cd "$WT"            # then run the worktree setup from .issuelooper/project.md
+cd "$WT" || exit 1  # then run the worktree setup from .issuelooper/project.md
 ```
 
 - **Your prompt names an earlier worker's branch** (`origin/issue-$N`): start

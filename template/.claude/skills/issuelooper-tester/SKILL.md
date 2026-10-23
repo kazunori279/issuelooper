@@ -29,7 +29,7 @@ the commit you are testing, never from a working tree:
 ```bash
 SHA=<the commit>; T=$ISSUELOOPER_TMP/tst-$TST_PORT-tree
 rm -rf "$T" && mkdir -p "$T" && git -C "$SHARED_REPO_PATH" archive "$SHA" | tar -x -C "$T"
-cd "$T"                                               # then the worktree setup from .issuelooper/project.md
+cd "$T" || exit 1                                     # then the worktree setup from .issuelooper/project.md
 lsof -tiTCP:"$TST_PORT" -sTCP:LISTEN | xargs kill 2>/dev/null; sleep 1        # whatever an earlier run left on your port
 # start the app on $TST_PORT in the background, as .issuelooper/project.md says
 # (the mode that needs no credentials for a UX run; live mode for a live check),

@@ -63,7 +63,7 @@ your own:
    page errors and, when a control could not be used, why. Make the contact sheets
    with `--captions <out>/captions.json`.
 2. **Live journey**, twice, each into its own directory (`live-1/`, `live-2/`),
-   after `ln -sf "$SHARED_REPO_PATH/.env" .env` in the tree:
+   after `ln -sf "$SHARED_REPO_PATH/.env" "$T/.env"` (the tree's path, written out):
    `uv run python ux/journeys.py --live --out "$SHARED_REPO_PATH/.ux/<sha12>/live-1"`.
    It asks three questions, interrupts a long story (barge-in), asks about "near
    here" after setting a location, and asks twice in Japanese. The app must stop
@@ -83,8 +83,11 @@ feature is missing is a finding only when no open issue covers that feature.
 
 Acceptance that needs the real Gemini Live model (live answers, real tool
 calls). Start the app without `CONCIERGE_SCRIPT`, with credentials through a
-symlink into the tree or worktree (`ln -sf "$SHARED_REPO_PATH/.env" .env`;
-a worker removes it before committing):
+symlink into the tree or worktree, naming its path in full:
+`ln -sf "$SHARED_REPO_PATH/.env" "$WT/.env"`, and before committing
+`rm -f "$WT/.env"`. Never a bare `rm -f .env` or `ln -sf ... .env`: a command with no
+`cd` (or after a `cd` that failed) runs in the shared checkout, and there it removes
+the owner's only copy of the credentials; the guard refuses it. Start the app:
 `SESSIONS_DB=$ISSUELOOPER_TMP/<name>-live.db nohup uv run concierge --port <port> > $ISSUELOOPER_TMP/<name>-live.log 2>&1 < /dev/null &`.
 A worker checking a `needs:live` change drives it in English and Japanese when
 the issue concerns language.

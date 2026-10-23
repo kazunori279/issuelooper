@@ -70,4 +70,7 @@ apply. Keep it short: commands and paths, not prose.
 
 <!-- Where credentials live (for example `.env`, never committed), and any
      endpoint whose response contains one (also list it under
-     `[guard] secret_urls` in config.toml). -->
+     `[guard] secret_urls` in config.toml). If sessions link a credentials file
+     from the shared checkout into their worktree, write both paths in full
+     (`ln -sf "$SHARED_REPO_PATH/.env" "$WT/.env"`, `rm -f "$WT/.env"`): a bare
+     `rm -f .env` run in the shared checkout removes the owner's only copy. -->

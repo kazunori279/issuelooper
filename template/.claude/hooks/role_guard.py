@@ -783,6 +783,126 @@ def git_checkout_check(command: str, cwd: str | None) -> None:
             )
 
 
+# Commands that remove, move or overwrite files, and the paths in the shared checkout
+# a session may still write (the tester's screenshots, which git ignores).
+FILE_WRITERS = {"rm", "mv", "cp", "ln", "unlink", "truncate", "shred"}
+SHARED_WRITABLE = (".ux/", ".ux")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(?=\n|$)", re.S)
+SEPARATORS = {";", "&&", "||", "|", "&", "\n", "|&", ";;", "(", ")"}
+REDIRECT = re.compile(r"^\d*>>?(.*)$")
+
+
+def shared_rest(path: str) -> str | None:
+    """The part of `path` inside the shared checkout ('' for its root), or None when it
+    is not known to be there (another variable, or a relative path)."""
+    for var in ("${SHARED_REPO_PATH}", "$SHARED_REPO_PATH"):
+        if path == var or path.startswith(var + "/"):
+            return path[len(var):].lstrip("/")
+    if not path.startswith(("/", "~")):
+        return None
+    full = os.path.normpath(os.path.expanduser(path))
+    for root in {get_shared_repo_dir(), os.path.realpath(get_shared_repo_dir())}:
+        if root and (full == root or full.startswith(root.rstrip("/") + "/")):
+            return full[len(root):].lstrip("/")
+    return None
+
+
+def file_targets(words: list[str]) -> list[str]:
+    """The paths a file command writes or removes: every operand of rm and the like,
+    the last one of mv, cp and ln (ln with one operand links into the directory)."""
+    cmd, args = os.path.basename(words[0]), [w for w in words[1:] if not w.startswith("-")]
+    if cmd in ("mv", "cp", "ln"):
+        if len(args) >= 2:
+            return [args[-1]]
+        return [os.path.basename(args[0])] if args and cmd == "ln" else []
+    return args
+
+
+def shared_file_check(command: str, cwd: str | None) -> None:
+    """Nothing removes, moves or overwrites a file in the shared checkout: by a path in
+    it, or by a relative path in a command that runs there (agy starts each command in
+    it). The shared checkout's .env, which only the owner has, disappeared in one run and
+    live checks stopped for hours; workers link it into their worktrees and remove the
+    link again, and a bare `rm -f .env` run there, or after a `cd` that failed, removes
+    the real file."""
+    text = HEREDOC.sub("", command)  # a here-document's body is text, not commands
+    lex = shlex.shlex(text, posix=True, punctuation_chars=";&|()\n")
+    lex.whitespace, lex.whitespace_split = " \t\r", True
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return  # unbalanced quotes: the shell refuses it too
+    # shlex joins a run of separators ("\n\n", ")\n"): split it into operators again.
+    split = []
+    for t in tokens + ["\n"]:
+        split += re.findall(r"&&|\|\||;;|\|&|[;&|()\n]", t) if set(t) <= set(";&|()\n") else [t]
+    segments, cur = [], []
+    for t in split:
+        if t in SEPARATORS:
+            segments.append((cur, t))
+            cur = []
+        else:
+            cur.append(t)
+    here = None if cwd is None else cwd  # where the next command runs (None: the session's cwd)
+    shaky = False  # an earlier `cd` may have failed, leaving the command where it started
+    strict = False  # `set -e`: a failed `cd` ends the command
+    outer = []  # (here, shaky) outside each open subshell: a `cd` in `( ... )` stays in it
+    for words, sep in segments:
+        if sep == "(":
+            outer.append((here, shaky))
+        elif sep == ")" and outer:
+            here, shaky = outer.pop()
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        if words[:2] in (["set", "-e"], ["set", "-eu"], ["set", "-euo"]) or (words[0] == "set" and "-e" in words[1:2]):
+            strict = True
+        if words[0] == "cd":
+            shaky = shaky or (sep not in ("&&", "||") and not strict and is_shared_dir(here))
+            here = words[1] if len(words) > 1 else "~"
+            continue
+        targets, operands, skip = [], [], False
+        for i, w in enumerate(words):
+            if skip:
+                skip = False
+                continue
+            m = REDIRECT.match(w)
+            if not m:
+                operands.append(w)
+                continue
+            target = m.group(1) or (words[i + 1] if i + 1 < len(words) else "")
+            skip = not m.group(1)
+            if target and not target.startswith("&"):
+                targets.append(target)
+        if operands and os.path.basename(operands[0]) in FILE_WRITERS:
+            targets += file_targets(operands)
+        for t in targets:
+            if t in ("/dev/null", "-") or t.startswith("/dev/") or not t.strip() or "\n" in t:
+                continue
+            rest = shared_rest(t)
+            relative = not t.startswith(("/", "~", "$"))
+            if rest is None and relative and is_shared_dir(here):
+                rest = os.path.normpath(t)
+            if rest is not None and not rest.startswith(SHARED_WRITABLE):
+                block(
+                    f"This would remove, move or overwrite `{t}` in the shared checkout "
+                    "($SHARED_REPO_PATH). It holds what only the owner has (such as `.env`), and the "
+                    "supervisor merges and deploys from it.\n\n"
+                    "Name your own path: `rm -f \"$WT/.env\"` rather than `rm -f .env` (a command with "
+                    "no `cd` runs in the shared checkout), or `cd \"$WT\" && ...` in the same command. "
+                    "If something in the shared checkout looks wrong, say so on your issue."
+                )
+            if relative and shaky:
+                block(
+                    f"`{t}` is a relative path after a `cd` that is not checked: if the `cd` fails, "
+                    "the command goes on in the shared checkout ($SHARED_REPO_PATH) and removes or "
+                    "overwrites the file there.\n\n"
+                    "Join it with `&&` (`cd \"$WT\" && rm -f .env`), write `cd \"$WT\" || exit 1`, "
+                    "or name the full path (`rm -f \"$WT/.env\"`)."
+                )
+
+
 def secret_check(command: str) -> None:
     """Refuse an unfiltered fetch of a $GUARD_SECRET_URLS path. Binds every role."""
     if not FETCHERS.search(command):
@@ -1913,6 +2033,7 @@ def main(raw: str) -> None:
     if role in ROLES:
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
         git_checkout_check(command, cwd or None)
+        shared_file_check(command, cwd or None)
 
     if role == "worker":
         worker_git_check(command)

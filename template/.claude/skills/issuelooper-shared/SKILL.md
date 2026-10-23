@@ -138,7 +138,9 @@ marker is the only record of who spoke. The guard refuses an unsigned write.
   this repository's scratch directory (the tester also writes under `.ux/`, which
   git ignores). If it is unset, set it first:
   `export ISSUELOOPER_TMP=$(python3 "$SHARED_REPO_PATH/.claude/hooks/config.py" tmp); mkdir -p "$ISSUELOOPER_TMP"`.
-  Never edit
+  Name your own paths in full when you remove, move or link files
+  (`rm -f "$WT/.env"`, not `rm -f .env`): a command with no `cd`, or after a `cd`
+  that failed, runs in the shared checkout. Never edit
   `$SHARED_REPO_PATH`, `.claude/`, `.agents/`, `.issuelooper/`, `CLAUDE.md` or
   `AGENTS.md`.
 - Never print a secret. Credentials stay where `.issuelooper/project.md` says;
