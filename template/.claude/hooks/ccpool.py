@@ -291,6 +291,7 @@ class Config:
     quota_wait_s: float = 60
     quota_wait_max_s: float = 900
     stall_s: float = 600
+    hold_review_s: float = 3600  # a hold:monitor this old is pointed out to the monitor
     background_idle_s: float = 120  # agy idle on a background task this long: resumed (Session.background_idle)
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
@@ -381,6 +382,7 @@ class Config:
             quota_wait_s=float(e("POOL_QUOTA_WAIT_S", "60")),
             quota_wait_max_s=float(e("POOL_QUOTA_WAIT_MAX_S", "900")),
             stall_s=float(e("POOL_STALL_S", "600")),
+            hold_review_s=gap_s("POOL_HOLD_REVIEW", 60),
             background_idle_s=float(e("POOL_BACKGROUND_IDLE_S", "") or 120),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
@@ -633,6 +635,8 @@ class Book:
         self.quota_streak = 0  # pauses in a row without a session ending ok
         self.live_entry: dict[int, str] = {}  # issue -> updatedAt when it entered stage:live
         self.missing: list[str] = []  # required files gone from the shared checkout (Pool.check_files)
+        self.holds: dict[int, float] = {}  # issue -> when hold:monitor was first seen on it
+        self.holds_told: set[int] = set()  # holds the monitor was reminded of
         self.last_ux_t = 0.0  # when the last UX run started
         self.last_spec_t = 0.0  # when the last spec check started
         self.extra_runs = 0  # idle UX runs and spec checks started (part of their keys)
@@ -2995,9 +2999,13 @@ class Pool:
             for i in st["open"]
             if not any(x.startswith("stage:") for x in i["labels"]) and not IGNORED & set(i["labels"])
         ]
+        now = self.clock()
+        old = [f"#{n} ({(now - t) / 60:.0f} min)" for n, t in sorted(self.book.holds.items())
+               if now - t >= self.cfg.hold_review_s]
         return (
             f"Untriaged (yours): {', '.join(untriaged) or 'none'}. "
-            f"Queue: {len(st['open'])} open ({stages}); {len(st['prs'])} open PRs; recently closed "
+            + (f"Your holds older than {self.cfg.hold_review_s / 60:.0f} min: {', '.join(old)}. " if old else "")
+            + f"Queue: {len(st['open'])} open ({stages}); {len(st['prs'])} open PRs; recently closed "
             f"{len(st['closed'])}. main {st['main'][:8]}, {deployed}. Sessions running: {sessions}. "
             f"Pool log: {self.cfg.logdir}/pool.jsonl, state: {self.cfg.logdir}/state.json."
         )
@@ -3051,6 +3059,23 @@ class Pool:
                 self.events = lines + self.events
             self.log("feed_error", error=str(exc))
 
+    def track_holds(self, st: dict, now: float) -> None:
+        """Remember when each hold:monitor appeared, and remind the monitor once of a hold
+        older than POOL_HOLD_REVIEW_MIN: it kept its own hold on #54 for 3 h 40 min after
+        the conflict wave it was set for had passed, and the last issues waited for it."""
+        b = self.book
+        held = {i["number"] for i in st["open"] if "hold:monitor" in i["labels"]}
+        for n in held:
+            b.holds.setdefault(n, now)
+        for n in set(b.holds) - held:
+            del b.holds[n]
+            b.holds_told.discard(n)
+        for n in sorted(held):
+            if n not in b.holds_told and now - b.holds[n] >= self.cfg.hold_review_s:
+                b.holds_told.add(n)
+                self.event(f"#{n} has been at hold:monitor for {(now - b.holds[n]) / 60:.0f} min: read the condition "
+                           "your hold comment names and lift the hold if it is met")
+
     def check_files(self) -> None:
         """Tell the monitor when a file the loop relies on goes missing from the shared
         checkout, and when it is back: POOL_REQUIRED_FILES, by default .env when live
@@ -3095,6 +3120,7 @@ class Pool:
         good, _ = self.deployments()
         with self.lock:
             self.track_live(st)
+            self.track_holds(st, now)
             self.check_files()
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)

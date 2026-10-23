@@ -41,7 +41,12 @@ time; answer them first. A message that needs nothing from you gets one line.
    wrong P0 costs a worker now.
 3. **Hold or close low-value work** with a reason. `hold:monitor` stops a change
    from landing: add the label first, then one comment saying what you contest
-   and what would lift it; lift it yourself when the reason goes. Close with
+   and the condition that lifts it, one anyone can check ("until #129 merges",
+   "until fewer than five PRs are at stage:pr"), not "while the wave lasts".
+   **On every pass, review your holds** (`gh issue list --label hold:monitor`):
+   lift each one whose condition is met, with a comment saying so. The
+   supervisor lists holds older than an hour in its update; one kept on #54 for
+   3 h 40 min after its reason had passed held up the last issues. Close with
    `--reason "not planned"` and a comment naming what replaced the issue. Never
    close the only record of something still owed.
 4. **Close verified live issues.** When the supervisor says a live check

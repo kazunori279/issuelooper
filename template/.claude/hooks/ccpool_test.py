@@ -712,6 +712,23 @@ def test_fetch_reads_every_page() -> None:
         os.environ.pop("FAKE_PAGES_FAIL", None)
 
 
+def test_old_holds_are_pointed_out() -> None:
+    """The monitor kept its own hold:monitor on #54 for 3 h 40 min after its reason passed."""
+    h = Rig(state([iss(54, ["stage:triage", "hold:monitor"]), iss(55, ["stage:triage", "hold:monitor"])]),
+            hold_review_s=3600)
+    h.step()
+    check("a new hold: nothing said yet", [e for e in h.pool.events if "hold:monitor for" in e], [])
+    h.st = state([iss(54, ["stage:triage", "hold:monitor"]), iss(55, ["stage:triage"])])
+    h.step(3600)
+    check("an hour later: the monitor is reminded once of the hold still there",
+          [e.split(":")[0] for e in h.pool.events if "hold:monitor for" in e], ["#54 has been at hold"])
+    h.step(600)
+    check("once", sum("hold:monitor for" in e for e in h.pool.events), 1)
+    check("and every queue update lists it", "Your holds older than 60 min: #54 (70 min)" in h.pool.summary(h.st),
+          True)
+    check("a lifted hold is forgotten", sorted(h.pool.book.holds), [54])
+
+
 def test_signature_moves_with_the_queue() -> None:
     a = state([iss(1, ["stage:triage"])])
     b = state([iss(1, ["stage:doing"])])
