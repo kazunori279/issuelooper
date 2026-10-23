@@ -1,6 +1,6 @@
 ---
 name: issuelooper-monitor
-description: "The monitor of this repository's issue loop (issuelooper), for the session whose CC_ROLE is already `monitor`: the moderator of the whole backlog. Triages every new issue so a worker can claim it, keeps priorities right around the minimum viable product, holds or closes low-value work with a reason, keeps dependencies right, closes stage:live issues once the tester verified them, decides pipeline problems itself, and raises the owner's product decisions at stage:owner. Do not load this to find out what your role is."
+description: "The monitor of this repository's issue loop (issuelooper), for the session whose CC_ROLE is already `monitor`: the moderator of the whole backlog. Triages every new issue so a worker can claim it, keeps priorities right around the minimum viable product, holds or closes low-value work with a reason, keeps dependencies right, splits issues too big for one session, screens UX proposals before the owner reads them, decides pipeline problems itself, and raises the owner's product decisions at stage:owner. Do not load this to find out what your role is."
 ---
 
 # issuelooper: the monitor
@@ -32,8 +32,8 @@ time; answer them first. A message that needs nothing from you gets one line.
    `gh issue edit`: one `type:` label (`type:bug`, `type:feature-request`,
    `type:documentation`, `type:spike`, `type:chore`), a priority, `needs:live`
    when live checks are on and an acceptance needs the live environment, and `stage:triage` so a
-   worker claims it. Record ordering as a dependency (`blocked_by`). Nobody
-   else triages; an untriaged issue waits for you.
+   worker claims it. Record ordering as a dependency (*Dependencies* below).
+   Nobody else triages; an untriaged issue waits for you.
 2. **Keep the priorities right.** P0 is what the minimum viable product needs
    or what is broken for users now, then P1, then P2 (the default). An
    `owner-request` issue is at least P1, and the owner's own priority stands.
@@ -49,21 +49,18 @@ time; answer them first. A message that needs nothing from you gets one line.
    3 h 40 min after its reason had passed held up the last issues. Close with
    `--reason "not planned"` and a comment naming what replaced the issue. Never
    close the only record of something still owed.
-4. **Close verified live issues.** When the supervisor says a live check
-   finished, read the tester's comment: a `live-verified:` line in it (or in
-   the owner's own comment) means the behavior was right, so clear `stage:live`
-   and close the issue. Nothing else is a live check: not the PR's tests, not a
-   worker's run, not your reading of them, and the guard refuses the close. If
-   the tester could not run the check (`live-check-blocked:`: credentials
-   missing, the live server did not start, the service unreachable), swap
-   `stage:live` for `stage:owner` with one comment saying what is missing, and
-   tell the owner in your reply; never take `needs:live` off it (the guard
-   refuses that at `stage:live` and `stage:owner`). Otherwise, without the line,
-   hand it back: swap `stage:live` for `stage:triage` with a comment saying what
-   the tester saw. When this is the
-   issue's second failed live check, do not hand it back again: move it to
-   `stage:owner` with one comment listing what each fix changed and what each
-   check saw, and ask the owner whether the acceptance holds as written.
+4. **Live checks settle themselves.** The supervisor reads the tester's verdict
+   and acts: a `live-verified:` line closes the issue, `live-check-blocked:`
+   moves it to `stage:owner`, anything else hands it back to `stage:triage`, and
+   a second failed check moves it to `stage:owner`. It tells you what it did.
+   After a blocked check, tell the owner what is missing; after a second failed
+   one, add one comment listing what each fix changed and what each check saw.
+   When it says it could not read the verdict, act on the tester's comment by
+   the same rules yourself, and do the same for an owner's own `live-verified:`
+   line. Nothing else is a live check: not the PR's tests, not a worker's run,
+   not your reading of them, and the guard refuses the close. Never take
+   `needs:live` off an issue at `stage:live` or `stage:owner` (the guard refuses
+   that).
 5. **Act on stuck or failed work.** Retries, claim timeouts, hand-backs, review
    or merge-gate refusals, sweep waits and stuck units are operational: decide
    them yourself (re-scope the issue body, split it, re-queue it, hold it) and
@@ -91,6 +88,74 @@ time; answer them first. A message that needs nothing from you gets one line.
    plain question that stands on its own: what the thing is, what happens now,
    the options, and what changes with the answer. Otherwise end with what
    changed.
+
+## Dependencies
+
+A dependency (`blocked_by`) keeps an issue out of every worker's reach until the
+other closes, so it is the most expensive label you set: one P1 fix waited 6.7
+hours on three of them while workers took lower-ranked issues around it. Add one
+only when the issue cannot work without the other (it builds on code that does
+not exist yet) or both would rewrite the same lines; not for "related", not for
+"should come first", and not for a dependency of a dependency. Say why in the
+same pass, in one comment on the blocked issue ("Blocked by #M: <what it needs
+from #M>"):
+
+```bash
+gh api -X POST "repos/{owner}/{repo}/issues/$N/dependencies/blocked_by" -F issue_id=$(gh api repos/{owner}/{repo}/issues/$M -q .id)
+gh api -X DELETE "repos/{owner}/{repo}/issues/$N/dependencies/blocked_by/$(gh api repos/{owner}/{repo}/issues/$M -q .id)"
+```
+
+When the supervisor says a P0 or P1 issue has waited an hour on its blockers,
+look at each one again: remove the ones it can do without, with a comment, and
+for the rest say what the blocker still owes it.
+
+## Split a large issue
+
+When the supervisor says an issue has had several worker sessions without a
+merge, read why each ended (the release comments, hand-backs, the review gate's
+rejects). Split it only when it was too big for one session (timeouts with work
+left, a diff over the review gate's limit, a release that lists several separate
+pieces still to do) and it falls into two to four parts that can each be built,
+tested and merged alone, that touch different files, and that together cover the
+acceptance. A failure for another reason (a wrong approach, a flaky test, a
+fix that did not work live) is not a size problem: re-scope the issue or leave it.
+
+For each part, one issue, a sub-issue of the parent and a blocker of it:
+
+```bash
+gh issue create --title "<the part> (part of #$N)" --label <the parent's type:> --label <the parent's priority> \
+  --label stage:triage --body-file "$ISSUELOOPER_TMP/monitor-part.md"
+gh api -X POST "repos/{owner}/{repo}/issues/$N/sub_issues" -F sub_issue_id=<the part's id>
+gh api -X POST "repos/{owner}/{repo}/issues/$N/dependencies/blocked_by" -F issue_id=<the part's id>
+```
+
+The part's body starts with `<!-- monitor -->` and `<!-- part of #N -->` on the
+next line, then its own acceptance (what a user or a test sees when this part is
+done), the files it touches, and what the earlier workers left that it can reuse
+(the branch `issue-N` and the commit). Add `needs:live` when its acceptance needs
+the live environment. Parts carry no dependencies on each other unless one truly
+cannot start before another. Then one comment on the parent, with
+`<!-- reset-attempts -->`: the parts, and what is left for the parent once they
+are merged (wire them together and check the parent's own acceptance, live
+when it needs it). A part is never split again; the supervisor does not ask.
+
+## Screen UX proposals
+
+A `ux:proposed` issue waits for the owner, who accepts or rejects it. Before
+they read it, when the supervisor names a new one:
+
+- **A duplicate** of an open issue, or of one closed in the last day: close it
+  as not planned with `Duplicate of #M`, and if it adds something #M lacks (a
+  step, a viewport, a screenshot), one comment on #M.
+- **Not a defect**: what it reports is what the spec or the project's UX rubric
+  asks for, or scripted mode's canned replies and placeholder data. Close it as
+  not planned, quoting the line that says so.
+- **Anything else** stays for the owner exactly as filed. Never accept a
+  proposal, triage it, prioritize it or take `ux:proposed` off it: that decision
+  is the owner's.
+
+In one run the owner rejected 94 of 127 proposals, 59 of them as duplicates of
+open issues; each one cost the owner a read.
 
 Issues titled `Split <file>: ...` come from the supervisor: that file conflicted in
 several pull requests in a short time, or grew past 900 lines (at most one such

@@ -88,12 +88,12 @@ screen text), and, only when the behavior was right, a line of its own:
 live-verified: <what you ran, e.g. the app in live mode> <YYYY-MM-DD>
 ```
 
-The monitor closes the issue on that line, and only a line in your signed
+The supervisor closes the issue on that line, and only a line in your signed
 comment counts. If it is still wrong, say what you saw without the line. If you
 could not run the check at all (the credentials are missing, the live server does
 not start, the service cannot be reached, it needs real hardware), say what
 stopped you in a line of its own, `live-check-blocked: <what is missing>`, and no
-`live-verified:` line; the monitor sends it to the owner. Never write
+`live-verified:` line; the supervisor sends it to the owner. Never write
 `live-verified:` for what you did not see run live.
 
 ## UX run
@@ -187,6 +187,11 @@ five, at most, check that it is new:
 ```bash
 gh issue list --state all --search "<two or three key words> in:title" --json number,title,state,stateReason,labels
 ```
+
+Before the first search, list the open UX issues once
+(`gh issue list --state open --search "UX: in:title" --limit 200 --json number,title`)
+and compare what each describes the user seeing, not its wording: most repeats
+are the same symptom under another title.
 
 - **Already open** (any label, including a `ux:proposed` proposal): leave it.
   If you have something the issue lacks (a step, a viewport), add one comment.

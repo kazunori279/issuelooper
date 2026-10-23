@@ -63,12 +63,19 @@ UNITS
           in the repository) when there is one, else journeys it keeps in
           $ISSUELOOPER_TMP/ux/; the score on its report's
           first line (`Score: N/100`) is logged and shown on the dashboard.
+          The supervisor acts on a live check's verdict itself (settle_live): a
+          `live-verified:` line closes the issue, `live-check-blocked:` moves it to
+          stage:owner, anything else hands it back to stage:triage, and a second
+          failed check moves it to stage:owner.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
 monitor's; no unit is started for them, and none for an issue with an open blocker
 (a `Blocked by:` line or a GitHub issue dependency). Issues labeled ux:proposed are proposals
-waiting for the owner: no unit and no triage. A reopened issue is an open issue
-like any other; its newest comments say why it came back.
+waiting for the owner: no unit and no triage, but the monitor is told of each new one
+to screen it (POOL_UX_SCREEN, on by default). A reopened issue is an open issue
+like any other; its newest comments say why it came back. The monitor is also told,
+once, of a claimable P0/P1 issue blocked for POOL_BLOCKED_REVIEW_MIN (60), and of an
+issue POOL_DECOMPOSE_AFTER (2; 0 is off) worker sessions have not landed, to split it.
 
 A unit's key carries the state it was computed from (the issue's updatedAt, the
 PR's head and main). A key never runs twice at once, never again after a clean
@@ -186,6 +193,13 @@ CLAIMABLE = set(claimlib.CLAIMABLE)
 HOLDS = claimlib.HOLDS
 IGNORED = claimlib.IGNORED  # ux:proposed: a proposal waiting for the owner
 LINK = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|refs?)\s+#(\d+)\b")
+# The tester's verdict on a live check (issuelooper-tester, Live check), and the marker
+# the supervisor leaves on a hand-back after one, to count failed checks.
+LIVE_VERIFIED = re.compile(r"(?im)^[ \t>*-]*live-verified:[ \t]*\S")
+LIVE_BLOCKED = re.compile(r"(?im)^[ \t>*`-]*live-check-blocked:")
+LIVE_HANDBACK = "<!-- live-handback -->"
+# A sub-issue the monitor split off a larger one starts with this, so it is not split again.
+PART_OF = re.compile(r"<!--\s*part of #(\d+)\s*-->")
 BRANCH = re.compile(r"^issue-(\d+)\b")
 
 # Open issues and open pull requests are read page by page ($ia, $pa: the cursors);
@@ -293,6 +307,9 @@ class Config:
     quota_wait_max_s: float = 900
     stall_s: float = 600
     hold_review_s: float = 3600  # a hold:monitor this old is pointed out to the monitor
+    blocked_review_s: float = 3600  # a claimable P0/P1 issue blocked this long is pointed out too
+    decompose_after: int = 2  # worker sessions on one issue without its merge before the monitor is asked to split it
+    ux_screen: bool = True  # the monitor screens ux:proposed proposals before the owner reads them
     background_idle_s: float = 120  # agy idle on a background task this long: resumed (Session.background_idle)
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
@@ -388,6 +405,9 @@ class Config:
             quota_wait_max_s=float(e("POOL_QUOTA_WAIT_MAX_S", "900")),
             stall_s=float(e("POOL_STALL_S", "600")),
             hold_review_s=gap_s("POOL_HOLD_REVIEW", 60),
+            blocked_review_s=gap_s("POOL_BLOCKED_REVIEW", 60),
+            decompose_after=env_int("POOL_DECOMPOSE_AFTER", 2),
+            ux_screen=env_flag("POOL_UX_SCREEN", True),
             background_idle_s=float(e("POOL_BACKGROUND_IDLE_S", "") or 120),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
@@ -642,6 +662,10 @@ class Book:
         self.missing: list[str] = []  # required files gone from the shared checkout (Pool.check_files)
         self.holds: dict[int, float] = {}  # issue -> when hold:monitor was first seen on it
         self.holds_told: set[int] = set()  # holds the monitor was reminded of
+        self.blocked: dict[int, float] = {}  # claimable P0/P1 issue -> when it was first seen blocked
+        self.blocked_told: set[int] = set()  # blocked issues the monitor was pointed to
+        self.worker_runs: collections.Counter = collections.Counter()  # issue -> worker sessions ended on it
+        self.decompose_told: set[int] = set()  # issues the monitor was asked to split
         self.last_ux_t = 0.0  # when the last UX run started
         self.last_spec_t = 0.0  # when the last spec check started
         self.extra_runs = 0  # idle UX runs and spec checks started (part of their keys)
@@ -2603,19 +2627,17 @@ class Pool:
                     )
             elif outcome != "unclaimable" and not outcome.startswith("quota error"):
                 self.crashes[u.role] = 0
-            if u.role == "tester" and u.kind == "live" and outcome == "ok":
-                # A finished live check needs the monitor's close or hand-back.
-                self.events.append(
-                    f"live check of #{u.number} finished: read the tester's comment on #{u.number}; if it says "
-                    "live-check-blocked:, move it to stage:owner for the owner; otherwise close the issue "
-                    "if it passed, or hand it back if it failed"
-                )
+            if u.role == "worker" and u.number is not None and outcome != "unclaimable" \
+                    and not outcome.startswith("quota error"):
+                b.worker_runs[u.number] += 1
             if outcome not in ("ok", "unclaimable") and not outcome.startswith("quota error"):
                 self.events.append(
                     f"{u.role} session {w.seq} on {u.kind} {self.label(u)} {outcome} (log {w.dir})"
                 )
         if outcome.startswith("quota error"):
             self.quota_seen(u.role)
+        if u.role == "tester" and u.kind == "live" and outcome == "ok":
+            self.settle_live(u)
         if u.kind == "ux":
             self.record_ux_score(w)
         extra = {}
@@ -2934,7 +2956,13 @@ class Pool:
                 n, labels = i["number"], set(i["labels"])
                 old = was_open.get(n)
                 if labels & IGNORED:
-                    continue  # a proposal waiting for the owner; not for the monitor to triage
+                    # A proposal waiting for the owner: not for the monitor to triage, but to
+                    # screen. Of 127 UX proposals in one run the owner rejected 94, 59 of them
+                    # as duplicates of open issues.
+                    if old is None and n not in was_closed and self.cfg.ux_screen:
+                        self.event(f"new UX proposal #{n}: {i['title']}. Screen it before the owner reads it "
+                                   "(issuelooper-monitor skill, Screen UX proposals)")
+                    continue
                 if old is not None and IGNORED & set(old["labels"]):
                     self.event(f"#{n} is no longer ux:proposed (the owner accepted it): triage it: {i['title']}")
                     continue
@@ -3011,9 +3039,13 @@ class Pool:
         now = self.clock()
         old = [f"#{n} ({(now - t) / 60:.0f} min)" for n, t in sorted(self.book.holds.items())
                if now - t >= self.cfg.hold_review_s]
+        waits = [f"#{n} ({(now - t) / 60:.0f} min)" for n, t in sorted(self.book.blocked.items())
+                 if now - t >= self.cfg.blocked_review_s]
         return (
             f"Untriaged (yours): {', '.join(untriaged) or 'none'}. "
             + (f"Your holds older than {self.cfg.hold_review_s / 60:.0f} min: {', '.join(old)}. " if old else "")
+            + (f"P0/P1 issues blocked over {self.cfg.blocked_review_s / 60:.0f} min: {', '.join(waits)}. "
+               if waits else "")
             + f"Queue: {len(st['open'])} open ({stages}); {len(st['prs'])} open PRs; recently closed "
             f"{len(st['closed'])}. main {st['main'][:8]}, {deployed}. Sessions running: {sessions}. "
             f"Pool log: {self.cfg.logdir}/pool.jsonl, state: {self.cfg.logdir}/state.json."
@@ -3068,6 +3100,74 @@ class Pool:
                 self.events = lines + self.events
             self.log("feed_error", error=str(exc))
 
+    def settle_live(self, u: Unit) -> None:
+        """Act on the tester's verdict on a stage:live issue: close it on a `live-verified:`
+        line, send it to the owner on `live-check-blocked:`, hand it back to stage:triage
+        otherwise, and to the owner on its second failed check. The monitor did this by
+        hand, one turn each (24 closes in one run); it is told what happened. When the
+        verdict cannot be read, the monitor is asked to act, as before."""
+        n = u.number
+        ask = (f"live check of #{n} finished: read the tester's comment on #{n}; if it says "
+               "live-check-blocked:, move it to stage:owner for the owner; otherwise close the issue "
+               "if it passed, or hand it back if it failed")
+        try:
+            r = self.gh("issue", "view", str(n), "--json", "state,labels,comments")
+            data = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            data = None
+        if not isinstance(data, dict):
+            self.event(ask)
+            return
+        labels = {x.get("name") for x in data.get("labels") or []}
+        if data.get("state") != "OPEN" or "stage:live" not in labels:
+            return  # somebody already settled it
+        try:
+            login = claimlib.loop_login().lower()
+        except claimlib.GhError:
+            self.event(ask)
+            return
+        # Only the loop's own account speaks for the tester and the supervisor.
+        comments = [c for c in data.get("comments") or []
+                    if str((c.get("author") or {}).get("login") or "").lower() == login]
+        since = u.info.get("since") or ""
+        verdicts = [c for c in comments if str(c.get("body", "")).lstrip().startswith("<!-- tester -->")
+                    and str(c.get("createdAt", "")) >= since]
+        if not verdicts:
+            self.event(ask)
+            return
+        body, url = str(verdicts[-1].get("body", "")), verdicts[-1].get("url", "")
+        if LIVE_BLOCKED.search(body):
+            self.gh("issue", "edit", str(n), "--remove-label", "stage:live", "--add-label", "stage:owner")
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\nThe tester could not run the live check ({url}): it needs what that "
+                    "comment names, which only the owner can provide. Waiting at stage:owner.")
+            self.event(f"#{n}: the live check could not run (live-check-blocked); moved to stage:owner. "
+                       "Tell the owner what is missing.")
+            how = "blocked"
+        elif LIVE_VERIFIED.search(body):
+            self.gh("issue", "edit", str(n), "--remove-label", "stage:live")
+            self.gh("issue", "close", str(n), "--reason", "completed", "--comment",
+                    f"<!-- merger -->\nClosed: the tester's live check passed ({url}).")
+            self.event(f"#{n}: the live check passed; the supervisor closed it.")
+            how = "verified"
+        elif sum(LIVE_HANDBACK in str(c.get("body", "")) for c in comments) >= 1:
+            self.gh("issue", "edit", str(n), "--remove-label", "stage:live", "--add-label", "stage:owner")
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\n{LIVE_HANDBACK}\nThe second live check failed too ({url}). Two fixes "
+                    "merged and neither worked live: whether the acceptance holds as written is the owner's "
+                    "call. Waiting at stage:owner.")
+            self.event(f"#{n}: its second live check failed; moved to stage:owner. Add one comment listing what "
+                       "each fix changed and what each check saw.")
+            how = "owner"
+        else:
+            self.gh("issue", "edit", str(n), "--remove-label", "stage:live", "--add-label", "stage:triage")
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\n{LIVE_HANDBACK}\nBack to stage:triage: the live check after the merge "
+                    f"did not show the behavior ({url}). The next worker starts from what that comment saw.")
+            self.event(f"#{n}: the live check failed; handed back to stage:triage.")
+            how = "handback"
+        self.log("live_settled", issue=n, verdict=how)
+
     def track_holds(self, st: dict, now: float) -> None:
         """Remember when each hold:monitor appeared, and remind the monitor once of a hold
         older than POOL_HOLD_REVIEW_MIN: it kept its own hold on #54 for 3 h 40 min after
@@ -3084,6 +3184,58 @@ class Pool:
                 b.holds_told.add(n)
                 self.event(f"#{n} has been at hold:monitor for {(now - b.holds[n]) / 60:.0f} min: read the condition "
                            "your hold comment names and lift the hold if it is met")
+
+    def track_blocked(self, st: dict, now: float) -> None:
+        """Point the monitor, once, to a claimable P0 or P1 issue that has waited
+        POOL_BLOCKED_REVIEW_MIN on open blockers. One P1 fix waited 6.7 hours on three
+        dependencies while workers took lower-ranked issues around it, and nobody
+        looked at whether it still needed them."""
+        b = self.book
+        waiting = {
+            i["number"]: i for i in st["open"]
+            if i.get("blocked_by") and set(i["labels"]) & {"P0", "P1"} and set(i["labels"]) & CLAIMABLE
+            and not set(i["labels"]) & (HOLDS | IGNORED)
+        }
+        for n in waiting:
+            b.blocked.setdefault(n, now)
+        for n in set(b.blocked) - set(waiting):
+            del b.blocked[n]
+            b.blocked_told.discard(n)
+        for n, i in sorted(waiting.items()):
+            if n not in b.blocked_told and now - b.blocked[n] >= self.cfg.blocked_review_s:
+                b.blocked_told.add(n)
+                prio = next(p for p in ("P0", "P1") if p in i["labels"])
+                self.event(
+                    f"#{n} ({prio}) has waited {(now - b.blocked[n]) / 60:.0f} min on {i['blocked_by']} open "
+                    f"blocker(s) (`gh api repos/{{owner}}/{{repo}}/issues/{n}/dependencies/blocked_by`): keep "
+                    f"each only if #{n} cannot work or would conflict without it, and remove the rest "
+                    "(issuelooper-monitor skill, Dependencies)"
+                )
+
+    def ask_decompose(self, st: dict) -> None:
+        """Ask the monitor, once per issue, to split one that POOL_DECOMPOSE_AFTER worker
+        sessions have not landed and that is waiting for the next. The monitor may split
+        any issue, and in a 12-hour run split none: one issue took eleven sessions."""
+        b, k = self.book, self.cfg.decompose_after
+        if not k:
+            return
+        open_ = {i["number"]: i for i in st["open"]}
+        for n in list(b.worker_runs):
+            i = open_.get(n)
+            if i is None:
+                del b.worker_runs[n]  # closed: done with
+                continue
+            labels = set(i["labels"])
+            if (n in b.decompose_told or b.worker_runs[n] < k or not labels & (CLAIMABLE | {"stage:owner"})
+                    or labels & (HOLDS | IGNORED) or PART_OF.search(i.get("body") or "")):
+                continue
+            b.decompose_told.add(n)
+            self.event(
+                f"#{n} has had {b.worker_runs[n]} worker sessions and is not merged: {i['title']}. Read why each "
+                "ended (the release and hand-back comments): if it is too big for one session, split it into "
+                "sub-issues (issuelooper-monitor skill, Split a large issue); if it failed for another reason, "
+                "re-scope it or leave it"
+            )
 
     def check_files(self) -> None:
         """Tell the monitor when a file the loop relies on goes missing from the shared
@@ -3130,6 +3282,8 @@ class Pool:
         with self.lock:
             self.track_live(st)
             self.track_holds(st, now)
+            self.track_blocked(st, now)
+            self.ask_decompose(st)
             self.check_files()
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)

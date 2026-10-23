@@ -202,7 +202,8 @@ The supervisor itself runs in the background; its log is
 
 Type into the monitor's pane as you would into any agent session. The monitor
 triages new issues, sets priorities, holds or closes work, keeps dependencies,
-closes verified live issues, and gathers the questions only you can answer. Use it
+splits issues too big for one session, screens UX proposals before you read them,
+and gathers the questions only you can answer. Use it
 for decisions about the backlog:
 
 - "Make #12 P0 and hold #15 until it lands."

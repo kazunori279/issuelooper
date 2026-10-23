@@ -60,7 +60,7 @@ Finish your unit and stop; nothing waits on a timer.
   the same PR.
 - **`stage:live` issues** (when live checks are on): a tester checks the merged
   change against the live environment and posts a `live-verified:` line; the
-  monitor then closes it.
+  supervisor then closes it (or hands it back, or sends it to the owner).
 - **The deployed app** (when UX runs are on): a tester walks it as a user would
   and files what gets in a user's way.
 - **An idle pool**: when no worker or merger has anything to do, the supervisor
@@ -120,7 +120,7 @@ One label per axis. Two `stage:` labels on one issue is a bug.
 | `stage:triage`, `stage:ready` | claimable by a worker | monitor, worker (own claim), tester and aide (`stage:triage` when filing) | monitor, worker (own claim) |
 | `stage:doing` | a worker holds the claim | `claim.py` | `claim.py`, monitor |
 | `stage:pr` | its PR is open and green | worker (own claim) | supervisor, merger, monitor |
-| `stage:live` | merged; the live check is owed | supervisor, merger, monitor | monitor |
+| `stage:live` | merged; the live check is owed | supervisor, merger, monitor | supervisor, monitor |
 | `stage:owner` | waits for the owner's decision; only the owner answers it | anyone | anyone, once the owner answered |
 | `needs:live` | acceptance needs the live environment | monitor, worker, tester, aide | monitor before the merge; at `stage:live` or `stage:owner` only the owner |
 | `P0`, `P1`, `P2` | priority (P2 is the default; P0 is broken now) | monitor; tester and aide when filing | monitor |
