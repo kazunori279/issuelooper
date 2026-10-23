@@ -24,8 +24,8 @@ UNITS
   auto    (no agent) merge: one per open PR whose issue is at stage:pr and that
           GitHub calls MERGEABLE. The review gate (review_gate.py) reads the diff,
           role_guard.py's merge gates run with CC_ROLE=merger, and the PR is
-          squash-merged; a refusal hands the PR back to a worker (a refusal over
-          the sweep record is re-swept here first). With POOL_FAST_CHECK_CMD set, a
+          squash-merged; a refusal hands the PR back to a worker (a head the gates
+          would refuse for its sweep is swept here first, outside the merge lock). With POOL_FAST_CHECK_CMD set, a
           PR whose head is behind main is first merged with main in a worktree and
           the command runs there, under the merge lock right before the merge: a
           failure hands the PR back, unless main alone fails it too. rebase: a CONFLICTING PR is first rebased here, once per
@@ -536,6 +536,9 @@ def pr_issue(pr: dict) -> int | None:
 
 
 FAILED_LINE = re.compile(r"(?m)^(?:FAILED|ERROR) (\S+)")
+# Gate 2's reading of a PR body (role_guard.SWEEP_SHA_PATTERN and SWEEP_WAIVER).
+SWEEP_SHA = re.compile(r"(?i)\bSweep\s+SHA\b[*`:\s]*([0-9a-f]{7,40})")
+SWEEP_WAIVED = re.compile(r"(?i)\bSweep\b[*`:\s]*waived\s*[-–—:]\s*(loop/process|docs\s+only|owner\s+ruling)\b")
 
 
 def failing_tests(out: str) -> list[str]:
@@ -1802,43 +1805,37 @@ class Session(threading.Thread):
                 return {"decision": "hold", "reason": f"the guard gave no verdict ({g.stdout.strip()[-200:]!r})"}
             return verdict
 
-        with self.pool.merge_lock:
-            # A head swept on an older main says nothing about the merged result: one PR
-            # moved an import, another (swept before it) still used it, GitHub saw no
-            # conflict, and main stopped starting. A rebase and full sweep per merge would
-            # serialize the merges (most were behind main), so a quick check runs on the
-            # head merged with the current main instead. It runs under the lock, right
-            # before the merge: a check made before the review went stale when other
-            # merges landed meanwhile, and main broke three times in one run that way.
-            if self.pool.cfg.fast_check_cmd:
-                held = self.merged_check(pr, n, head, u.info.get("branch") or "", env)
-                if held:
-                    return held
-            verdict = gates()
-            if verdict.get("decision") in ("block", "deny") and re.search(
-                r"(?i)sweep", str(verdict.get("reason") or "")
-            ) and self.resweep(pr, u.info.get("branch") or "", head, env):
-                # A missing or stale sweep record is mechanical: sweep the head here and
-                # ask the gates again before handing anything back (most merge-gate
-                # hand-backs were a missing sweep line or record).
+        branch = u.info.get("branch") or ""
+        swept = None  # this unit's re-sweep of the head: None (none yet), True or False
+        for attempt in range(2):
+            # A missing or stale sweep record is mechanical: sweep the head here before
+            # anything is handed back (most merge-gate hand-backs were a missing sweep
+            # line or record). Outside the merge lock: a merger's clean re-rebase comes
+            # without a sweep, and re-sweeping it (5-10 minutes) under the lock held every
+            # other merge, whose PRs then conflicted again and got mergers of their own.
+            if swept is None and (attempt or self.needs_sweep(pr, head)):
+                swept, _ = self.resweep(pr, branch, head, env)
+            with self.pool.merge_lock:
+                # A head swept on an older main says nothing about the merged result: one PR
+                # moved an import, another (swept before it) still used it, GitHub saw no
+                # conflict, and main stopped starting. A rebase and full sweep per merge would
+                # serialize the merges (most were behind main), so a quick check runs on the
+                # head merged with the current main instead. It runs under the lock, right
+                # before the merge: a check made before the review went stale when other
+                # merges landed meanwhile, and main broke three times in one run that way.
+                if self.pool.cfg.fast_check_cmd:
+                    held = self.merged_check(pr, n, head, branch, env)
+                    if held:
+                        return held
                 verdict = gates()
-            if verdict.get("decision") == "hold":
-                self.pool.event(f"auto-merge of PR #{pr} held: {verdict['reason']}; tried again on a later poll")
-                return f"held ({verdict['reason']})"
-            if verdict.get("decision") in ("block", "deny"):
-                reason = str(verdict.get("reason") or "")
-                if "shared checkout" in reason.lower():
-                    self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
-                    return "failed (gate 0: shared checkout)"
-                self.hand_back(pr, n, "**Merge gates: refused.** Not merged.\n\n" + reason[:2500])
-                gate = re.search(r"(?i)\bgate\s*(\d)", reason)
-                self.pool.log("handback", pr=pr, issue=n, by=f"gate {gate.group(1)}" if gate else "gates",
-                              reason=reason.strip().splitlines()[0][:200] if reason.strip() else "")
-                return "refused by the merge gates (handed back)"
-            m = self.gh("pr", "merge", str(pr), "--squash", "--delete-branch", "--match-head-commit", head)
-            self.note(f"gh pr merge exit {m.returncode}: {(m.stdout + m.stderr).strip()[-400:]}")
-            if m.returncode != 0:
-                return f"merge refused by GitHub (exit {m.returncode})"
+                if swept is None and verdict.get("decision") in ("block", "deny") and re.search(
+                    r"(?i)sweep", str(verdict.get("reason") or "")
+                ):
+                    continue  # the gates want a sweep after all: leave the lock, sweep, ask again
+                outcome = self.land(pr, n, head, verdict)
+                if outcome:
+                    return outcome
+                break
         args = ["issue", "edit", str(n), "--remove-label", "stage:pr"]
         if u.info.get("needs_live"):
             args += ["--add-label", "stage:live"]
@@ -1852,6 +1849,28 @@ class Session(threading.Thread):
         )
         self.note_large_files(pr)
         return "ok"
+
+    def land(self, pr: int, n: int, head: str, verdict: dict) -> str:
+        """Act on the gates' verdict, under the merge lock: '' once merged, else the
+        unit's outcome (held, handed back, or refused by GitHub)."""
+        if verdict.get("decision") == "hold":
+            self.pool.event(f"auto-merge of PR #{pr} held: {verdict['reason']}; tried again on a later poll")
+            return f"held ({verdict['reason']})"
+        if verdict.get("decision") in ("block", "deny"):
+            reason = str(verdict.get("reason") or "")
+            if "shared checkout" in reason.lower():
+                self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
+                return "failed (gate 0: shared checkout)"
+            self.hand_back(pr, n, "**Merge gates: refused.** Not merged.\n\n" + reason[:2500])
+            gate = re.search(r"(?i)\bgate\s*(\d)", reason)
+            self.pool.log("handback", pr=pr, issue=n, by=f"gate {gate.group(1)}" if gate else "gates",
+                          reason=reason.strip().splitlines()[0][:200] if reason.strip() else "")
+            return "refused by the merge gates (handed back)"
+        m = self.gh("pr", "merge", str(pr), "--squash", "--delete-branch", "--match-head-commit", head)
+        self.note(f"gh pr merge exit {m.returncode}: {(m.stdout + m.stderr).strip()[-400:]}")
+        if m.returncode != 0:
+            return f"merge refused by GitHub (exit {m.returncode})"
+        return ""
 
     def fast_check(self, wt: str, env: dict) -> tuple[bool, str]:
         """POOL_FAST_CHECK_CMD in a worktree: (passed, the tail of its output)."""
@@ -1926,25 +1945,40 @@ class Session(threading.Thread):
             time.sleep(2 + 2 * attempt)
         return self.git(root, "merge-base", "--is-ancestor", "origin/main", head).returncode == 1
 
-    def resweep(self, pr: int, branch: str, head: str, env: dict) -> bool:
-        """Run the sweep at the PR's head in a worktree and update the PR body
-        (sweep_locked.py --update-pr). True when it ended green at that head."""
-        if not branch:
+    def needs_sweep(self, pr: int, head: str) -> bool:
+        """Whether the merge gates would ask for a sweep of this head (Gate 2): the PR body
+        names another head, or there is no green sweep record for it and no waiver. A body
+        that cannot be read says nothing; the gates decide."""
+        r = self.gh("pr", "view", str(pr), "--json", "body", "-q", ".body")
+        if r.returncode != 0:
             return False
+        m = SWEEP_SHA.search(r.stdout)
+        if not m or not head.lower().startswith(m.group(1).lower()):
+            return True
+        if SWEEP_WAIVED.search(r.stdout):
+            return False
+        records = pathlib.Path(os.environ.get("SWEEP_RECORD_DIR") or "/tmp/issuelooper-sweep")
+        return not (records / f"{head}.json").exists()
+
+    def resweep(self, pr: int, branch: str, head: str, env: dict) -> tuple[bool, str]:
+        """Run the sweep at the PR's head in a worktree and update the PR body
+        (sweep_locked.py --update-pr): (ended green at that head, its output)."""
+        if not branch:
+            return False, ""
         root, wt = str(repo_root()), f"/tmp/mrg-{pr}-sweep"
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
         try:
             self.git(root, "fetch", "-q", "origin", branch)
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
-                return False
+                return False, ""
             r = subprocess.run(
                 [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)],
                 cwd=wt, env=env, capture_output=True, text=True, timeout=2400,
             )
             self.note(f"resweep exit {r.returncode}: {(r.stdout + r.stderr).strip()[-400:]}")
-            return r.returncode == 0 and "green" in r.stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+            return r.returncode == 0 and "green" in r.stdout, r.stdout + r.stderr
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
         finally:
             subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
 

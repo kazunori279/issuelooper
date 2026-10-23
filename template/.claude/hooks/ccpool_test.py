@@ -1636,7 +1636,7 @@ def auto_session(guard_out: str, review_rc: int = 0, guard_rc: int = 0, guard_cm
     w.dir.mkdir(parents=True)
     outcome = w.work()
     log = (d / "gh.log").read_text().splitlines() if (d / "gh.log").exists() else []
-    return outcome, log, pool
+    return outcome, [x for x in log if not x.startswith("pr view")], pool  # needs_sweep's read
 
 
 def test_auto_merge_paths() -> None:
@@ -2115,26 +2115,33 @@ def test_ux_runs_never_run_out() -> None:
     )
 
 
-def test_auto_merge_resweeps_a_sweep_refusal() -> None:
+def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, record: bool = False):
+    """auto_merge with a fake resweep that notes whether the merge lock was held, a gh
+    whose `pr view` prints `body` (None: gh pr view fails), and a guard script."""
     calls = []
     real = ccpool.Session.resweep
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-resweep-"))
 
     def fake(self, pr, branch, head, env):
-        calls.append((pr, branch, head))
-        return True
+        calls.append((pr, branch, head, self.pool.merge_lock.locked()))
+        return sweep_ok, "FAILED tests/e2e/test_issue_20.py::test_map - boom\n" if not sweep_ok else "281 green"
 
     ccpool.Session.resweep = fake
+    old = os.environ.get("SWEEP_RECORD_DIR")
+    os.environ["SWEEP_RECORD_DIR"] = str(d / "records")
     try:
-        d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-resweep-"))
+        if record:
+            (d / "records").mkdir()
+            (d / "records" / f"{'c' * 40}.json").write_text("{}")
         guard = d / "guard"
-        guard.write_text(
-            f"#!/bin/sh\ncat > /dev/null\nif [ -e {d}/once ]; then echo '{{\"decision\": \"allow\"}}'; else touch {d}/once; "
-            "echo '{\"decision\": \"block\", \"reason\": \"No sweep record for this head.\"}'; fi\n"
-        )
+        guard.write_text("#!/bin/sh\ncat > /dev/null\n" + guard_script.replace("{d}", str(d)))
         guard.chmod(0o755)
         gh = d / "gh"
-        gh.write_text(f'#!/bin/sh\necho "$*" >> {d}/gh.log\n')
+        view = (f'if [ "$1 $2" = "pr view" ]; then cat {d}/body; exit 0; fi\n' if body is not None
+                else 'if [ "$1 $2" = "pr view" ]; then exit 1; fi\n')
+        gh.write_text(f'#!/bin/sh\necho "$*" >> {d}/gh.log\n{view}')
         gh.chmod(0o755)
+        (d / "body").write_text(body or "")
         review = d / "review"
         review.write_text("#!/bin/sh\nexit 0\n")
         review.chmod(0o755)
@@ -2149,8 +2156,41 @@ def test_auto_merge_resweeps_a_sweep_refusal() -> None:
         outcome = w.work()
     finally:
         ccpool.Session.resweep = real
-    check("a sweep refusal is swept here and merged", outcome, "ok")
-    check("at the PR's head and branch", calls, [(9, "issue-2", "c" * 40)])
+        if old is None:
+            os.environ.pop("SWEEP_RECORD_DIR", None)
+        else:
+            os.environ["SWEEP_RECORD_DIR"] = old
+    log = (d / "gh.log").read_text() if (d / "gh.log").exists() else ""
+    return outcome, calls, log, pool
+
+
+ALLOW_SH = "echo '{\"decision\": \"allow\"}'\n"
+SWEEP_REFUSED_ONCE = ("if [ -e {d}/once ]; then " + ALLOW_SH.strip() + "; else touch {d}/once; "
+                      "echo '{\"decision\": \"block\", \"reason\": \"No sweep record for this head.\"}'; fi\n")
+
+
+def test_auto_merge_resweeps_outside_the_merge_lock() -> None:
+    """A merger's clean re-rebase comes without a sweep; re-sweeping it under the merge
+    lock (5-10 minutes each) held every other merge, and their PRs conflicted again."""
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    outcome, calls, log, _ = resweep_session(stale, ALLOW_SH)
+    check("a PR body naming another head: swept before the lock, then merged",
+          (outcome, calls, "pr merge 9" in log), ("ok", [(9, "issue-2", "c" * 40, False)], True))
+    fresh = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "c" * 12 + "\n"
+    outcome, calls, _, _ = resweep_session(fresh, ALLOW_SH)
+    check("its own head but no sweep record: swept first", calls, [(9, "issue-2", "c" * 40, False)])
+    outcome, calls, _, _ = resweep_session(fresh, ALLOW_SH, record=True)
+    check("its own head and a green record: no sweep", (outcome, calls), ("ok", []))
+    waived = fresh + "- **Sweep:** waived - docs only\n"
+    outcome, calls, _, _ = resweep_session(waived, ALLOW_SH)
+    check("a waived sweep at its own head: no sweep", (outcome, calls), ("ok", []))
+    outcome, calls, log, _ = resweep_session(None, SWEEP_REFUSED_ONCE)
+    check("the body unreadable but the gates want a sweep: the lock is left, then swept and merged",
+          (outcome, calls, log.count("pr merge 9")), ("ok", [(9, "issue-2", "c" * 40, False)], 1))
+    outcome, calls, log, _ = resweep_session(stale, "echo '{\"decision\": \"block\", \"reason\": "
+                                                    "\"No sweep record for this head.\"}'\n")
+    check("a sweep refusal after the head was swept here is handed back, swept once",
+          (outcome, len(calls), "pr merge" in log), ("refused by the merge gates (handed back)", 1, False))
 
 
 def test_worker_prompt_points_to_the_project() -> None:
