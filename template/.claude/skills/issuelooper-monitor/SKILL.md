@@ -45,11 +45,17 @@ time; answer them first. A message that needs nothing from you gets one line.
    `--reason "not planned"` and a comment naming what replaced the issue. Never
    close the only record of something still owed.
 4. **Close verified live issues.** When the supervisor says a live check
-   finished, read the tester's comment: a `live-verified:` line means the
-   behavior was right, so clear `stage:live` and close the issue. Without the
-   line, hand it back: swap `stage:live` for `stage:triage` with a comment
-   saying what the tester saw. If the tester says the rig cannot reach it,
-   decide (remove `needs:live` and close, or ask the owner at `stage:owner`). When this is the
+   finished, read the tester's comment: a `live-verified:` line in it (or in
+   the owner's own comment) means the behavior was right, so clear `stage:live`
+   and close the issue. Nothing else is a live check: not the PR's tests, not a
+   worker's run, not your reading of them, and the guard refuses the close. If
+   the tester could not run the check (`live-check-blocked:`: credentials
+   missing, the live server did not start, the service unreachable), swap
+   `stage:live` for `stage:owner` with one comment saying what is missing, and
+   tell the owner in your reply; never take `needs:live` off it (the guard
+   refuses that at `stage:live` and `stage:owner`). Otherwise, without the line,
+   hand it back: swap `stage:live` for `stage:triage` with a comment saying what
+   the tester saw. When this is the
    issue's second failed live check, do not hand it back again: move it to
    `stage:owner` with one comment listing what each fix changed and what each
    check saw, and ask the owner whether the acceptance holds as written.

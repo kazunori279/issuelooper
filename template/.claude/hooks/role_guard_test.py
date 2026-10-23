@@ -1345,6 +1345,24 @@ def test_needs_live_close_requires_evidence() -> None:
     )
     verdict, _ = run("gh issue close 64", role="monitor", extra_env=env)
     check("the line from someone without write access is not evidence", verdict, "refuse")
+    for body, want, who in (
+        ("<!-- monitor -->\nThe PR's checks passed.\nlive-verified: PR #106 ran it 2026-10-23\n", "refuse", "the monitor"),
+        ("<!-- worker -->\nlive-verified: my own run 2026-10-23\n", "refuse", "a worker"),
+        ("Checked it myself.\nlive-verified: on my laptop 2026-10-23\n", "allow", "the owner (no role marker)"),
+    ):
+        env, _ = with_fake_gh(labels={"64": ["P1", "needs:live", "stage:live"]}, comments={"64": [body]})
+        verdict, _ = run("gh issue close 64", role="monitor", extra_env=env)
+        check(f"a live-verified line from {who}: {want}", verdict, want)
+    for stage, want in (("stage:live", "refuse"), ("stage:owner", "refuse"), ("stage:triage", "allow")):
+        env, _ = with_fake_gh(labels={"64": ["P1", "needs:live", stage]})
+        verdict, reason = run(f"gh issue edit 64 --remove-label needs:live,{stage} && gh issue close 64",
+                              role="monitor", extra_env=env)
+        check(f"the monitor taking needs:live off at {stage}: {want}", verdict, want)
+    check("and the refusal says to ask the owner", "stage:owner" in reason or want == "allow", True)
+    env, _ = with_fake_gh(labels={"64": ["P1", "needs:live", "stage:live"]})
+    verdict, reason = run("gh issue edit 64 --remove-label needs:live", role="monitor", extra_env=env)
+    check("in a command of its own too", (verdict, "Evidence in the pull request is not a live check" in reason),
+          ("refuse", True))
 
     # Taking the label off in the same command is the sanctioned way out, the
     # same shape as lifting `hold:monitor` and closing in one breath.

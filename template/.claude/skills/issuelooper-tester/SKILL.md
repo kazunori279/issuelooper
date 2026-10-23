@@ -88,9 +88,13 @@ screen text), and, only when the behavior was right, a line of its own:
 live-verified: <what you ran, e.g. the app in live mode> <YYYY-MM-DD>
 ```
 
-The monitor closes the issue on that line. If it is still wrong, say what you
-saw without the line. If the rig cannot reach it (it needs real hardware, say),
-say so; the monitor decides.
+The monitor closes the issue on that line, and only a line in your signed
+comment counts. If it is still wrong, say what you saw without the line. If you
+could not run the check at all (the credentials are missing, the live server does
+not start, the service cannot be reached, it needs real hardware), say what
+stopped you in a line of its own, `live-check-blocked: <what is missing>`, and no
+`live-verified:` line; the monitor sends it to the owner. Never write
+`live-verified:` for what you did not see run live.
 
 ## UX run
 

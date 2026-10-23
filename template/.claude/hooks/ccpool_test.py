@@ -557,6 +557,11 @@ def test_a_missing_env_file_is_noticed() -> None:
                 os.environ[k] = v
 
 
+def test_live_prompt_says_how_to_report_a_check_that_could_not_run() -> None:
+    t = ccpool.tester_prompt(ccpool.Unit("tester", "live", "k", "f", 4, (2,), {"title": "x"}), 8021, "60m")
+    check("the live check prompt names live-check-blocked", "live-check-blocked:" in t, True)
+
+
 def test_live_off() -> None:
     st = state(
         [iss(4, ["stage:live"]), iss(6, ["stage:pr", "needs:live"])],

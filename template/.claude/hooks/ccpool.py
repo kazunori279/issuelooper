@@ -1118,7 +1118,8 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
             "issue and the merged PR, then verify the change against the real services, with the "
             f"app started from main on your port in live mode as {PROJECT} describes (it also "
             "says where the live credentials are). Post a live-verified: line, or say on the "
-            "thread what you saw or that the rig cannot reach it."
+            "thread what you saw; if you could not run the check at all (credentials missing, the live "
+            "server not starting), a `live-check-blocked: <what is missing>` line instead."
             + (
                 f" Only a check of what is on main now counts: #{u.number} entered stage:live at "
                 f"{u.info['since']}, so a live-verified: line older than that is stale."
@@ -2503,7 +2504,8 @@ class Pool:
             if u.role == "tester" and u.kind == "live" and outcome == "ok":
                 # A finished live check needs the monitor's close or hand-back.
                 self.events.append(
-                    f"live check of #{u.number} finished: read the tester's comment on #{u.number} and close the issue "
+                    f"live check of #{u.number} finished: read the tester's comment on #{u.number}; if it says "
+                    "live-check-blocked:, move it to stage:owner for the owner; otherwise close the issue "
                     "if it passed, or hand it back if it failed"
                 )
             if outcome not in ("ok", "unclaimable") and not outcome.startswith("quota error"):

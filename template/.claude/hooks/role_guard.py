@@ -1071,12 +1071,16 @@ def check_issue_close(command: str) -> None:
         data = gh_json(["gh", "issue", "view", number, "--json", "comments"], repo)
         if not isinstance(data, dict):
             continue  # fail open: an unreachable thread is not evidence either way
-        # Only from someone who can write to the repository (the loop's own account
-        # is one): on a public repository anyone can type the line.
+        # Only the tester's signed comment or the owner's own (no role marker), from an
+        # account that can write (on a public repository anyone can type the line). The
+        # monitor shares the loop's account and closed four needs:live issues on its own
+        # reading of their PRs, with no live check run.
         bodies = [
             str(c.get("body") or "")
             for c in (data.get("comments") or [])
             if isinstance(c, dict) and c.get("authorAssociation") in ("OWNER", "MEMBER", "COLLABORATOR")
+            and (str(c.get("body") or "").lstrip().startswith(ROLES["tester"])
+                 or not any(m in str(c.get("body") or "") for m in ROLES.values()))
         ]
         if any(LIVE_EVIDENCE.search(b) for b in bodies):
             continue
@@ -1087,10 +1091,39 @@ def check_issue_close(command: str) -> None:
             f"reading\n\n```\n{LIVE_LINE}\n```\n\n"
             "as its own line. The tester is the role that runs live checks; issues "
             f"sitting at `{LIVE_STAGE}` are its queue.\n\n"
-            "If the behavior cannot be reached live either, say that on the thread "
-            "and take the label off rather than closing around it — an issue closed "
-            "with nobody having looked is the state this label exists to prevent."
+            "If the check cannot be run live (`live-check-blocked:`), move the issue "
+            "to `stage:owner` and ask the owner rather than closing around it: an "
+            "issue closed with nobody having looked is the state this label exists to "
+            "prevent. Only the tester's signed comment or the owner's own counts."
         )
+
+
+def monitor_live_label_check(command: str) -> None:
+    """The monitor does not take `needs:live` off an issue whose live check is owed
+    (stage:live) or that waits for the owner (stage:owner): taking it off and closing
+    in the same command was how four issues were closed with no live check. Before
+    the merge it may still correct a wrong label."""
+    repo_match = REPO_FLAG.search(command)
+    repo = next(g for g in repo_match.groups()[1:] if g is not None) if repo_match else ""
+    numbers: list[str] = []
+    seg = ISSUE_EDIT_SEGMENT.search(command)
+    if seg:
+        found = BARE_NUMBER.search(seg.group(1))
+        if found:
+            numbers.append(found.group(1))
+    numbers += REST_LABELS_TARGET.findall(command) + REST_ISSUE_TARGET.findall(command)
+    for number in list(dict.fromkeys(numbers))[:3]:
+        names = issue_labels(number, repo) or set()
+        stage = names & {LIVE_STAGE, "stage:owner"}
+        if stage:
+            block(
+                f"#{number} is at `{sorted(stage)[0]}`: its live check is owed, and `{LIVE}` comes off only "
+                "with the tester's `live-verified:` line or on the owner's word.\n\n"
+                "If the tester could not run the check (credentials missing, the live server did not "
+                "start, the service unreachable), move the issue to `stage:owner` with one comment "
+                "saying what is missing and ask the owner. Evidence in the pull request is not a live "
+                "check."
+            )
 
 
 def refuse_unsigned_comment(role: str, marker: str) -> None:
@@ -2157,6 +2190,9 @@ def main(raw: str) -> None:
             # The guard fails open on its own bugs (see __main__), but not on a merge:
             # an error inside the gates would merge a PR nobody checked.
             block(f"The merge gates failed with an error ({exc!r:.300}), so nothing was checked. Not merged.")
+
+    if role == "monitor" and LIVE in removed:
+        monitor_live_label_check(command)
 
     if CLOSES.search(command) and LIVE not in removed:
         check_issue_close(command)
