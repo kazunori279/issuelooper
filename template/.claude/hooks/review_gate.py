@@ -23,7 +23,10 @@ Settings (environment, or .issuelooper/config.toml through config.py):
                          <!-- comments -->) goes into the prompt; missing = no rules.
                          A fenced block marked `prescan` holds extra pre-scan
                          regexes, one per line, and is not sent as rule text.
-    REVIEW_MAX_REJECTS   rejects of one PR before it merges unreviewed, default 2.
+    REVIEW_MAX_REJECTS   rejects of one PR handed back to a worker, default 2; a reject
+                         after that sends the issue to stage:owner instead.
+    REVIEW_MAX_ERRORS    failed reviews (the judge failed or answered nonsense) of one
+                         head before its issue goes to stage:owner, default 3.
     REVIEW_DIR           where records go, default /tmp/issuelooper-review.
     REVIEW_PROMPT        another prompt file with the same <<...>> fields, default
                          review_prompt.md next to this script.
@@ -53,17 +56,23 @@ for the current head allows it:
 
     pass      the judge passed it, or a pass for the same diff at an earlier head (a rebase)
     skipped   no production file changed, or the gate is off
-    error     the judge failed twice (one retry): logged, and the merge goes ahead
-    cap       REVIEW_MAX_REJECTS rejects of this PR already: logged, merge goes ahead
+    override  the owner allowed this head: a comment on the PR, with no role marker, by
+              someone with write access, with a line `review-override: <sha> <reason>`
+              naming the head (claim.by_owner says who the owner is)
+    error     the judge failed (one retry inside): nobody may merge yet; tried again on
+              the next run, and after REVIEW_MAX_ERRORS errors the issue waits for the owner
     reject    nobody may merge this head
+    owner     the issue waits for the owner (too many rejects, or too many errors)
 
 On a reject this script hands the work back: a signed <!-- merger --> comment on
 the PR with the reasons, and stage:pr swapped for stage:triage on the issue, so the
-pool starts a worker on the same PR. ccpool.py runs it before every merge of a
-mergeable PR; a merger session runs it before landing a conflicting one.
+pool starts a worker on the same PR. Past REVIEW_MAX_REJECTS rejects, or after
+REVIEW_MAX_ERRORS errors on one head, it moves the issue to stage:owner instead and
+says how to override. ccpool.py runs it before every merge of a mergeable PR; a
+merger session runs it before landing a conflicting one.
 
-Exit status: 0 the merge may go ahead, 1 rejected (already handed back), 2 the PR
-could not be read (retry).
+Exit status: 0 the merge may go ahead, 1 rejected or waiting for the owner (already
+commented), 2 the PR could not be read or the review failed (retry later).
 """
 
 from __future__ import annotations
@@ -82,6 +91,7 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import claim as claimlib  # noqa: E402
 import config  # noqa: E402
 
 config.apply()
@@ -106,13 +116,17 @@ GATE_ON = os.environ.get("REVIEW_GATE", "on").strip().lower() not in ("off", "0"
 RECORDS = pathlib.Path(os.environ.get("REVIEW_DIR", "/tmp/issuelooper-review"))
 MAX_CHARS = int(os.environ.get("REVIEW_CHARS", "30000"))
 MAX_REJECTS = int(os.environ.get("REVIEW_MAX_REJECTS", "2"))
+MAX_ERRORS = int(os.environ.get("REVIEW_MAX_ERRORS", "3"))
 LONG_FN = int(os.environ.get("REVIEW_LONG_FN", "150"))
 REFACTOR_LINES = int(os.environ.get("REVIEW_REFACTOR_LINES", "300"))
 PROMPT = pathlib.Path(os.environ.get("REVIEW_PROMPT") or HERE / "review_prompt.md")
 PATHS = _paths(os.environ.get("REVIEW_PATHS", "src/"))
 RULES = os.environ.get("REVIEW_RULES", ".issuelooper/review_rules.md")
 FIXTURES = os.environ.get("REVIEW_FIXTURES", "tests/fixtures/**/*.json,spec/fixtures/**/*.json")
-ALLOWS = {"pass", "skipped", "error", "cap"}
+# A failed review and a PR rejected many times used to be allowed ("error", "cap"):
+# a judge outage or a persistent finding then merged unreviewed code.
+ALLOWS = {"pass", "skipped", "override"}
+OVERRIDE = re.compile(r"(?im)^\s*review-override:\s*([0-9a-f]{7,40})\b[ \t]*(.*)$")
 LINK = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|refs?)\s+#(\d+)\b")
 BRANCH = re.compile(r"^issue-(\d+)\b")
 # Never production code: the framework's files, and (when REVIEW_PATHS is the
@@ -717,6 +731,37 @@ def hand_back(repo: str, pr: int, issue: int | None, v: dict) -> None:
         )
 
 
+def park_for_owner(repo: str, pr: int, issue: int | None, head: str, why: str) -> None:
+    """Send the issue to stage:owner: the PR keeps failing review, or the review itself
+    keeps failing. The comment says how the owner lets this head through."""
+    gh_write("POST", f"repos/{repo}/issues/{pr}/comments", {"body": (
+        f"<!-- merger -->\n**Review gate: waiting for the owner.** {why}\n\n"
+        "Not merged. The owner decides: send the issue back to `stage:triage` with what to "
+        "change, close it, or let this head through with a comment of your own on this PR "
+        f"containing the line\n\n    review-override: {head[:12]} <why>")})
+    if issue:
+        gh_write("DELETE", f"repos/{repo}/issues/{issue}/labels/stage:pr", None)
+        gh_write("POST", f"repos/{repo}/issues/{issue}/labels", {"labels": ["stage:owner"]})
+
+
+def owner_override(repo: str, pr: int, head: str) -> dict | None:
+    """The owner's `review-override: <sha> <reason>` comment on the PR naming this head,
+    as {by, reason, comment}, or None. Only from the owner (claim.by_owner): an agent's
+    signed comment or a stranger's is not one."""
+    try:
+        comments = json.loads(gh_get(f"repos/{repo}/issues/{pr}/comments?per_page=100"))
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+        return None
+    for c in reversed(comments if isinstance(comments, list) else []):
+        if not isinstance(c, dict) or not claimlib.by_owner(c):
+            continue
+        for m in OVERRIDE.finditer(c.get("body") or ""):
+            if head.lower().startswith(m.group(1).lower()):
+                return {"by": (c.get("user") or {}).get("login", ""), "reason": m.group(2).strip()[:300],
+                        "comment": c.get("id")}
+    return None
+
+
 def pr_issue(info: dict) -> int | None:
     m = BRANCH.match(((info.get("head") or {}).get("ref")) or "")
     if m:
@@ -761,9 +806,16 @@ def review(pr: int, hand: bool = True) -> int:
     if not GATE_ON:
         return done("skipped", reason="the review gate is off (REVIEW_GATE)")
     old = load_record(head)
-    if old and old.get("verdict") in ALLOWS | {"reject"}:
+    if old and old.get("verdict") in ALLOWS:
         print(f"review_gate: PR #{pr} head {head[:12]} already reviewed: {old['verdict']}")
-        return 0 if old["verdict"] in ALLOWS else 1
+        return 0
+    override = owner_override(repo, pr, head)
+    if override:
+        return done("override", **override)
+    if old and old.get("verdict") in ("reject", "owner"):
+        print(f"review_gate: PR #{pr} head {head[:12]} already reviewed: {old['verdict']}")
+        return 1
+    errors = int(old.get("errors") or 0) if old and old.get("verdict") == "error" else 0
 
     files = split_files(diff)
     prod = [p for p, _ in files if is_prod(p)]
@@ -785,13 +837,8 @@ def review(pr: int, hand: bool = True) -> int:
             by="same-diff",
             reason=f"same diff as the pass at {same.get('sha', '')[:12]}",
         )
-    rejects = sum(1 for r in earlier if r.get("verdict") == "reject")
-    if rejects >= MAX_REJECTS:
-        return done(
-            "cap",
-            key=key,
-            reason=f"{rejects} rejects of this PR already; merging without another review",
-        )
+    rejects = sum(1 for r in earlier if r.get("verdict") == "reject"
+                  or (r.get("verdict") == "owner" and r.get("why") == "rejects"))
 
     contents: dict[str, str] = {}
 
@@ -841,16 +888,20 @@ def review(pr: int, hand: bool = True) -> int:
     t0 = time.time()
     try:
         v = parse_verdict(ask_judge(prompt))
-    except Exception as exc:  # noqa: BLE001 - a broken judge never blocks the queue
+    except Exception as exc:  # noqa: BLE001 - a broken judge holds the merge, never passes it
         kind = getattr(exc, "kind", type(exc).__name__)
-        return done(
-            "error",
-            by=by,
-            **({"usage": dict(JUDGE_USAGE)} if JUDGE_USAGE else {}),
-            reason=f"{kind}: {str(exc)[:300]}",
-            s=round(time.time() - t0, 1),
-            **hints,
-        )
+        errors += 1
+        why = f"the review failed {errors} time(s) on head {head[:12]}, the last with {kind}: {str(exc)[:200]}"
+        extra = {"usage": dict(JUDGE_USAGE)} if JUDGE_USAGE else {}
+        if errors >= MAX_ERRORS:
+            done("owner", why="errors", errors=errors, by=by, reason=why, s=round(time.time() - t0, 1),
+                 **extra, **hints)
+            if hand:
+                park_for_owner(repo, pr, issue, head, why[0].upper() + why[1:] + ".")
+            return 1
+        done("error", errors=errors, by=by, reason=f"{kind}: {str(exc)[:300]}", s=round(time.time() - t0, 1),
+             **extra, **hints)
+        return 2  # not merged; the next run reviews it again
     s = round(time.time() - t0, 1)
     if JUDGE_USAGE:
         hints["usage"] = dict(JUDGE_USAGE)
@@ -858,6 +909,16 @@ def review(pr: int, hand: bool = True) -> int:
         return done(
             "pass", by=by, reason=v["reason"], findings=v["findings"], s=s, **hints
         )
+    if rejects >= MAX_REJECTS:
+        # Past the cap a reject goes to the owner, not to another worker round; the
+        # cap used to let the next head merge unreviewed.
+        rc = done("owner", why="rejects", by=by, reason=v["reason"], findings=v["findings"], s=s,
+                  round=rejects + 1, **hints)
+        if hand:
+            park_for_owner(repo, pr, issue, head, (
+                f"This is reject {rejects + 1} of this pull request (`{v['reason'][:600]}`), more than "
+                f"the {MAX_REJECTS} handed back to workers."))
+        return rc
     rc = done(
         "reject",
         by=by,

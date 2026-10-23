@@ -58,6 +58,7 @@ id_pattern = ""              # POOL_MAP_ID_PATTERN: a regex for the spec's requi
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project
 production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these skips the review
+max_rejects = 2              # REVIEW_MAX_REJECTS: rejects handed back to workers; the next one waits for the owner
 # fixtures = ["tests/fixtures/**/*.json"]   # REVIEW_FIXTURES: fixture files whose values in production code are flagged for the reviewer
 
 [pool]

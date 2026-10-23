@@ -83,7 +83,9 @@ python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr $P
 ```
 
 Exit 0: go on. Exit 1: it rejected the PR and already handed it back (PR comment,
-issue at `stage:triage`); stop. Exit 2: run it again.
+issue at `stage:triage`), or sent the issue to the owner (`stage:owner`); stop.
+Exit 2: the PR could not be read or the review failed; run it again (after a few
+failures it goes to the owner).
 
 ## 6. Leave the merge to the supervisor
 

@@ -55,7 +55,7 @@ checkout the supervisor merges and deploys from. A pull request merges only when
 | 2 | The PR names the head it swept, and a green sweep record exists for it. |
 | 3 | A test that failed before the fix passes after it (`Fail-before: <file> N -> M`), or a stated waiver. |
 | 4 | An issue whose acceptance needs the live environment is not closed by the merge. |
-| 5 | The reviewer passed this head. |
+| 5 | The reviewer passed this head, or the owner let this head through (`review-override: <sha> <why>` in a comment of theirs on the PR). A review that keeps failing (`REVIEW_MAX_ERRORS`, 3), or a PR rejected again after `[review] max_rejects` hand-backs, waits for the owner at `stage:owner`; neither merges. |
 | 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty). |
 
 A gate that cannot be checked counts as refused: when the guard fails, gives no

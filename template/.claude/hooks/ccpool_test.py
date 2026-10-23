@@ -1611,6 +1611,23 @@ def test_auto_merge_paths() -> None:
     )
 
 
+def test_auto_merge_when_the_review_waits_for_the_owner() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-reviewowner-"))
+    old = os.environ.get("REVIEW_DIR")
+    os.environ["REVIEW_DIR"] = str(d)
+    try:
+        (d / f"{'c' * 40}.json").write_text(json.dumps({"verdict": "owner", "reason": "reject 3 of this PR"}))
+        outcome, log, pool = auto_session(ALLOW, review_rc=1)
+    finally:
+        if old is None:
+            os.environ.pop("REVIEW_DIR", None)
+        else:
+            os.environ["REVIEW_DIR"] = old
+    check("a review sent to the owner: not merged, not a hand-back, the monitor hears it",
+          (outcome, log, any("waits for the owner" in e for e in pool.events)),
+          ("waits for the owner (review gate)", [], True))
+
+
 def test_auto_merge_holds_without_an_explicit_allow() -> None:
     """A guard that crashed or answered nothing let the merge go ahead: its reply read as {}."""
     for what, out, rc, cmd in (

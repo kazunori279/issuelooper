@@ -1033,7 +1033,7 @@ from a merger session, and any write to a PR but #{pr}.
    sweep, push, and catch up again; three rounds at most, then go on with what you pushed.
 3. Run the review gate on the new head:
    `python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr {pr}`. Exit 1: it rejected
-   the PR and already handed it back; stop. Exit 2: run it again.
+   the PR and already handed it back (or sent it to the owner); stop. Exit 2: run it again.
 4. Stop there, with #{n} still at stage:pr: do not merge. The supervisor merges the new
    head on its next poll, after checking it merged with the current main and running the
    merge gates, so every merge goes through the same checks. If main moved and the PR
@@ -1135,13 +1135,19 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
 # --- the supervisor -------------------------------------------------------------
 
 
-def review_reason(head: str) -> str:
-    """The review gate's reason for its verdict on HEAD, from its record ('' if none)."""
+def review_record(head: str) -> dict:
+    """The review gate's record for HEAD ({} if none)."""
     d = pathlib.Path(os.environ.get("REVIEW_DIR", "") or "/tmp/issuelooper-review")
     try:
-        return str(json.loads((d / f"{head}.json").read_text()).get("reason") or "")[:300]
+        rec = json.loads((d / f"{head}.json").read_text())
     except (OSError, ValueError):
-        return ""
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def review_reason(head: str) -> str:
+    """The review gate's reason for its verdict on HEAD, from its record ('' if none)."""
+    return str(review_record(head).get("reason") or "")[:300]
 
 
 class BrokerLink:
@@ -1744,6 +1750,9 @@ class Session(threading.Thread):
             env=env, cwd=repo_root(), capture_output=True, text=True, timeout=900,
         )
         self.note(f"review gate exit {r.returncode}: {(r.stdout + r.stderr).strip()[-600:]}")
+        if r.returncode == 1 and review_record(head).get("verdict") == "owner":
+            self.pool.event(f"PR #{pr} (#{n}) waits for the owner after the review gate: {review_reason(head)}")
+            return "waits for the owner (review gate)"
         if r.returncode == 1:
             self.pool.log("handback", pr=pr, issue=n, by="review", reason=review_reason(head))
             return "rejected by the review gate (handed back)"

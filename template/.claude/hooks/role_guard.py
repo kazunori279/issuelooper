@@ -1612,7 +1612,7 @@ FAIL_BEFORE_HOW = (
 # failed: fail open) and cap (rejected too often already) let the merge go
 # ahead; reject and no record do not. REVIEW_GATE=off (or 0) skips the gate.
 REVIEW_DIR_DEFAULT = "/tmp/issuelooper-review"
-REVIEW_ALLOWS = {"pass", "skipped", "error", "cap"}
+REVIEW_ALLOWS = {"pass", "skipped", "override"}  # review_gate.ALLOWS
 
 
 def review_gate_on() -> bool:
@@ -1636,6 +1636,17 @@ def review_gate_check(pr: str, head_sha: str, target: str) -> None:
     if verdict in REVIEW_ALLOWS:
         return
     n = pr or "<N>"
+    if verdict == "owner":
+        block(
+            f"{target} head `{head_sha[:7]}` waits for the owner: {str(record.get('reason') or '')[:600]}\n\n"
+            "review_gate.py has moved the issue to `stage:owner`. Do not merge; the owner decides "
+            "(a `review-override: <sha>` comment of theirs lets this head through)."
+        )
+    if verdict == "error":
+        block(
+            f"{target} head `{head_sha[:7]}` could not be reviewed (the review failed: "
+            f"{str(record.get('reason') or '')[:300]}). Not merged; run review_gate.py again later."
+        )
     if verdict == "reject":
         block(
             f"{target} head `{head_sha[:7]}` was rejected by the review gate: "

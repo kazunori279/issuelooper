@@ -1997,8 +1997,8 @@ def test_review_gate() -> None:
     verdict, reason = merge()
     check("no review record: the merge is refused", verdict, "refuse")
     check("and the refusal says how to review", 'review_gate.py" --pr 50' in reason, True)
-    for v, want in (("pass", "allow"), ("skipped", "allow"), ("error", "allow"), ("cap", "allow"),
-                    ("reject", "refuse")):
+    for v, want in (("pass", "allow"), ("skipped", "allow"), ("override", "allow"), ("error", "refuse"),
+                    ("cap", "refuse"), ("owner", "refuse"), ("reject", "refuse")):
         (records / f"{head}.json").write_text(json.dumps({"verdict": v, "reason": "Invented data."}))
         verdict, reason = merge()
         check(f"a {v} record: {want}", verdict, want)

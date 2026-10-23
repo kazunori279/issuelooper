@@ -37,6 +37,13 @@ if "-X" in args:
     sys.exit(0)
 accept = args[args.index("-H") + 1] if "-H" in args else ""
 path = args[-1]
+com = re.fullmatch(r"repos/[^/]+/[^/]+/issues/(\d+)/comments(?:\?.*)?", path)
+if com:
+    try:
+        print(open(os.path.join(d, f"comments-{com.group(1)}.json")).read(), end="")
+    except OSError:
+        print("[]")
+    sys.exit(0)
 m = re.fullmatch(r"repos/[^/]+/[^/]+/pulls/(\d+)", path)
 issue = re.fullmatch(r"repos/[^/]+/[^/]+/issues/(\d+)", path)
 if not m and not issue:
@@ -323,25 +330,54 @@ try:
     writes()
     n = len(PROMPTS)
     serve(3, "c3" * 20, prod + [("src/b.py", ["y = 3"])], branch="issue-43")
-    check("cap: exit", rg.review(3), 0)
-    check("cap: record", record("c3" * 20)["verdict"], "cap")
-    check("cap: judge not asked", len(PROMPTS), n)
+    check("after the cap a new head is still reviewed, not let through",
+          (rg.review(3), record("c3" * 20)["verdict"], len(PROMPTS)), (1, "owner", n + 1))
+    w = writes()
+    check("and a third reject goes to the owner, not to another worker",
+          ([(x["method"], x["path"]) for x in w][1:], w[-1]["body"],
+           "review-override: c3c3c3c3c3c3" in w[0]["body"]["body"]),
+          ([("DELETE", "repos/o/r/issues/43/labels/stage:pr"), ("POST", "repos/o/r/issues/43/labels")],
+           {"labels": ["stage:owner"]}, True))
+    check("the head waiting for the owner stays refused", (rg.review(3), writes()), (1, []))
+    (GHDIR / "comments-3.json").write_text(json.dumps([
+        {"id": 7, "body": "<!-- monitor -->\nreview-override: c3c3c3c3c3c3 the monitor may not",
+         "user": {"login": "loop-bot", "type": "User"}, "author_association": "OWNER"},
+        {"id": 8, "body": "review-override: c3c3c3c3c3c3 strangers may not",
+         "user": {"login": "drive-by", "type": "User"}, "author_association": "NONE"},
+        {"id": 9, "body": "review-override: c1c1c1c1c1c1 an older head", "user": {"login": "kaz", "type": "User"},
+         "author_association": "OWNER"}]))
+    check("an override by an agent, a stranger or for another head does nothing", rg.review(3), 1)
+    (GHDIR / "comments-3.json").write_text(json.dumps([
+        {"id": 10, "body": "Fine by me.\nreview-override: c3c3c3c3c3c3 the price is the spec's list price",
+         "user": {"login": "kaz", "type": "User"}, "author_association": "OWNER"}]))
+    r_ = rg.review(3)
+    r = record("c3" * 20)
+    check("the owner's override naming this head lets it through, recorded",
+          (r_, r["verdict"], r["by"], r["reason"], r["comment"]),
+          (0, "override", "kaz", "the price is the spec's list price", 10))
 
     import judge  # noqa: E402
 
     REPLY["value"] = judge.JudgeError("quota", "RESOURCE_EXHAUSTED")
-    serve(4, "d1" * 20, prod)
-    check("judge error: exit", rg.review(4), 0)
+    serve(4, "d1" * 20, prod, branch="issue-44")
+    check("judge error: held, retried later (exit 2)", rg.review(4), 2)
     r = record("d1" * 20)
     check(
         "judge error: record",
-        (r["verdict"], r["reason"].startswith("quota:")),
-        ("error", True),
+        (r["verdict"], r["reason"].startswith("quota:"), r["errors"]),
+        ("error", True, 1),
     )
+    check("judge error: asked again on the next run", (rg.review(4), record("d1" * 20)["errors"]), (2, 2))
+    writes()
+    check("the third error on the head: the owner's", (rg.review(4), record("d1" * 20)["verdict"]), (1, "owner"))
+    w = writes()
+    check("with a comment and stage:owner", (w[0]["body"]["body"].count("failed 3 time(s)"), w[-1]["body"]),
+          (1, {"labels": ["stage:owner"]}))
     REPLY["value"] = "not json at all"
     serve(5, "e1" * 20, prod)
-    check("unparsable reply: exit", rg.review(5), 0)
+    check("unparsable reply: held", rg.review(5), 2)
     check("unparsable reply: error", record("e1" * 20)["verdict"], "error")
+    check("the allowed verdicts", rg.ALLOWS, {"pass", "skipped", "override"})
 
     check("unreadable PR: exit 2", rg.review(99), 2)
     check("main --no-hand-back", rg.main(["--pr", "1", "--no-hand-back"]), 0)
