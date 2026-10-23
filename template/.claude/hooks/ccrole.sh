@@ -51,9 +51,11 @@ check_role() {
 }
 
 # Point git at the repository's .githooks, so the hooks also run for commits and
-# pushes made from a session's worktree.
+# pushes made from a session's worktree; not where the owner installed with
+# --keep-hooks (issuelooper.keepHooks), whose own hooks call these.
 for dir in "$(cd "$HERE/../.." 2>/dev/null && pwd)" "$(git rev-parse --show-toplevel 2>/dev/null || true)"; do
-  if [ -n "$dir" ] && [ -d "$dir/.githooks" ]; then
+  if [ -n "$dir" ] && [ -d "$dir/.githooks" ] \
+    && [ "$(git -C "$dir" config --get issuelooper.keepHooks 2>/dev/null || true)" != "true" ]; then
     if [ "$(git -C "$dir" config --get core.hooksPath 2>/dev/null || true)" != ".githooks" ]; then
       git -C "$dir" config core.hooksPath .githooks
     fi

@@ -204,6 +204,10 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".husky")
         self.assertIn(".githooks/pre-commit and .githooks/pre-push", result.stdout)
+        # A session's start (ccrole.sh) must not take core.hooksPath back.
+        subprocess.run(["bash", str(repo / ".claude/hooks/ccrole.sh"), "assign", "x"], cwd=repo,
+                       capture_output=True, text=True, env=self.env)
+        self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".husky")
 
     def test_sample_hooks_alone_need_no_option(self):
         repo = self.repo()  # git init leaves only *.sample hooks

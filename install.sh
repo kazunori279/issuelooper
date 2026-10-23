@@ -200,6 +200,12 @@ for f in pre-commit pre-push _chain; do
     managed+=(".githooks/$f")
   fi
 done
+# ccrole.sh points core.hooksPath at .githooks for every session unless this says not to.
+if [ "$hooks_mode" = keep ]; then
+  git -C "$REPO" config issuelooper.keepHooks true
+else
+  git -C "$REPO" config --unset issuelooper.keepHooks || true
+fi
 if [ "$hooks_mode" = keep ]; then
   say "core.hooksPath left at ${cur_hooks:-the default (.git/hooks)}: run .githooks/pre-commit and .githooks/pre-push from your own hooks"
 elif [ "$cur_hooks" != ".githooks" ]; then
