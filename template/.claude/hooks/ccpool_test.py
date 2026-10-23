@@ -1341,6 +1341,38 @@ def test_leftover_processes_are_killed() -> None:
           {12: "/tmp/wrk-3-9-wt", 40: "/home/x"})
 
 
+def test_hard_ceiling_and_exit_124() -> None:
+    """A session whose clocks stood still ran far past its timeout; and one killed at its
+    deadline with an older 429 in its stderr was counted as a quota error."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-ceiling-"))
+    agent = d / "ccrole"
+    # Busy all along (output every second), with a 429 from earlier in its stderr.
+    agent.write_text("#!/bin/sh\necho 'API error: 429 RESOURCE_EXHAUSTED' >&2\n"
+                     "for i in $(seq 120); do echo '{\"event\": \"step_update\"}'; sleep 1; done\n")
+    agent.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agent), render="cat",
+                                     timeouts={"tester": "4s"}, timeout_ceiling=1.5, stall_s=0,
+                                     caps={r: 0 for r in ccpool.ROLES}, kill_leftovers=False),
+                       fetcher=state, spawn=False)
+    t0 = time.time()
+    w = pool.start(ccpool.Unit("tester", "ux", "ux:a", "tst:ux:a", None, (2,), {"sha": "a" * 40}))
+    outcome = w.work()
+    check("killed at the ceiling though it kept writing (next 15-s tick after 6 s)",
+          time.time() - t0 < 40, True)
+    check("exit 124 is a timeout, not a quota error", outcome, "timed out after 4s")
+    check("resumes.log says why", "killed at the ceiling, 1.5 x the 4s timeout" in (w.dir / "resumes.log").read_text(),
+          True)
+    old = os.environ.pop("POOL_TIMEOUT_CEILING", None)
+    try:
+        check("default 1.5", ccpool.Config.from_env().timeout_ceiling, 1.5)
+        os.environ["POOL_TIMEOUT_CEILING"] = "0"
+        check("POOL_TIMEOUT_CEILING=0 turns it off", ccpool.Config.from_env().timeout_ceiling, 0)
+    finally:
+        os.environ.pop("POOL_TIMEOUT_CEILING", None)
+        if old is not None:
+            os.environ["POOL_TIMEOUT_CEILING"] = old
+
+
 def test_stall_threshold_by_model() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stallmodel-"))
     pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)

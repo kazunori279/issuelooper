@@ -92,7 +92,9 @@ the claim released without a failed attempt. Every quota error also holds new
 agent sessions pool-wide for a doubling pause (quota_seen), reset when a session
 ends ok. While the CLI itself retries a failed model call inside a turn (agy: the
 stream's last event is an error_message step), the session's clocks (timeout,
-wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session. When a
+wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session. Whatever
+paused, a session is killed at POOL_TIMEOUT_CEILING (1.5) times its timeout of wall
+clock, and counts as timed out. When a
 session ends, processes still running with a working directory in its scratch paths
 (a worker's /tmp/wrk-<seq>-*, a merger's /tmp/mrg-<pr>-*, a tester's
 /tmp/tst-<port>-*) are killed and logged (leftovers_killed); POOL_KILL_LEFTOVERS=0
@@ -276,6 +278,10 @@ class Config:
     # The most a session's clocks stand still for the CLI's own retries of a model call;
     # 20 min was not enough for a model whose calls kept failing for a while.
     retry_pause_max_s: float = 2400
+    # Wall clock a session may run, as a multiple of its timeout, whatever paused its
+    # clocks: a merger with 25 minutes of paused clocks ran 52 minutes on a 45-minute
+    # timeout, a UX run 69 on 60. 0 = no ceiling.
+    timeout_ceiling: float = 1.5
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
     fast_check_s: float = 300
@@ -357,6 +363,7 @@ class Config:
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
             kill_leftovers=env_flag("POOL_KILL_LEFTOVERS", True),
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
+            timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
@@ -1298,6 +1305,7 @@ class Session(threading.Thread):
         # The CLI's own limit (agy's print timeout) is the hard deadline; the soft one
         # ends a session that is past its timeout and has gone quiet.
         soft, hard = start + seconds(timeout), start + seconds(timeout) + 900
+        ceiling = start + cfg.timeout_ceiling * seconds(timeout) if cfg.timeout_ceiling else float("inf")
         # The CLI's own limit leaves room for the clocks to stand still (below); the
         # supervisor enforces the rest.
         cmd = base + cli.first_turn(prompt, hard - start + cfg.retry_pause_max_s)
@@ -1367,6 +1375,13 @@ class Session(threading.Thread):
                         if wrap_at and not wrapped:
                             wrap_at += add
                     quiet = self.quiet_s()
+                    if time.time() > ceiling:
+                        with open(self.dir / "resumes.log", "a") as rl:
+                            rl.write(f"{time.time():.0f} killed at the ceiling, "
+                                     f"{cfg.timeout_ceiling:g} x the {timeout} timeout\n")
+                        self.kill()
+                        rc = 124
+                        break
                     if time.time() > hard + 300 or (time.time() > soft and quiet > 300):
                         self.kill()
                         rc = 124
@@ -1390,7 +1405,7 @@ class Session(threading.Thread):
                     # its own retries is not a stall (until the pause cap).
                     stall_s = 0 if retrying else self.stall_after(cfg)
                     conv = self.model_stalled(stall_s) if stall_s else None
-                    if conv and stall_k < 2 and hard - time.time() > 120:
+                    if conv and stall_k < 2 and min(hard, ceiling) - time.time() > 120:
                         stall_k += 1
                         resume(conv, f"no step for {stall_s:.0f} s after the last one finished", (
                             f"Your session stopped responding for {stall_s / 60:.0f} minutes after its last "
@@ -1400,7 +1415,7 @@ class Session(threading.Thread):
                         continue
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
                     conv = self.quota_stalled(quiet=wait)
-                    if conv and quota_k < cfg.quota_resumes and hard - time.time() > 120:
+                    if conv and quota_k < cfg.quota_resumes and min(hard, ceiling) - time.time() > 120:
                         quota_k += 1
                         self.pool.quota_seen(role)
                         resume(conv, f"stalled while alive, quota resume {quota_k} after {wait:.0f} s")
@@ -1414,7 +1429,7 @@ class Session(threading.Thread):
                 if conv and quota_k < cfg.quota_resumes and not self.work_done():
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
                     self.pool.quota_seen(role)
-                    if time.time() + wait < hard - 120:
+                    if time.time() + wait < min(hard, ceiling) - 120:
                         quota_k += 1
                         with open(self.dir / "resumes.log", "a") as rl:
                             rl.write(f"{time.time():.0f} quota wait {wait:.0f} s before resume {quota_k}\n")
@@ -1431,7 +1446,7 @@ class Session(threading.Thread):
         except OSError:
             errtext = ""
         timed_out = (rc == 124 or bool(cli.timeout_text and cli.timeout_text in errtext)
-                     or elapsed >= seconds(timeout) + 900 + paused)
+                     or elapsed >= seconds(timeout) + 900 + paused or time.time() > ceiling)
         return rc, elapsed, timed_out
 
     def events(self) -> list[dict]:
@@ -1651,12 +1666,14 @@ class Session(threading.Thread):
             # The owner stopped the loop: the claim goes back without a failed attempt,
             # so the next start picks the issue up at once instead of after CLAIM_STALE_MIN.
             outcome = "stopped with the supervisor"
+        elif timed_out:
+            # Before the quota test: a session killed at its deadline (exit 124) whose
+            # stderr still held an earlier 429 was counted as a quota error.
+            outcome = f"timed out after {cfg.timeouts[u.role]}"
         elif rc != 0 and self.ended_on_quota():
             # Not the agent's failure: the claim goes back without a failed attempt, and
             # the pool holds new starts for a while (Pool.finished).
             outcome = f"quota error (exit {rc})"
-        elif timed_out:
-            outcome = f"timed out after {cfg.timeouts[u.role]}"
         elif rc != 0 and elapsed < 120:
             outcome = f"startup crash (exit {rc})"
         elif rc != 0:
