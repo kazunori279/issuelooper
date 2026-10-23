@@ -41,6 +41,20 @@ and 390×844, `timezone_id="Asia/Tokyo"`.
 Launch Chromium with `env={**os.environ, "PULSE_SERVER": "unix:/nonexistent"}`:
 through a real sound server, playback can stall and the status stays `speaking`.
 
+## Live check
+
+`[devcheck]` is on: before the PR, `python3 .claude/hooks/devcheck.py --script <path>`
+starts the app from your worktree in live mode (the real Gemini Live model, with
+the shared checkout's `.env` linked in) on `$DEVCHECK_URL` and runs your script with
+`uv run python`. Write it like the screenshot script above, against
+`os.environ["DEVCHECK_URL"]`, screenshots into `os.environ["DEVCHECK_OUT"]`, and
+make it exit non-zero when a step does not show what it should (a reply that
+never comes, a stuck status, a card for the wrong place). Live answers vary:
+assert what must hold (the right city, a card of the right kind, a reply in the
+asked language), not exact wording. Drive the issue's steps in each language the
+issue concerns, and the steps around them that depend on the change (after
+setting a location, ask for something "near here").
+
 ## Spec check
 
 The spec is `spec/REQUIREMENTS.md` (requirements numbered `R-XXX-N`) and

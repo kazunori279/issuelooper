@@ -85,6 +85,16 @@ such as `47 green: unit 23 · e2e 24`, and `sweep record: <path>`. The record,
 written only for a green run on a clean commit, is what the merge gate checks for
 the PR's head. Any later commit or rebase needs a new sweep.
 
+## The live check
+
+With `[devcheck]` on, `python3 .claude/hooks/devcheck.py --script <path>`, run
+inside a worktree after the commit, starts the app from the branch the way it runs
+for users (real services, the project's credentials) on its own port, runs the
+project's smoke (`devcheck.command`) and the given scripts against it, stops it
+and prints `devcheck: <sha> pass` and `devcheck record: <path>`. The record is what
+Gate 7 checks. A rebase that only moved the branch keeps the pass; one that changed
+what the branch does needs a new check (`--rerun <sha>` replays the scripts).
+
 ## The merge gates
 
 A pull request merges only when all of these hold. Every merge is the
@@ -99,6 +109,7 @@ supervisor's, through these checks, so write the PR to pass them the first time.
 | 4 | A PR does not auto-close a `needs:live` issue: it says `Refs #N`, not `Fixes #N`. |
 | 5 | The review gate passed this head (or the owner let this head through with `review-override: <sha>`; a review that fails, or a PR rejected again after its hand-backs, waits for the owner). A second model reads the diff for data that is made up and shown to the user as if real (when a source fails, finds nothing or leaves a field out), code that exists to pass tests or evaluators (special-casing sample or fixture inputs, test-mode branches, hidden duplicates for checks), and the project's own rules (`.issuelooper/review_rules.md`). Show an honest empty state or error instead of invented data. |
 | 6 | Nothing the project lists as the owner's (`guard.protected_paths`, such as the spec) changes. A test that needs other data brings its own copy under the tests; an owner's file that looks wrong is a comment on the issue. |
+| 7 | With `[devcheck]` on, a PR for an issue labelled as `devcheck.labels` lists, or one that changes `devcheck.paths`, says `- **Live check:** <sha> pass`, and a passing record of that check exists for the same change (the head, or an earlier head the branch only moved from). A change no user can see may waive it (`waived - no visible change`, `docs only`, `loop/process`, `owner ruling`); a labelled issue only by `owner ruling`. |
 
 ## Labels
 
@@ -144,8 +155,8 @@ marker is the only record of who spoke. The guard refuses an unsigned write.
   `$SHARED_REPO_PATH`, `.claude/`, `.agents/`, `.issuelooper/`, `CLAUDE.md` or
   `AGENTS.md`.
 - Never print a secret. Credentials stay where `.issuelooper/project.md` says;
-  only the tester's live check and a worker's own check of a `needs:live` change
-  use them, through the app.
+  only the tester's live check, `devcheck.py` and a worker's own check of a
+  `needs:live` change use them, through the app.
 - No network beyond `gh` against this repository, installing from the lockfile,
   and those live checks.
 - Never use a port the owner uses; take the one you are given.

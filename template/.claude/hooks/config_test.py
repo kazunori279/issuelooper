@@ -32,6 +32,10 @@ slots = 2
 main_check = false
 [live]
 enabled = true
+[devcheck]
+enabled = true
+paths = ["src/", "static/"]
+labels = ["owner-request", "needs:live"]
 [ux]
 journeys = "ux/journeys.py"
 [spec]
@@ -60,6 +64,8 @@ with tempfile.TemporaryDirectory() as d:
     check("bool", values.get("POOL_LIVE"), "1")
     check("spec", (values.get("POOL_SPEC"), values.get("POOL_SPEC_GAP_MIN")), ("1", "30"))
     check("list", values.get("REVIEW_PATHS"), "src/,static/")
+    check("devcheck", (values.get("POOL_DEVCHECK"), values.get("DEVCHECK_PATHS"), values.get("DEVCHECK_LABELS")),
+          ("1", "src/,static/", "owner-request,needs:live"))
     check("env passthrough", values.get("POOL_POLL_S"), "30")
     check("unknown", unknown, ["pool.nonsense"])
 

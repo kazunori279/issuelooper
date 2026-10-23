@@ -37,7 +37,8 @@ live environment (`.issuelooper/project.md`, *Live mode*), add `needs:live`
 
 **Check a `needs:live` change in the live environment yourself, before the PR.**
 The tester's live check after the merge is the gate, but a change it sends back
-costs a whole round (one live issue once took six worker sessions this way). In
+costs a whole round (one live issue once took six worker sessions this way). When
+the project has `[devcheck]` on, that is step 4's live check; otherwise, in
 your worktree, start the app in live mode on a free port, in the background, as
 *Live mode* in `.issuelooper/project.md` says (it names where the credentials
 come from), with its log at `$ISSUELOOPER_TMP/wrk-$K-$N-live.log`. Drive the issue's steps at
@@ -127,6 +128,30 @@ what you see, then stop the server by its port (`lsof -tiTCP:<port> -sTCP:LISTEN
 `pkill`). In the PR body under *Checked on screen*, list the steps you replayed,
 what the last screenshot shows, and its path.
 
+**The live check** (when `[devcheck]` is on in `.issuelooper/config.toml`): the
+screenshots above come from a session that may use test doubles; a developer also
+uses the branch the way it runs for users before asking for review. Do it for
+every change a user can see, and for any PR the merge gate puts in scope (an issue
+labelled as `[devcheck] labels` lists, or a change under `[devcheck] paths`). After
+the commit in step 5, with your replay script written to run against
+`$DEVCHECK_URL` and save its screenshots under `$DEVCHECK_OUT`:
+
+```bash
+python3 .claude/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-$K-$N-live.py
+```
+
+It takes a slot, starts the app from your worktree in the real environment on its
+own port, runs the project's smoke and then your script, stops the app and prints
+`devcheck: <sha> pass` and `devcheck record: <path>`. Replay the issue's steps
+from a fresh start, as above, and also the steps a user would take next around
+the change (set a value, then use what depends on it; switch the language, then
+ask again). Read the screenshots: a script that exits 0 says the steps ran, not
+that the result is right. Run it again after any new commit; put the sha under
+*Live check* in the PR body. A failure: read `app.log` and the step logs in the
+directory it names, fix, commit, check again. A change no user can see waives it
+(`- **Live check:** waived - no visible change`); an issue with one of the labels
+cannot be waived that way.
+
 Never show the user invented data. When a source fails, a lookup finds nothing
 or a field is missing, show an honest empty state or an error, not a plausible
 default. Never special-case the sample inputs or fixture values. The review gate
@@ -144,6 +169,7 @@ python3 .claude/hooks/sweep_locked.py
 The sweep must print `git: <sha> (clean)`, the `green:` line and
 `sweep record: <path>`. Commit first and sweep after. Red: fix, commit, sweep
 again. A wait of a few minutes for a sweep slot is normal; never delete a lock.
+Then the live check (step 4), at the same commit.
 
 ## 6. Push, open the PR, move the issue
 
@@ -166,6 +192,7 @@ Fixes #N                         <- Refs #N if the issue carries needs:live
 - **Base:** <the origin/main sha you rebased onto>
 - **Sweep SHA:** <the sha on the sweep's git: line; equals git rev-parse HEAD>
 - **Fail-before:** tests/<suite>/test_issue_N.py 0 -> 2
+- **Live check:** <sha> pass      <- with [devcheck] on: the sha devcheck.py printed, or a waiver
 
 <the sweep's green: line, exactly as printed>
 
@@ -183,8 +210,9 @@ settle*.
 **Updating a PR that came back** (your prompt names it): push the branch
 (`--force-with-lease`), run `python3 .claude/hooks/sweep_locked.py --update-pr <PR>`
 instead of the plain sweep (it rewrites Sweep SHA and the green line in the
-body), fix the body if a gate named something in it, and move the issue to
-`stage:pr` as above. Never open a second PR.
+body), and with `[devcheck]` on `python3 .claude/hooks/devcheck.py --script <...> --update-pr <PR>`
+(it rewrites the Live check line), fix the body if a gate named something in it,
+and move the issue to `stage:pr` as above. Never open a second PR.
 
 That is the whole GitHub footprint of a normal unit: the PR and one label edit.
 

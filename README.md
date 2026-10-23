@@ -60,6 +60,18 @@ shared checkout's. A pull request merges only when:
 | 4 | An issue whose acceptance needs the live environment is not closed by the merge. |
 | 5 | The reviewer passed this head, or the owner let this head through (`review-override: <sha> <why>` in a comment of theirs on the PR). A review that keeps failing (`REVIEW_MAX_ERRORS`, 3), or a PR rejected again after `[review] max_rejects` hand-backs, waits for the owner at `stage:owner`; neither merges. |
 | 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty). |
+| 7 | With `[devcheck]` on, a change a user can see was used in the real environment before its PR: a passing `devcheck.py` record for its change, or a stated waiver. |
+
+The sweep runs the test suite, usually against test doubles (a scripted model, a
+fake service), so a change can be green and still not work when the app runs for
+real. With `[devcheck]` on, a worker does what a developer does before asking for
+review: after the commit, `devcheck.py` starts the app from the branch in the real
+environment on a port of its own, runs the project's smoke (`[devcheck] command`)
+and the worker's replay of the issue against it, and records the result. Gate 7
+asks for that record on every PR for an issue labelled as `[devcheck] labels` lists
+and every PR that changes `[devcheck] paths`. A rebase that only moved the branch
+keeps the check. Checks share `[devcheck] slots` and use the real services, so
+they cost what the app costs to run; workers get 60 minutes instead of 45.
 
 A gate that cannot be checked counts as refused: when the guard fails, gives no
 answer, or cannot read the PR or a changed file from GitHub, the supervisor does
@@ -298,7 +310,7 @@ Everything project-specific lives in `.issuelooper/` in your repository:
 
 | File | What it holds |
 |---|---|
-| `config.toml` | Agent CLI and model per role, where the monitor runs (herdr or headless), the sweep command and the quick merged-tree check, the deploy command, live checks, UX runs and spec checks on or off, review settings, pool limits, the owner's protected paths. Each key maps to an environment variable, and an exported variable wins. `python3 .claude/hooks/config.py check` shows the result. |
+| `config.toml` | Agent CLI and model per role, where the monitor runs (herdr or headless), the sweep command and the quick merged-tree check, the deploy command, live checks, the pre-PR live check (`[devcheck]`), UX runs and spec checks on or off, review settings, pool limits, the owner's protected paths. Each key maps to an environment variable, and an exported variable wins. `python3 .claude/hooks/config.py check` shows the result. |
 | `project.md` | What agents cannot guess: how to set up a worktree, where a new test goes, how to run the app on a given port, where the spec is, live mode, secrets. Every session reads it. |
 | `review_rules.md` | Project rules the reviewer enforces on top of its two built-in checks. |
 | `monitor_kickoff.md` | Optional: the monitor's first message, for example the priorities of a seed backlog. |
@@ -360,7 +372,7 @@ but a stranger's text still reaches the agents' prompts: limit who may interact
 ```
 install.sh                     install or upgrade into a repository
 template/                      what install.sh copies
-  .claude/hooks/               supervisor, guard, claims, sweep, review gate, herdr link, headless monitor host, dashboard, launcher (+ tests)
+  .claude/hooks/               supervisor, guard, claims, sweep, live check, review gate, herdr link, headless monitor host, dashboard, launcher (+ tests)
   .claude/skills/issuelooper-* what each role's agent reads
   .agents/                     the same hooks, skills and rules for agy
   .githooks/                   keep sessions out of .claude/ and off main

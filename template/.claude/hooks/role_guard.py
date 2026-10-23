@@ -9,7 +9,7 @@ which one acted is carried by a comment marker and by which labels each may touc
 This hook enforces both: a session with no role cannot write to GitHub at all, and
 a session with a role cannot post unsigned or touch another role's labels.
 
-check_pr_merge holds the merge gates (0-5). ccpool.py runs this guard with
+check_pr_merge holds the merge gates (0-7). ccpool.py runs this guard with
 CC_ROLE=merger for its own merges of mergeable pull requests, so a merge by the
 supervisor and a merge by a merger session pass the same gates.
 
@@ -1373,7 +1373,7 @@ def check_shared_checkout_clean() -> None:
 
 
 def check_pr_merge(command: str) -> None:
-    """Pre-merge gates 0-6, in the order a refusal is cheapest to act on.
+    """Pre-merge gates 0-7, in the order a refusal is cheapest to act on.
 
     Gate 0: the shared checkout is clean (`git status --porcelain` is empty) and
     local main has no unpushed commits ahead of origin/main. Catches direct
@@ -1401,6 +1401,10 @@ def check_pr_merge(command: str) -> None:
 
     Gate 6: the PR changes nothing under $GUARD_PROTECTED_PATHS, the owner's files.
 
+    Gate 7 (POOL_DEVCHECK on): a PR for an issue carrying one of $DEVCHECK_LABELS, or
+    one that changes $DEVCHECK_PATHS, names a passing devcheck.py record for its
+    change (`- **Live check:** <sha> pass`), or a waiver. See devcheck_gate.
+
     Unlike the rest of the guard, these fail closed: a PR that cannot be read, a
     changed .py file that cannot be read at the head, or an error inside the gates
     refuses the merge (it is retried later; a merge cannot be undone).
@@ -1425,7 +1429,7 @@ def check_pr_merge(command: str) -> None:
             view.append(pr)
         data = gh_json(
             view
-            + ["--json", "headRefOid,baseRefOid,body,files,closingIssuesReferences"],
+            + ["--json", "headRefOid,baseRefOid,headRefName,body,files,closingIssuesReferences"],
             repo,
         )
         if not isinstance(data, dict) or not data.get("headRefOid"):
@@ -1654,6 +1658,17 @@ def check_pr_merge(command: str) -> None:
         # record; a reject has already been handed back to a worker).
         review_gate_check(pr, head_sha, target)
 
+        # Gate 7: a change a user can see was used in the real environment first.
+        if devcheck_on():
+            scope = devcheck_scope(
+                pr_issues(data, body),
+                [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
+                 if isinstance(f, dict)],
+                repo,
+            )
+            if scope:
+                devcheck_gate(body, scope, target, head_sha, base_sha)
+
         # Gate 3: the fix must be pinned by a test case that was red before it.
         if FAIL_BEFORE_WAIVER.search(body):
             continue
@@ -1735,6 +1750,185 @@ def check_pr_merge(command: str) -> None:
                 "base. If you believe an existing expectation is wrong, stop and "
                 "say so on the issue — that is the owner's call, not a diff."
             )
+
+
+# Gate 7, the live check. The sweep runs the suite against test doubles, so a change
+# can be green there and still not work when the app runs for real: a defect in how
+# the app uses a real model or service passed every sweep and the post-merge check
+# found it only after it shipped. A developer opens a pull request after using the
+# app from the branch; devcheck.py is that step, and its record says it happened.
+#
+# The required form, in the PR body, one line:
+#
+#     - **Live check:** <sha> pass
+#
+# The sha is where devcheck.py ran. It is the head, or an earlier head whose
+# recorded change key equals the head's (a rebase that only moved the branch).
+DEVCHECK_LINE = re.compile(r"(?i)\bLive\s+check\b[*`:\s]*([0-9a-fA-F]{7,40})\b")
+DEVCHECK_WAIVER = re.compile(
+    r"(?i)\bLive\s+check\b[*`:\s]*waived\s*[-–—:]\s*"
+    r"(no\s+visible\s+change|docs\s+only|loop/process|owner\s+ruling)\b"
+)
+DEVCHECK_HOW = (
+    "Commit, then in your worktree run\n\n"
+    "    python3 .claude/hooks/devcheck.py --script <your replay of the issue's steps> --update-pr <N>\n\n"
+    "It starts the app from your branch in the real environment, runs the project's "
+    "smoke and your script against it, and writes `- **Live check:** <sha> pass` into "
+    "the body when they pass. See `.issuelooper/project.md` for how the app runs."
+)
+DEVCHECK_LABELS_DEFAULT = "owner-request,needs:live,ux:accepted"
+ISSUE_REF = re.compile(
+    r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|refs?)\s+#(\d+)\b"
+)
+ISSUE_BRANCH = re.compile(r"^issue-(\d+)$")
+
+
+def devcheck_on() -> bool:
+    return os.environ.get("POOL_DEVCHECK", "0").strip().lower() in (
+        "1",
+        "on",
+        "true",
+        "yes",
+    )
+
+
+def _csv_env(name: str, default: str = "") -> list[str]:
+    raw = os.environ.get(name)
+    return [
+        p.strip() for p in (default if raw is None else raw).split(",") if p.strip()
+    ]
+
+
+def devcheck_scope(
+    issues: list[str], paths: list[str], repo: str
+) -> tuple[str, str] | None:
+    """Why a PR needs a live check: ("label", ...) when an issue it is for carries one of
+    $DEVCHECK_LABELS, ("path", ...) when it changes $DEVCHECK_PATHS; None otherwise."""
+    wanted = set(_csv_env("DEVCHECK_LABELS", DEVCHECK_LABELS_DEFAULT))
+    for n in list(dict.fromkeys(issues))[:5]:
+        hit = (issue_labels(n, repo) or set()) & wanted
+        if hit:
+            return "label", f"#{n} carries `{sorted(hit)[0]}`"
+    watched = _csv_env("DEVCHECK_PATHS")
+    hit_paths = [p for p in paths if is_protected(p, watched)]
+    if hit_paths:
+        return "path", f"it changes `{hit_paths[0]}`"
+    return None
+
+
+def devcheck_waiver_ok(body: str, scope: tuple[str, str], target: str) -> bool:
+    """True when the body waives the check with a reason that fits the scope. An issue
+    that carries a label asks for the check by name, so only the owner waives it."""
+    m = DEVCHECK_WAIVER.search(body)
+    if not m:
+        return False
+    if scope[0] == "label" and not re.match(r"(?i)owner", m.group(1)):
+        block(
+            f"Gate 7 (live check): {target} waives the live check (`{m.group(1)}`), but "
+            f"{scope[1]}: the issue itself is about what a user sees, so it is checked "
+            "in the real environment before the merge. Only `waived - owner ruling` "
+            "skips that, after the owner said so on the issue.\n\n" + DEVCHECK_HOW
+        )
+    return True
+
+
+def devcheck_gate(
+    body: str, scope: tuple[str, str], target: str, head_sha: str, base_sha: str
+) -> None:
+    import devcheck
+
+    if devcheck_waiver_ok(body, scope, target):
+        return
+    m = DEVCHECK_LINE.search(body)
+    if not m:
+        block(
+            f"Gate 7 (live check): {target} has no `Live check:` line, and {scope[1]}.\n\n"
+            "A change like this is used in the real environment before its pull request, "
+            "the way a developer tries a branch before asking for review: the test suite "
+            "runs against test doubles and cannot see what the real services do with "
+            "it.\n\n" + DEVCHECK_HOW + "\n\nA change no user can see waives it with "
+            "`- **Live check:** waived - no visible change` (or `docs only`, "
+            "`loop/process`, `owner ruling`)."
+        )
+    sha = m.group(1).lower()
+    rec = devcheck.find_record(sha)
+    if rec is None:
+        block(
+            f"Gate 7 (live check): {target} names a live check at `{sha[:12]}`, and there "
+            f"is no record of it in `{devcheck.record_dir()}`.\n\ndevcheck.py writes the "
+            "record itself, only for a run that started from a clean commit.\n\n"
+            + DEVCHECK_HOW
+        )
+    if rec.get("status") != "pass":
+        failed = [
+            f"{s.get('name')} (exit {s.get('rc')}, log {s.get('log')})"
+            for s in rec.get("steps") or []
+            if s.get("rc") != 0
+        ]
+        block(
+            f"Gate 7 (live check): the live check at `{sha[:12]}` failed: "
+            f"{'; '.join(failed) or 'no step ran'}.\n\nRead the logs, fix the change, "
+            "commit and check again.\n\n" + DEVCHECK_HOW
+        )
+    if not any(
+        str(s.get("name", "")).startswith("script") for s in rec.get("steps") or []
+    ):
+        block(
+            f"Gate 7 (live check): the live check at `{sha[:12]}` ran no script of the "
+            "issue's own steps, only the project's smoke. Replay what the issue (or the "
+            "report it quotes) describes, step by step from a fresh start, and pass it "
+            "with --script.\n\n" + DEVCHECK_HOW
+        )
+    rec_sha = str(rec.get("sha") or "").lower()
+    if head_sha and rec_sha != head_sha.lower():
+        # In the guard's working directory, as merge_base and the other gates' reads.
+        root = os.getcwd()
+        key = devcheck.branch_key(root, base_sha, head_sha)
+        if key is None:
+            subprocess.run(
+                ["git", "-C", root, "fetch", "-q", "origin", head_sha],
+                capture_output=True,
+                timeout=30,
+            )
+            key = devcheck.branch_key(root, base_sha, head_sha)
+        if not key or key != rec.get("key"):
+            block(
+                f"Gate 7 (live check): the live check ran at `{rec_sha[:12]}`, and the head "
+                f"`{head_sha[:12]}` changes something else: a rebase or a later commit "
+                "changed what this branch does since the check.\n\nCheck the head again; "
+                "`python3 .claude/hooks/devcheck.py --rerun "
+                f"{rec_sha[:12]} --update-pr <N>` replays the scripts recorded then."
+            )
+
+
+def pr_issues(data: dict, body: str) -> list[str]:
+    """The issues a PR is for: GitHub's closing references, its issue-<N> branch, and
+    `Refs #N` (a needs:live PR does not close its issue)."""
+    found = [
+        str(r["number"])
+        for r in (data.get("closingIssuesReferences") or [])
+        if isinstance(r, dict) and r.get("number")
+    ]
+    branch = ISSUE_BRANCH.match(str(data.get("headRefName") or ""))
+    if branch:
+        found.append(branch.group(1))
+    found += ISSUE_REF.findall(body)
+    return list(dict.fromkeys(found))
+
+
+def branch_paths() -> list[str]:
+    """Files this worktree's branch changes since it left origin/main; [] when git
+    cannot say."""
+    try:
+        done = subprocess.run(
+            ["git", "diff", "--name-only", "origin/main...HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    return done.stdout.split() if done.returncode == 0 else []
 
 
 FAIL_BEFORE_HOW = (
@@ -1989,6 +2183,7 @@ def check_pr_create(command: str) -> None:
     Gate 2: Must contain `- **Sweep SHA:** <HEAD sha>`. Refuse if missing.
     Gate 3: Must contain `- **Fail-before:** tests/<path>/test_<name>.py <N> -> <M>`
     or one of the 4 valid waivers. Refuse if missing.
+    Gate 7: a PR in the live check's scope names a passing devcheck record or a waiver.
     """
     if is_draft_pr(command):
         return
@@ -2005,6 +2200,30 @@ def check_pr_create(command: str) -> None:
             "the full check suite was measured against the head commit being submitted.\n\n"
             "Run the sweep at the current head and add `- **Sweep SHA:** <HEAD sha>` to the PR body."
         )
+
+    # Gate 7, as far as it can be told before the PR exists: the issue's labels and
+    # the files the branch changes. The merge gate checks the record against the head.
+    if devcheck_on():
+        m_live = DEVCHECK_LINE.search(body)
+        if m_live and not DEVCHECK_WAIVER.search(body):
+            import devcheck
+
+            rec = devcheck.find_record(m_live.group(1))
+            if rec is None or rec.get("status") != "pass":
+                block(
+                    f"Gate 7 (live check): the body names a live check at `{m_live.group(1)[:12]}`, "
+                    "and there is no passing record of it.\n\n" + DEVCHECK_HOW
+                )
+        elif not m_live:
+            issues = [n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body)
+            scope = devcheck_scope(issues, branch_paths(), "")
+            if scope and not devcheck_waiver_ok(body, scope, "This PR"):
+                block(
+                    f"Gate 7 (live check): the body has no `Live check:` line, and {scope[1]}.\n\n"
+                    + DEVCHECK_HOW
+                    + "\n\nA change no user can see waives it with "
+                    "`- **Live check:** waived - no visible change`."
+                )
 
     if FAIL_BEFORE_WAIVER.search(body):
         return
