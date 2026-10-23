@@ -2275,6 +2275,70 @@ def test_a_red_resweep_is_handed_back_with_its_failures() -> None:
           outcome, "refused by the merge gates (handed back)")
 
 
+def test_a_single_flaky_failure_is_tried_again() -> None:
+    """Single flaky failures handed PRs back (#106 and #103 in the merged-tree check, #110,
+    #126 and #140 in a re-sweep)."""
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    outcome, calls, log, _ = resweep_session(stale, ALLOW_SH, sweeps=[(False, RED_SWEEP), (True, "281 green")])
+    check("a red re-sweep that passes on the second try: merged", (outcome, len(calls), "pr merge 9" in log),
+          ("ok", 2, True))
+    other = RED_SWEEP.replace("test_issue_50.py::test_cli_exits", "test_issue_14.py::test_restart")
+    outcome, _, log, pool = resweep_session(stale, ALLOW_SH, sweeps=[(False, RED_SWEEP), (False, other)])
+    check("red twice, differently: held as flaky, not handed back",
+          (outcome, "pr comment" in log, any("flaky" in e for e in pool.events)),
+          ("held (the re-sweep failed twice, differently: flaky)", False, True))
+    pool = ccpool.Pool(ccpool.Config(logdir=pathlib.Path(tempfile.mkdtemp(prefix="ccpool-flakymerge-")) / "pool",
+                                     fast_check_cmd="true"), fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("auto", "merge", "merge:5@x", "mrg:5", 5, (0, 5), {}), 1)
+    w.dir.mkdir(parents=True)
+    w.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "m" * 40, "")
+    w.behind_main = lambda head, branch: True
+    w.main_ok = lambda main, env: True
+    handed = []
+    w.hand_back = lambda pr, n, text: handed.append(text)
+    fail = "FAILED tests/unit/test_weather.py::test_card - flaky\n1 failed"
+    for results, want, back in (
+        ([(False, fail), (True, "ok")], "", 0),
+        ([(False, fail), (False, fail.replace("test_card", "test_other"))],
+         "held (the merged-tree check failed twice, differently: flaky)", 0),
+        ([(False, fail), (False, fail)], "breaks main once merged (handed back)", 1),
+    ):
+        queue = list(results)
+        w.fast_check = lambda wt, env: queue.pop(0)
+        handed.clear()
+        check(f"merged-tree check {[r[0] for r in results]}: {want or 'merges'}",
+              (w.merged_check(5, 1, "h" * 40, "issue-1", {}), len(handed), queue), (want, back, []))
+
+
+def test_a_flaky_red_main_gets_an_issue() -> None:
+    """main went red four times on an e2e weather-card flake and nobody filed a fix."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-flaky-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_LOG)
+    gh.chmod(0o755)
+    h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
+    red = "FAILED tests/e2e/test_issue_14.py::test_weather_card - Timeout\n== sweep is red ==\n"
+    results = {"1": (False, red), "2": (True, "green"), "3": (False, red), "4": (True, "green")}
+    h.pool.sweep_main = lambda sha: results[sha[0]]
+    h.pool.commits_since = lambda old, new: []
+    touched = {"2": [], "4": ["abc1234"]}
+    h.pool.touched = lambda old, new, paths: touched[new[0]]
+    for k in "1234":
+        h.st = state(main=k * 40)
+        h.step()
+        for _ in range(100):
+            if not h.pool.main_check_running:
+                break
+            time.sleep(0.05)
+    log = (d / "gh.log").read_text()
+    check("red, then green with no commit to the test's file: a flaky-test issue",
+          ([ln.split(" --body ")[0] for ln in log.splitlines() if ln.startswith("issue create --title Flaky")],
+           any("flaky test(s) tests/e2e/test_issue_14.py::test_weather_card" in e for e in h.pool.events)),
+          (["issue create --title Flaky test: tests/e2e/test_issue_14.py::test_weather_card --label type:bug "
+            "--label P1 --label stage:triage"], True))
+    check("red and green after a commit that touched it: no second one", log.count("Flaky test:"), 1)
+
+
 def test_auto_merge_resweeps_outside_the_merge_lock() -> None:
     """A merger's clean re-rebase comes without a sweep; re-sweeping it under the merge
     lock (5-10 minutes each) held every other merge, and their PRs conflicted again."""

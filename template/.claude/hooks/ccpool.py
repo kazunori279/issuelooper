@@ -131,7 +131,9 @@ main that moved during a run is not checked, only the newest. A red main tells t
 monitor and files an issue `main is red: <first failing tests>` (type:bug, P0,
 stage:triage) with the failing tests, the commits since the last green main and the
 end of the output, or comments on the one already open; the next green main closes
-it. Merges never wait for it.
+it. Merges never wait for it. When main turns green again with no commit touching the
+files of the tests that failed, those tests are flaky: an issue `Flaky test: <tests>`
+is filed (or the open one gets a comment).
 
 MONITOR
 
@@ -565,6 +567,13 @@ def failing_tests(out: str) -> list[str]:
     if len(tail) < 2:
         return []
     return [ln.strip() for ln in tail[1].splitlines() if ln.strip() and not ln.startswith("sweep ")][:5]
+
+
+def same_failure(first: str, second: str) -> bool:
+    """Whether two red runs failed the same way: a test in common, or (when either names
+    none) as far as anyone can tell."""
+    a, b = set(failing_tests(first)), set(failing_tests(second))
+    return bool(a & b) if a and b else True
 
 
 def blocked(issue: dict, open_numbers: set[int]) -> bool:
@@ -1836,7 +1845,14 @@ class Session(threading.Thread):
                 if held:
                     return held
                 if swept is False and "== sweep is red ==" in out:
-                    return self.sweep_hand_back(pr, n, head, out)
+                    # Once more before acting on it: single flaky failures handed PRs back.
+                    swept, again = self.resweep(pr, branch, head, env)
+                    if swept:
+                        self.note(f"the re-sweep passed on a second try (flaky: {', '.join(failing_tests(out)[:3])})")
+                    elif not same_failure(out, again):
+                        return self.flaky_hold(pr, "re-sweep", out, again)
+                    else:
+                        return self.sweep_hand_back(pr, n, head, again)
             with self.pool.merge_lock:
                 # A head swept on an older main says nothing about the merged result: one PR
                 # moved an import, another (swept before it) still used it, GitHub saw no
@@ -1871,6 +1887,13 @@ class Session(threading.Thread):
         )
         self.note_large_files(pr)
         return "ok"
+
+    def flaky_hold(self, pr: int, what: str, first: str, second: str) -> str:
+        """Two red runs that failed differently: flaky, not the PR's fault. Held for a later try."""
+        names = sorted(set(failing_tests(first)) | set(failing_tests(second)))[:4]
+        self.pool.event(f"PR #{pr} not handed back: its {what} failed twice, differently "
+                        f"({', '.join(names) or 'no test named'}): flaky; tried again on a later poll")
+        return f"held (the {what} failed twice, differently: flaky)"
 
     def sweep_hand_back(self, pr: int, n: int, head: str, out: str) -> str:
         """Hand the PR back for its red sweep, with what failed. Handed back by the gates
@@ -1952,6 +1975,12 @@ class Session(threading.Thread):
                 return "behind main with a conflict (the next poll sees it)"
             ok, why = self.fast_check(wt, env)
             self.note(f"merged-tree check on main {main[:12]}: {'ok' if ok else why[-400:]}")
+            if not ok:  # once more: a single flaky failure handed PRs #106 and #103 back
+                ok, again = self.fast_check(wt, env)
+                self.note(f"merged-tree check, second try: {'ok (flaky)' if ok else again[-400:]}")
+                if not ok and not same_failure(why, again):
+                    return self.flaky_hold(pr, "merged-tree check", why, again)
+                why = again if not ok else why
             if ok:
                 return ""
             if not self.main_ok(main, env):
@@ -2317,6 +2346,8 @@ class Pool:
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
         self.red_failing: tuple = ()  # the failing tests last reported on it
+        self.red_since = ""  # the first red main of the current red spell
+        self.red_seen: list[str] = []  # every test that failed during it
         self.own_deployed = ""
         self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
         self.undeployed_since = 0.0  # when main first moved past the last deploy started
@@ -2759,8 +2790,51 @@ class Pool:
                         f"<!-- merger -->\nmain is green again at {sha[:8]}: the full check suite passes there.")
                 self.gh("issue", "close", str(n))
                 self.event(f"main is green again at {sha[:8]}; closed #{n}")
+            if self.red_since:
+                self.report_flaky(self.red_since, sha, self.red_seen)
+            self.red_since, self.red_seen = "", []
             return
+        self.red_since = self.red_since or sha
+        self.red_seen += [t for t in failing if t not in self.red_seen]
         self.report_red(sha, failing, out)
+
+    def touched(self, old: str, new: str, paths: list[str]) -> list[str] | None:
+        """Commits in old..new that change any of paths, or None when git cannot say."""
+        r = subprocess.run(["git", "-C", str(repo_root()), "log", "--format=%h", f"{old}..{new}", "--", *paths],
+                           capture_output=True, text=True, timeout=60)
+        return r.stdout.split() if r.returncode == 0 else None
+
+    def report_flaky(self, red: str, green: str, failing: list[str]):
+        """main went red and green again with no commit touching the failing tests' files:
+        those tests are flaky. File an issue for them (or comment on the open one), so
+        someone makes them reliable: an e2e flake turned main red four times in one run
+        and nobody filed a fix."""
+        tests = [t for t in failing if "::" in t]
+        files = sorted({t.split("::")[0] for t in tests})
+        if not files or self.touched(red, green, files) != []:
+            return
+        names = ", ".join(tests[:2]) + (f" and {len(tests) - 2} more" if len(tests) > 2 else "")
+        body = (f"<!-- merger -->\nmain went red at {red[:8]} on these tests and green again at {green[:8]} with no "
+                "commit touching their files in between, so they fail by chance:\n\n"
+                + "\n".join(f"- `{t}`" for t in tests[:20])
+                + "\n\nMake them reliable (a fixed wait, a shared port or file, an order dependence, a race with "
+                "a server starting). Each flake turns main red, and the merged-tree check and re-sweeps run "
+                "twice before they act on a failure.")
+        r = self.gh("issue", "list", "--state", "open", "--search", "Flaky test in:title", "--json", "number,title")
+        try:
+            open_ = [i["number"] for i in json.loads(r.stdout or "[]") if i["title"].startswith("Flaky test")]
+        except (ValueError, KeyError, TypeError):
+            open_ = []
+        if open_:
+            self.gh("issue", "comment", str(open_[0]), "--body", body)
+            what = f"commented on #{open_[0]}"
+        else:
+            c = self.gh("issue", "create", "--title", f"Flaky test: {names}"[:200], "--label", "type:bug",
+                        "--label", "P1", "--label", "stage:triage", "--body", body)
+            m = re.search(r"/issues/(\d+)", c.stdout)
+            what = f"filed #{m.group(1)}" if m else "could not file an issue"
+        self.log("flaky", tests=tests[:5], red=red[:12], green=green[:12])
+        self.event(f"flaky test(s) {names}: main went red and green again with no change to them; {what}")
 
     def report_red(self, sha: str, failing: list[str], out: str):
         """File the `main is red` issue, or update the open one when what fails changed."""

@@ -79,7 +79,11 @@ background, one run at a time. A red `main` tells the monitor and files an issue
 titled `main is red: <failing tests>` (P0) with the failing tests, the commits since
 the last green `main` and the end of the output; the next green `main` closes it.
 Merges do not wait for it, and a PR whose re-sweep fails only where that red `main`
-fails is held for a later try rather than handed back. `[sweep] main_check = false`
+fails is held for a later try rather than handed back. The merged-tree check and
+re-sweeps run once more before acting on a failure (a PR that fails twice the same
+way is handed back with the failing tests; twice differently, it is held as flaky),
+and when `main` turns green again with no commit touching the tests that failed,
+the supervisor files a `Flaky test:` issue for them (or comments on the open one). `[sweep] main_check = false`
 turns it off.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
