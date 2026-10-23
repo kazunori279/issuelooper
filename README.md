@@ -36,7 +36,7 @@ runtime, per role.
 |---|---|---|
 | **Supervisor** | Program (`ccpool.py`) | Turns GitHub state into units of work, starts them, merges, deploys. |
 | **Worker** | Agent session, one per issue | One issue: a failing test, the fix, a green sweep, a pull request. |
-| **Merger** | Agent session, one per conflicting PR | Rebases, resolves so both sides survive, sweeps again; the supervisor then merges it. |
+| **Merger** | Agent session, one per conflicting PR | Rebases, resolves so both sides survive, sweeps again, and rebases once more if `main` moved meanwhile; the supervisor then merges it. |
 | **Tester** | Agent session (optional) | Live checks against the real environment; UX runs that walk the deployed app and file what gets in a user's way; spec checks of the app against the spec, one requirement at a time. |
 | **Reviewer** | One model call, no tools | Reads the PR's diff and rejects invented data shown as real, code that special-cases tests, and anything your project's rules forbid. |
 | **Monitor** | One long-lived agent session | Triage, priorities, holds, dependencies, and the questions only the owner can answer (`stage:owner`). |

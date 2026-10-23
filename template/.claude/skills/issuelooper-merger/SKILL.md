@@ -1,6 +1,6 @@
 ---
 name: issuelooper-merger
-description: "The merger of this repository's issue loop (issuelooper), for a session whose CC_ROLE is already `merger`: resolve one pull request that conflicts with main. Rebase in a worktree, resolve so both sides survive, re-sweep, run the review gate, push, and leave the merge to the supervisor. Hand back only when the rebase needs a decision about behavior. Do not load this to find out what your role is."
+description: "The merger of this repository's issue loop (issuelooper), for a session whose CC_ROLE is already `merger`: resolve one pull request that conflicts with main. Rebase in a worktree, resolve so both sides survive, re-sweep, push, catch up with a main that moved meanwhile, run the review gate, and leave the merge to the supervisor. Hand back only when the rebase needs a decision about behavior. Do not load this to find out what your role is."
 ---
 
 # issuelooper: the merger
@@ -45,24 +45,47 @@ survive: imports, adjacent lines, two additions to one list or one CSS block.
 Read the PR that landed (`git log origin/main -- <file>`) when the intent of the
 other side is not obvious. Never edit `$SHARED_REPO_PATH` itself.
 
-Stop and hand back (step 5) when a conflict needs a decision about behavior: the
+Stop and hand back (step 7) when a conflict needs a decision about behavior: the
 two sides do different things to the same element and keeping both is not
 possible.
 
-## 3. Sweep, push, review
+## 3. Sweep and push
 
 ```bash
 git push --force-with-lease origin "HEAD:<headRefName>"
 python3 .claude/hooks/sweep_locked.py --update-pr $P     # rewrites Sweep SHA and the green line in the body
 gh pr view $P --json headRefOid -q .headRefOid            # must equal git rev-parse HEAD
+```
+
+A red sweep after a clean rebase: hand back, naming the failing test.
+
+## 4. Catch up with main
+
+Resolving takes minutes, and `main` moves meanwhile: a PR that conflicts again by
+the time you stop costs another merger session. Once the sweep is green:
+
+```bash
+git fetch -q origin main
+git merge-base --is-ancestor origin/main HEAD || git rebase origin/main
+```
+
+- Nothing new on `main`, or a clean rebase: push the rebased head
+  (`git push --force-with-lease origin "HEAD:<headRefName>"`) and do not sweep
+  again. The supervisor sweeps a head that has no sweep record before its merge
+  gates, and checks it merged with the current `main` under its merge lock.
+- Conflicts: resolve them as in step 2, then step 3 again, then this step again.
+  Three rounds at most; then go on with the head you pushed.
+
+## 5. Review
+
+```bash
 python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr $P
 ```
 
-- A red sweep after a clean rebase: hand back, naming the failing test.
-- `review_gate.py` exit 0: go on. Exit 1: it rejected the PR and already handed it
-  back (PR comment, issue at `stage:triage`); stop. Exit 2: run it again.
+Exit 0: go on. Exit 1: it rejected the PR and already handed it back (PR comment,
+issue at `stage:triage`); stop. Exit 2: run it again.
 
-## 4. Leave the merge to the supervisor
+## 6. Leave the merge to the supervisor
 
 Stop once the review gate passed, with `$N` still at `stage:pr`. Do not merge and
 do not change its labels. On its next poll the supervisor merges the new head with
@@ -71,7 +94,7 @@ and updates the labels; a merge made from an older `main` broke `main` more than
 once. If the PR conflicts again by then, it starts another merger session; after
 three merger sessions without a merge, it hands the PR back to a worker instead.
 
-## 5. Hand back
+## 7. Hand back
 
 Once per PR, and only for a decision about behavior or a red sweep after a clean
 rebase:

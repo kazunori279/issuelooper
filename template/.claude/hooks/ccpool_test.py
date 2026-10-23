@@ -2021,6 +2021,10 @@ def test_worker_prompt_points_to_the_project() -> None:
     m = ccpool.merger_prompt(
         ccpool.Unit("merger", "land", "k", "f", 9, (0,), {"issue": 2, "head": "c" * 40, "mergeable": "X"}), "45m")
     check("the merger runs review_gate.py", ('review_gate.py" --pr 9' in m, "issuelooper-merger" in m), (True, True))
+    check("and catches up with a main that moved, without a second sweep for a clean rebase",
+          ("git merge-base --is-ancestor origin/main HEAD" in m, "do not sweep again" in " ".join(m.split()),
+           "three rounds" in m),
+          (True, True, True))
 
 
 FAKE_AGY_WRAP = r"""#!/usr/bin/env python3

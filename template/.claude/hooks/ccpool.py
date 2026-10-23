@@ -1025,14 +1025,20 @@ from a merger session, and any write to a PR but #{pr}.
    change and what landed on main survive ({PROJECT} says how to set up a worktree).
    Then run `python3 .claude/hooks/sweep_locked.py --update-pr {pr}` there and push with
    --force-with-lease.
-2. Run the review gate on the new head:
+2. Catch up with main, which moved while you worked: once the sweep is green,
+   `git fetch -q origin main`, and if `git merge-base --is-ancestor origin/main HEAD` fails,
+   `git rebase origin/main` again. A clean rebase: push it with --force-with-lease and do
+   not sweep again (the supervisor sweeps a head that has no sweep record before its merge
+   gates, and checks it merged with the current main). Conflicts: resolve them as in step 1,
+   sweep, push, and catch up again; three rounds at most, then go on with what you pushed.
+3. Run the review gate on the new head:
    `python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr {pr}`. Exit 1: it rejected
    the PR and already handed it back; stop. Exit 2: run it again.
-3. Stop there, with #{n} still at stage:pr: do not merge. The supervisor merges the new
+4. Stop there, with #{n} still at stage:pr: do not merge. The supervisor merges the new
    head on its next poll, after checking it merged with the current main and running the
    merge gates, so every merge goes through the same checks. If main moved and the PR
    conflicts again, it starts another merger session (after three, a worker gets it).
-4. Hand back only when the rebase needs a decision about behavior, or the sweep is red
+5. Hand back only when the rebase needs a decision about behavior, or the sweep is red
    after a clean rebase: comment on the PR naming the hunk or the test, and swap stage:pr
    for stage:triage on #{n}. Once per PR.
 
