@@ -58,6 +58,10 @@ checkout the supervisor merges and deploys from. A pull request merges only when
 | 5 | The reviewer passed this head. |
 | 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty). |
 
+A gate that cannot be checked counts as refused: when the guard fails, gives no
+answer, or cannot read the PR or a changed file from GitHub, the supervisor does
+not merge and tries again on a later poll.
+
 Each gate checks the PR's head, and a head swept on an older `main` says nothing
 about the merged result: two PRs that do not conflict can still break `main`
 together (one moves an import the other still uses). With `[sweep] fast_command`

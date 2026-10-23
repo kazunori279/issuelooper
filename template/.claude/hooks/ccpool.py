@@ -1752,16 +1752,30 @@ class Session(threading.Thread):
         command = f"gh pr merge {pr} --squash --delete-branch --match-head-commit {head}"
 
         def gates() -> dict:
-            g = subprocess.run(
-                shlex.split(self.pool.cfg.guard_cmd),
-                input=json.dumps({"tool_input": {"command": command}, "session_id": "ccpool"}),
-                env=env, cwd=repo_root(), capture_output=True, text=True, timeout=300,
-            )
-            self.note(f"merge gates: {g.stdout.strip()[-800:]} {g.stderr.strip()[-300:]}")
+            """The guard's verdict: {"decision": "allow"} or a block/deny with its reason.
+            Anything else (a crash, a timeout, an empty or broken reply, an unknown
+            decision) is {"decision": "hold", ...}: no merge and no hand-back. That used to
+            read as {} and the merge went ahead with no gate checked."""
             try:
-                return json.loads(g.stdout.strip().splitlines()[-1]) if g.stdout.strip() else {}
-            except ValueError:
-                return {}
+                g = subprocess.run(
+                    shlex.split(self.pool.cfg.guard_cmd),
+                    input=json.dumps({"tool_input": {"command": command}, "session_id": "ccpool"}),
+                    env=dict(env, GUARD_EXPLICIT_ALLOW="1"), cwd=repo_root(), capture_output=True,
+                    text=True, timeout=300,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.note(f"merge gates did not run: {exc!r}")
+                return {"decision": "hold", "reason": f"the guard did not run ({exc!r:.200})"}
+            self.note(f"merge gates: exit {g.returncode} {g.stdout.strip()[-800:]} {g.stderr.strip()[-300:]}")
+            if g.returncode != 0:
+                return {"decision": "hold", "reason": f"the guard exited {g.returncode}"}
+            try:
+                verdict = json.loads(g.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                verdict = None
+            if not isinstance(verdict, dict) or verdict.get("decision") not in ("allow", "block", "deny"):
+                return {"decision": "hold", "reason": f"the guard gave no verdict ({g.stdout.strip()[-200:]!r})"}
+            return verdict
 
         with self.pool.merge_lock:
             # A head swept on an older main says nothing about the merged result: one PR
@@ -1783,6 +1797,9 @@ class Session(threading.Thread):
                 # ask the gates again before handing anything back (most merge-gate
                 # hand-backs were a missing sweep line or record).
                 verdict = gates()
+            if verdict.get("decision") == "hold":
+                self.pool.event(f"auto-merge of PR #{pr} held: {verdict['reason']}; tried again on a later poll")
+                return f"held ({verdict['reason']})"
             if verdict.get("decision") in ("block", "deny"):
                 reason = str(verdict.get("reason") or "")
                 if "shared checkout" in reason.lower():

@@ -731,6 +731,9 @@ pathlib.Path(os.environ["FAKE_GH_CALLED"]).write_text("yes")
 
 if state.get("broken"):
     sys.exit(1)
+if state.get("sleep"):
+    import time
+    time.sleep(state["sleep"])
 if args[:2] == ["issue", "view"]:
     names = state.get("labels", {}).get(args[2], [])
     bodies = state.get("comments", {}).get(args[2], [])
@@ -780,6 +783,7 @@ def with_fake_gh(
     broken: bool = False,
     prs: dict | None = None,
     comments: dict | None = None,
+    sleep: float = 0,
 ):
     """A PATH with a stub `gh` on it, plus the path of its call marker."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="role-guard-gh-"))
@@ -791,6 +795,7 @@ def with_fake_gh(
             "labels": labels or {},
             "linked": linked or {},
             "broken": broken,
+            "sleep": sleep,
             "prs": prs or {},
             "comments": comments or {},
         }
@@ -921,6 +926,32 @@ def test_the_hold_lookup_fails_open_and_is_not_run_on_other_writes() -> None:
                                 role="monitor", extra_env=env)[0], "allow")
 
 
+def test_pr_merge_fails_closed_when_github_cannot_be_read() -> None:
+    # The gates were skipped (`continue`) when `gh pr view` failed, and the merge went on.
+    env, _ = with_fake_gh(broken=True)
+    verdict, reason = run("gh pr merge 100 --squash", role="merger", extra_env=env)
+    check("gh fails: the merge is refused", (verdict, "could not be read from GitHub" in reason), ("refuse", True))
+    env, _ = with_fake_gh(sleep=10)
+    verdict, reason = run("gh pr merge 100 --squash", role="merger", extra_env=env)
+    check("gh times out: the merge is refused", (verdict, "could not be read from GitHub" in reason), ("refuse", True))
+    env, _ = with_fake_gh(prs={"100": {"headRefOid": "", "body": "x", "files": []}})
+    verdict, _ = run("gh pr merge 100 --squash", role="merger", extra_env=env)
+    check("an answer without a head: refused", verdict, "refuse")
+    env, _ = with_fake_gh(prs={"100": {
+        "headRefOid": "9" * 40, "body": f"<!-- worker -->\n- **Sweep SHA:** {'9' * 40}\n",
+        "files": [{"path": "src/gone.py", "changeType": "MODIFIED"}]}})
+    verdict, reason = run("gh pr merge 100 --squash", role="merger", extra_env=env)
+    check("a changed .py file that cannot be read at the head: refused (Gate 1 cannot check it)",
+          (verdict, "could not be read at PR #100 head" in reason), ("refuse", True))
+    env, _ = with_fake_gh(broken=True)
+    verdict, _ = run("gh issue comment 5 --body '<!-- monitor --> ok'", role="monitor", extra_env=env)
+    check("everything else stays fail-open", verdict, "allow")
+    proc = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(
+        {"tool_input": {"command": "ls"}, "session_id": "s"}), capture_output=True, text=True,
+        env=dict(os.environ, CC_ROLE="merger", GUARD_EXPLICIT_ALLOW="1"))
+    check("GUARD_EXPLICIT_ALLOW=1: an allow says so", json.loads(proc.stdout), {"decision": "allow"})
+
+
 def test_pr_merge_requires_sweep_sha() -> None:
     env, _ = with_fake_gh(
         prs={"100": {
@@ -960,7 +991,9 @@ def test_pr_merge_rejects_stale_sweep_sha() -> None:
 
 
 def test_pr_merge_allows_matching_sweep_sha() -> None:
-    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
     env, _ = with_fake_gh(
         prs={"102": {
             "headRefOid": commit,
@@ -1015,7 +1048,9 @@ def test_pr_merge_refuses_when_shared_checkout_dirty() -> None:
         target_dir = repo / scoped
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / "dirty_file.txt").write_text("unreviewed write\n")
-        commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+        commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
         env, _ = with_fake_gh(
             prs={"201": {
                 "headRefOid": commit,
@@ -1037,7 +1072,9 @@ def test_pr_merge_refuses_any_untracked_file() -> None:
     unrelated.mkdir(parents=True, exist_ok=True)
     (unrelated / "notes.txt").write_text("scratch in another project\n")
     (repo / "scratch.md").write_text("random note\n")
-    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
     env, _ = with_fake_gh(
         prs={"204": {
             "headRefOid": commit,
@@ -1058,7 +1095,9 @@ def test_pr_merge_refuses_when_local_main_ahead_of_origin_main() -> None:
     subprocess.check_call(["git", "-C", str(repo), "add", "stray.txt"], env=git_env)
     subprocess.check_call(["git", "-C", str(repo), "commit", "-m", "stray commit directly on main"], env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
     env, _ = with_fake_gh(
         prs={"202": {
             "headRefOid": commit,
@@ -1075,7 +1114,9 @@ def test_pr_merge_refuses_when_local_main_ahead_of_origin_main() -> None:
 
 def test_pr_merge_allows_when_shared_checkout_clean() -> None:
     repo = make_clean_repo()
-    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
     env, _ = with_fake_gh(
         prs={"203": {
             "headRefOid": commit,
@@ -1092,7 +1133,9 @@ def test_pr_merge_allows_when_shared_checkout_clean() -> None:
 def test_pr_merge_requires_fail_before() -> None:
     """Gate 3. The rewritten-expectation shape is the third case here: counts
     equal, expected value rewritten, suite green."""
-    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
     base = f"<!-- worker -->\nCloses #{{n}}\n- **Sweep SHA:** {commit[:7]}\n"
     code_only = [{"path": "clean.py", "changeType": "MODIFIED", "additions": 4}]
     with_case = code_only + [
@@ -1409,7 +1452,9 @@ def test_pr_merge_validates_sweep_breakdown_and_completeness() -> None:
 def test_pr_merge_requires_sweep_record() -> None:
     """The `green:` line must match what the sweep recorded at the head. A real line
     measured on a dirty tree before the commit has no record at the head."""
-    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n"})
+    commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
+                          "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
+                          "tests/unit/test_other.py": "def test_other():\n    assert True\n"})
     line = "65 green: unit 40 · e2e 25"
 
     def verdict_for(key: str, body_line: str, extra: str = "") -> tuple[str, str]:

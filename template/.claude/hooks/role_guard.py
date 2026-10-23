@@ -346,7 +346,9 @@ def block(reason: str) -> None:
 
 
 def allow() -> None:
-    if DENY == "deny":
+    # GUARD_EXPLICIT_ALLOW: the supervisor's own merges ask for a positive answer, so an
+    # empty or broken reply is never read as a pass (Claude Code's allow is `{}`).
+    if DENY == "deny" or os.environ.get("GUARD_EXPLICIT_ALLOW", "").strip() == "1":
         print(json.dumps({"decision": "allow"}))
     else:
         print("{}")
@@ -1245,6 +1247,10 @@ def check_pr_merge(command: str) -> None:
     written by review_gate.py). See review_gate_check.
 
     Gate 6: the PR changes nothing under $GUARD_PROTECTED_PATHS, the owner's files.
+
+    Unlike the rest of the guard, these fail closed: a PR that cannot be read, a
+    changed .py file that cannot be read at the head, or an error inside the gates
+    refuses the merge (it is retried later; a merge cannot be undone).
     """
     check_shared_checkout_clean()
     repo_match = REPO_FLAG.search(command)
@@ -1269,8 +1275,15 @@ def check_pr_merge(command: str) -> None:
             + ["--json", "headRefOid,baseRefOid,body,files,closingIssuesReferences"],
             repo,
         )
-        if not isinstance(data, dict):
-            continue
+        if not isinstance(data, dict) or not data.get("headRefOid"):
+            # Fail closed here, unlike everywhere else in the guard (gh_json): a merge
+            # that skipped its gates because GitHub was slow cannot be taken back,
+            # while a merge refused for that reason is retried on the next poll.
+            block(
+                f"{'PR #' + pr if pr else 'The PR'} could not be read from GitHub (gh pr view failed, timed "
+                "out or answered without a head), so its merge gates cannot be checked. Not merged; "
+                "try again later."
+            )
 
         head_sha = str(data.get("headRefOid") or "")
         base_sha = str(data.get("baseRefOid") or "") or "origin/main"
@@ -1372,7 +1385,11 @@ def check_pr_merge(command: str) -> None:
         for p in changed_py:
             content = get_file_content_at_commit(head_sha, p)
             if content is None:
-                continue
+                block(
+                    f"`{p}` could not be read at {target} head `{head_sha[:7]}` (not fetched here, "
+                    "even after `git fetch origin <head>`), so Gate 1 cannot check it. Not merged; "
+                    "try again later."
+                )
             m = CONFLICT_MARKER.search(content)
             if m:
                 block(
@@ -2003,7 +2020,12 @@ def main(raw: str) -> None:
 
     if MERGE.search(command):
         merger_pr_scope_check(command)
-        check_pr_merge(command)
+        try:
+            check_pr_merge(command)
+        except Exception as exc:  # noqa: BLE001
+            # The guard fails open on its own bugs (see __main__), but not on a merge:
+            # an error inside the gates would merge a PR nobody checked.
+            block(f"The merge gates failed with an error ({exc!r:.300}), so nothing was checked. Not merged.")
 
     if CLOSES.search(command) and LIVE not in removed:
         check_issue_close(command)

@@ -1525,7 +1525,10 @@ def test_quota_backoff_and_pause() -> None:
     check("a session that ends ok resets the streak", h.pool.book.quota_streak, 0)
 
 
-def auto_session(guard_out: str, review_rc: int = 0):
+ALLOW = '{"decision": "allow"}'
+
+
+def auto_session(guard_out: str, review_rc: int = 0, guard_rc: int = 0, guard_cmd: str = ""):
     """Session.auto_merge with a logging fake gh, a fake review gate and a fake guard."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-auto-"))
     gh = d / "gh"
@@ -1535,10 +1538,11 @@ def auto_session(guard_out: str, review_rc: int = 0):
     review.write_text(f"#!/bin/sh\nexit {review_rc}\n")
     review.chmod(0o755)
     guard = d / "guard"
-    guard.write_text(f"#!/bin/sh\ncat > /dev/null\necho '{guard_out}'\n")
+    guard.write_text(f"#!/bin/sh\ncat > /dev/null\necho \"$GUARD_EXPLICIT_ALLOW\" > {d}/explicit\n"
+                     f"printf '%s' '{guard_out}'\nexit {guard_rc}\n")
     guard.chmod(0o755)
     cfg = ccpool.Config(
-        logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=str(guard)
+        logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=guard_cmd or str(guard)
     )
     pool = ccpool.Pool(cfg, fetcher=state, spawn=False)
     u = ccpool.Unit(
@@ -1558,7 +1562,7 @@ def auto_session(guard_out: str, review_rc: int = 0):
 
 
 def test_auto_merge_paths() -> None:
-    outcome, log, _ = auto_session("{}")
+    outcome, log, _ = auto_session(ALLOW)
     check("gates pass: merged", outcome, "ok")
     check(
         "squash merge at the head, then stage:pr -> stage:live for a needs:live issue",
@@ -1599,12 +1603,33 @@ def test_auto_merge_paths() -> None:
         ("failed (gate 0: shared checkout)", []),
     )
     check("the monitor hears it", any("Gate 0" in e for e in pool.events), True)
-    outcome, log, _ = auto_session("{}", review_rc=1)
+    outcome, log, _ = auto_session(ALLOW, review_rc=1)
     check(
         "a review-gate reject stops before the merge gates",
         (outcome, log),
         ("rejected by the review gate (handed back)", []),
     )
+
+
+def test_auto_merge_holds_without_an_explicit_allow() -> None:
+    """A guard that crashed or answered nothing let the merge go ahead: its reply read as {}."""
+    for what, out, rc, cmd in (
+        ("exit 1 with no output", "", 1, ""),
+        ("exit 2 with an allow printed", ALLOW, 2, ""),
+        ("empty output", "", 0, ""),
+        ("malformed JSON", "{not json", 0, ""),
+        ("the guard's own error (fail-open note, no decision)", '{"systemMessage": "role_guard error, allowing"}', 0, ""),
+        ("an unknown decision", '{"decision": "maybe"}', 0, ""),
+        ("Claude Code's bare allow", "{}", 0, ""),
+        ("a guard that cannot be started", "", 0, "/nonexistent/guard"),
+    ):
+        outcome, log, pool = auto_session(out, guard_rc=rc, guard_cmd=cmd)
+        check(f"{what}: held, no merge and no hand-back",
+              (outcome.startswith("held ("), [x for x in log if x.startswith(("pr merge", "pr comment", "issue edit"))]),
+              (True, []))
+        check(f"{what}: the monitor hears it", any("held" in e for e in pool.events), True)
+    d = pathlib.Path(auto_session(ALLOW)[2].cfg.logdir).parent
+    check("the supervisor asks the guard for an explicit allow", (d / "explicit").read_text().strip(), "1")
 
 
 def git(*args, cwd):
@@ -2008,7 +2033,7 @@ def test_auto_merge_resweeps_a_sweep_refusal() -> None:
         d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-resweep-"))
         guard = d / "guard"
         guard.write_text(
-            f"#!/bin/sh\ncat > /dev/null\nif [ -e {d}/once ]; then echo '{{}}'; else touch {d}/once; "
+            f"#!/bin/sh\ncat > /dev/null\nif [ -e {d}/once ]; then echo '{{\"decision\": \"allow\"}}'; else touch {d}/once; "
             "echo '{\"decision\": \"block\", \"reason\": \"No sweep record for this head.\"}'; fi\n"
         )
         guard.chmod(0o755)
@@ -2483,7 +2508,7 @@ def test_end_to_end_with_fake_github() -> None:
     review.chmod(0o755)
     guard = repo.dir / "guard"
     guard.write_text(
-        f"#!/bin/sh\ncat > /dev/null\necho \"$CC_ROLE $MERGE_PR\" >> {repo.dir}/guards\necho '{{}}'\n"
+        f"#!/bin/sh\ncat > /dev/null\necho \"$CC_ROLE $MERGE_PR\" >> {repo.dir}/guards\necho '{{\"decision\": \"allow\"}}'\n"
     )
     guard.chmod(0o755)
     env = repo.env(role="")
