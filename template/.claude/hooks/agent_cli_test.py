@@ -476,6 +476,53 @@ def test_usage_and_last_tool() -> None:
     check("no tool yet", agy.last_tool([{"event": "init"}]), "")
 
 
+def agy_conversation(root: pathlib.Path, conv: str, steps: list[tuple[int, int, int]], age: float = 0) -> None:
+    """agy's own record of a conversation: (index, type, status) per step, `age` s old."""
+    import sqlite3
+    db = root / f"{conv}.db"
+    c = sqlite3.connect(db)
+    c.execute("create table steps (idx integer primary key, step_type integer, status integer, step_payload blob)")
+    c.executemany("insert into steps (idx, step_type, status) values (?, ?, ?)", steps)
+    c.commit()
+    c.close()
+    os.utime(db, (os.path.getmtime(db) - age,) * 2)
+
+
+def test_agy_finished_unseen() -> None:
+    # Nine mergers in one run: agy's stream stopped at a command it lost track of
+    # (still ACTIVE), the agent went on and finished, and the process never exited.
+    agy, claude = agent_cli.get("agy"), agent_cli.get("claude")
+    root = pathlib.Path(tempfile.mkdtemp(prefix="agy-conv-"))
+    old = os.environ.get("AGY_CONVERSATIONS_DIR")
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(root)
+    try:
+        stuck = [{"event": "init", "conversation_id": "c1"},
+                 {"event": "step_update", "step_update": {"step_index": 33, "state": "ACTIVE", "step_type": "tool",
+                                                          "tool_name": "run_command"}}]
+        agy_conversation(root, "c1", [(32, 15, 3), (33, 132, 1), (60, 132, 3), (85, 15, 3)], age=600)
+        check("agy: a reply 50 steps past the stuck one, ten minutes old: finished", agy.finished_unseen(stuck, 180), True)
+        check("agy: not yet quiet long enough", agy.finished_unseen(stuck, 900), False)
+        agy_conversation(root, "c2", [(33, 132, 1), (40, 132, 1)], age=600)
+        running = [dict(stuck[0], conversation_id="c2"), stuck[1]]
+        check("agy: the conversation's last step still runs: not finished", agy.finished_unseen(running, 180), False)
+        agy_conversation(root, "c3", [(32, 15, 3), (33, 132, 1)], age=600)
+        level = [dict(stuck[0], conversation_id="c3"), stuck[1]]
+        check("agy: nothing past the stream's last step: a long command, not a lost one",
+              agy.finished_unseen(level, 180), False)
+        done = stuck[:1] + [{"event": "step_update", "step_update": {"step_index": 33, "state": "DONE",
+                                                                     "step_type": "tool"}}]
+        check("agy: a stream not stopped on a running step", agy.finished_unseen(done, 180), False)
+        check("agy: no record of the conversation", agy.finished_unseen([dict(stuck[0], conversation_id="nope"),
+                                                                        stuck[1]], 180), False)
+        check("claude: its stream is all there is", claude.finished_unseen(stuck, 0), False)
+    finally:
+        if old is None:
+            os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+        else:
+            os.environ["AGY_CONVERSATIONS_DIR"] = old
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

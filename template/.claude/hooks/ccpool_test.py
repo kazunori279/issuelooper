@@ -2795,6 +2795,47 @@ def test_idle_on_a_background_task_is_resumed() -> None:
     check("a CLI without that state is never taken for it", claude.background_idle(0), None)
 
 
+FAKE_AGY_UNSEEN = r"""#!/usr/bin/env python3
+import json, os, sqlite3, sys, time
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+print(json.dumps({"event": "init", "conversation_id": "conv-7"}), flush=True)
+print(json.dumps({"event": "step_update", "step_update": {"step_index": 33, "state": "ACTIVE",
+      "step_type": "tool", "tool_name": "run_command"}}), flush=True)
+# The agent goes on past the stuck step and finishes; only agy's own record shows it.
+c = sqlite3.connect(os.path.join(os.environ["AGY_CONVERSATIONS_DIR"], "conv-7.db"))
+c.execute("create table steps (idx integer primary key, step_type integer, status integer)")
+c.executemany("insert into steps values (?, ?, ?)", [(33, 132, 1), (34, 132, 3), (35, 15, 3)])
+c.commit()
+c.close()
+time.sleep(120)
+"""
+
+
+def test_a_stream_stuck_behind_a_finished_conversation_ends_early() -> None:
+    """Nine agy mergers in one run: the stream stopped at a command agy lost track of,
+    the agent finished unseen, and the process sat until the 45-minute timeout."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-unseen-"))
+    agy = d / "agy-unseen"
+    agy.write_text(FAKE_AGY_UNSEEN)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"merger": "45m"},
+                                     stall_s=0, background_idle_s=0, unseen_idle_s=1), fetcher=state, spawn=False)
+    m = ccpool.Session(pool, ccpool.Unit("merger", "land", "mrg:5@a@b", "mrg:5", 5, (4,), {}), 1)
+    m.dir.mkdir(parents=True)
+    t0 = time.time()
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(d)  # the supervisor reads agy's record, and so does the fake
+    try:
+        rc, _, timed_out = m.session("resolve PR 5", dict(os.environ, CCROLE_MERGER_CLI="agy"))
+    finally:
+        os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+    calls = (d / "agy-unseen.calls").read_text().splitlines()
+    check("a conversation finished behind a stuck stream: ended early, not resumed, not a timeout",
+          (rc, timed_out, len(calls), time.time() - t0 < 90,
+           "the conversation finished without it" in (m.dir / "resumes.log").read_text()),
+          (0, False, 1, True, True))
+
+
 def test_silent_model_is_resumed() -> None:
     rc, timed_out, calls = stall_session("agy-silent")
     check("silent after a finished step: resumed in the same conversation", (rc, timed_out, len(calls)), (0, False, 2))

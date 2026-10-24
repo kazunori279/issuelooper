@@ -33,7 +33,9 @@ import json
 import os
 import pathlib
 import re
+import sqlite3
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT = "agy"
@@ -126,6 +128,12 @@ class Cli:
         """A result that ended on a model quota or rate-limit error with no answer."""
         raise NotImplementedError
 
+    def finished_unseen(self, events: list[dict], quiet: float) -> bool:
+        """The stream stopped behind a step while the conversation went on and ended:
+        its last step is a finished reply, unchanged for `quiet` s. False for a CLI
+        whose stream is all there is."""
+        return False
+
     # --- a long-lived session (the monitor, fed through stdin) ---
     def stream_args(self, session_id: str | None, logs: pathlib.Path) -> list[str]:
         raise NotImplementedError
@@ -157,6 +165,17 @@ class Agy(Cli):
     # sweep moved to the background), agy prints this and waits for the task, up to its
     # print timeout; the model does not act again in that run.
     idle_wait = re.compile(r"root agent idle; waiting up to .* for \d+ background task")
+    # agy keeps each conversation in a database of its own (AGY_CONVERSATIONS_DIR in
+    # tests). Its stream prints steps in order, so one it loses track of (a command it
+    # stopped reading after five silent minutes) holds back every later step, and the
+    # process does not exit after the last one. Step codes as agy wrote them: a reply
+    # is type 15; status 1 is running, 3 done.
+    REPLY, DONE = 15, 3
+
+    @staticmethod
+    def conversations() -> pathlib.Path:
+        return pathlib.Path(os.environ.get("AGY_CONVERSATIONS_DIR")
+                            or "~/.gemini/antigravity-cli/conversations").expanduser()
 
     def first_turn(self, prompt, timeout_s):
         return [
@@ -230,6 +249,30 @@ class Agy(Cli):
         last = events[-1] if events else {}
         step = last.get("step_update") if last.get("event") == "step_update" else None
         return isinstance(step, dict) and step.get("step_type") == "error_message"
+
+    def finished_unseen(self, events, quiet):
+        events = self.current(events)
+        last = events[-1] if events else {}
+        step = last.get("step_update") if last.get("event") == "step_update" else None
+        conv = self.session_id(events)
+        if not (isinstance(step, dict) and step.get("state") == "ACTIVE" and conv):
+            return False
+        db = self.conversations() / f"{conv}.db"
+        try:
+            # A reader leaves an empty -wal touched; agy's writes are the ones in it.
+            wal = db.with_name(db.name + "-wal")
+            changed = db.stat().st_mtime
+            if wal.exists() and wal.stat().st_size > 0:
+                changed = max(changed, wal.stat().st_mtime)
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                row = c.execute("select idx, step_type, status from steps order by idx desc limit 1").fetchone()
+            finally:
+                c.close()
+        except (ValueError, OSError, sqlite3.Error):
+            return False
+        return (bool(row) and row[0] > int(step.get("step_index") or 0) and (row[1], row[2]) == (self.REPLY, self.DONE)
+                and time.time() - changed >= quiet)
 
     def quota_result(self, e):
         # A result that has a full answer next to a stale 429 from a retried call did finish.

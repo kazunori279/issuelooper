@@ -95,7 +95,9 @@ prompt and POOL_WORKER_WRAP_BUDGET_S. A session whose model went silent after a
 finished step for POOL_STALL_S (POOL_STALL_FAST_S for a model whose name contains
 one of POOL_STALL_FAST_MODELS) is resumed (twice at most), and so is one whose CLI says
 the model's turn is over while it waits for a background task (agy), after
-POOL_BACKGROUND_IDLE_S (120); still idle after two nudges, it is ended early. A session that ends on a
+POOL_BACKGROUND_IDLE_S (120); still idle after two nudges, it is ended early. An agy session
+whose stream stopped behind a step while its conversation went on and finished (agy's
+own record of it) is ended POOL_UNSEEN_IDLE_S (180) after the last step. A session that ends on a
 model quota error is resumed in the same conversation up to POOL_QUOTA_RESUMES
 times, each after a wait that doubles from POOL_QUOTA_WAIT_S up to
 POOL_QUOTA_WAIT_MAX_S; one that still ends on it is "quota error": no try spent and
@@ -321,6 +323,7 @@ class Config:
     decompose_after: int = 2  # worker sessions on one issue without its merge before the monitor is asked to split it
     ux_screen: bool = True  # the monitor screens ux:proposed proposals before the owner reads them
     background_idle_s: float = 120  # agy idle on a background task this long: resumed (Session.background_idle)
+    unseen_idle_s: float = 180  # agy's conversation over this long behind a stuck stream: ended (Session.finished_unseen)
     stall_fast_s: float = 240
     stall_fast_models: str = "claude"
     kill_leftovers: bool = True  # kill what a session left running in its scratch paths
@@ -419,6 +422,7 @@ class Config:
             decompose_after=env_int("POOL_DECOMPOSE_AFTER", 2),
             ux_screen=env_flag("POOL_UX_SCREEN", True),
             background_idle_s=float(e("POOL_BACKGROUND_IDLE_S", "") or 120),
+            unseen_idle_s=float(e("POOL_UNSEEN_IDLE_S", "") or 180),
             stall_fast_s=float(e("POOL_STALL_FAST_S", "") or 240),
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
             kill_leftovers=env_flag("POOL_KILL_LEFTOVERS", True),
@@ -1544,6 +1548,17 @@ class Session(threading.Thread):
                         self.kill()
                         rc = 0
                         break
+                    # agy's stream stopped behind a command it lost track of while the agent
+                    # went on, finished, and the process stayed: nine mergers in one run sat
+                    # like that, unseen, until their 45-minute timeout. Its own record of
+                    # the conversation shows the end; nothing is left to resume.
+                    if cfg.unseen_idle_s and self.finished_unseen(cfg.unseen_idle_s):
+                        with open(self.dir / "resumes.log", "a") as rl:
+                            rl.write(f"{time.time():.0f} ended: the stream stopped behind a step; the "
+                                     "conversation finished without it\n")
+                        self.kill()
+                        rc = 0
+                        break
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
                     conv = self.quota_stalled(quiet=wait)
                     if conv and quota_k < cfg.quota_resumes and min(hard, ceiling) - time.time() > 120:
@@ -1633,6 +1648,11 @@ class Session(threading.Thread):
         if not lines or not pattern.search(lines[-1]) or time.time() - last < quiet:
             return None
         return self.conversation()
+
+    def finished_unseen(self, quiet: float) -> bool:
+        """Whether the stream has been silent for `quiet` s behind a step while the
+        conversation finished without it (agent_cli)."""
+        return self.quiet_s() >= quiet and self.cli.finished_unseen(self.events(), quiet)
 
     def in_model_retry(self) -> bool:
         """Whether the CLI is retrying a failed model call inside the turn (agent_cli)."""
