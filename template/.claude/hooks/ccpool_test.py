@@ -794,6 +794,24 @@ def test_live_checks_settle_themselves() -> None:
         check(f"{what}: nothing changes and the monitor is asked", (calls, events[0].startswith(ask)), ([], True))
     calls, events = settle([tester("live-verified: x")], labels=("needs:live",))
     check("an issue already off stage:live is left alone", (calls, events), ([], []))
+    # A GitHub App posts as `<slug>[bot]` in REST (ISSUELOOPER_LOGIN) and as `<slug>`
+    # in GraphQL (gh issue view): the same account.
+    log = d / "gh.log"
+    log.write_text("")
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh)), fetcher=state, spawn=False)
+    os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="Loop-Bot[bot]", FAKE_GH_VIEW=json.dumps(
+        {"state": "OPEN", "labels": [{"name": "stage:live"}], "comments": [tester("live-verified: x")]}))
+    claimlib_login = ccpool.claimlib._LOGIN[:]
+    ccpool.claimlib._LOGIN.clear()
+    try:
+        pool.settle_live(unit)
+    finally:
+        for k in ("FAKE_GH_LOG", "ISSUELOOPER_LOGIN", "FAKE_GH_VIEW"):
+            os.environ.pop(k, None)
+        ccpool.claimlib._LOGIN[:] = claimlib_login
+    check("a bot's two spellings of its login are one account",
+          [ln.split(" --comment")[0] for ln in log.read_text().splitlines() if not ln.startswith("issue view")],
+          ["issue edit 9 --remove-label stage:live", "issue close 9 --reason completed"])
 
 
 def test_long_dependency_waits_are_pointed_out() -> None:
