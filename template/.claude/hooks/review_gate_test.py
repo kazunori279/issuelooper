@@ -422,9 +422,17 @@ try:
     check("many test files left out: named, then counted", ("every production file is whole" in note,
           "(omitted)" in note, "more" in note), (True, True, True))
     huge = diff_for([("src/one.py", ["z" * 100] * 80), ("src/two.py", ["w" * 100] * 80)])
-    text, _ = rg.cap_diff(huge, 6000)
+    text, _ = rg.cap_diff(huge, 6000, 6000)
     check("production cut: the prompt names it", rg.cut_note(rg.left_out(huge, text)),
           "; production files not whole: `src/one.py` (cut), `src/two.py` (cut)")
+    # PR #121 and #140: production over REVIEW_CHARS was cut and the PR rejected as unread.
+    text, cut = rg.cap_diff(huge + tests, 6000, 20000)
+    check("production over REVIEW_CHARS but within its own budget goes whole; tests get nothing left",
+          (cut, rg.left_out(huge + tests, text)), (True, [("tests/test_big.py", "omitted", False)]))
+    uneven = diff_for([("src/small.py", ["s" * 50] * 20), ("src/big.py", ["b" * 100] * 200)])
+    text, cut = rg.cap_diff(uneven, 3000, 8000)
+    check("over its budget: the short file whole, the long one gets the rest, the budget used",
+          (cut, rg.left_out(uneven, text), 7000 < len(text) <= 8000), (True, [("src/big.py", "cut", True)], True))
     serve(7, "a7" * 20, [("src/a.py", ["price = item.get('price')"]), ("tests/test_a.py", ["x" * 100] * 60)])
     keep_chars = rg.MAX_CHARS
     rg.MAX_CHARS = 2500
@@ -436,6 +444,15 @@ try:
     check("a review over the limit: the prompt and the record say what was left out",
           ("(cut to 2500 characters; every production file is whole; left out of other files: `tests/test_a.py` (cut))"
            in PROMPTS[-1], record("a7" * 20)["left_out"]), (True, ["tests/test_a.py (cut)"]))
+    serve(8, "a8" * 20, [("src/a.py", ["価格 = item.get('price')" * 4] * 400)])
+    keep = rg.MAX_CHARS, rg.PROMPT_BYTES
+    rg.MAX_CHARS, rg.PROMPT_BYTES = 2500, 40000
+    try:
+        rg.review(8, hand=False)
+    finally:
+        rg.MAX_CHARS, rg.PROMPT_BYTES = keep
+    check("a prompt too long for one argument: the production budget shrinks to fit",
+          (len(PROMPTS[-1].encode()) <= 40000, record("a8" * 20)["left_out"]), (True, ["src/a.py (cut)"]))
     unchanged = ("diff --git a/src/a.py b/src/a.py\n@@ -1,40 +1,41 @@\n" + " ctx\n" * 20 + "+new\n"
                  + " ctx\n" * 20)
     check("context far from a change is dropped", rg.compact(unchanged).count(" ctx"), 6)
@@ -481,8 +498,8 @@ try:
     check("split issues are the supervisor's, by mark or by title",
           (rg.is_split_issue("o/r", 140), rg.is_split_issue("o/r", 141), rg.is_split_issue("o/r", 999)),
           (True, False, False))
-    keep_chars = rg.MAX_CHARS
-    rg.MAX_CHARS = 3000
+    keep_chars, keep_prod = rg.MAX_CHARS, rg.PROD_CHARS
+    rg.MAX_CHARS = rg.PROD_CHARS = 3000
     try:
         for n_pr, issue, sha in ((40, 140, "f" * 40), (41, 141, "e" * 40)):
             (GHDIR / f"{n_pr}.json").write_text(json.dumps(
@@ -504,7 +521,7 @@ try:
         check("a split that re-indents what it moves stays over the limit: cut, as before",
               ("[moved" in PROMPTS[-1], "cut to 3000 characters" in PROMPTS[-1]), (False, True))
     finally:
-        rg.MAX_CHARS = keep_chars
+        rg.MAX_CHARS, rg.PROD_CHARS = keep_chars, keep_prod
 finally:
     os.environ.clear()
     os.environ.update(saved)

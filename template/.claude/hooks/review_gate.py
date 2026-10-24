@@ -36,6 +36,10 @@ Settings (environment, or .issuelooper/config.toml through config.py):
                          spec/fixtures/**/*.json); ID-like values and input strings
                          from them that show up in production lines are pre-scan hits.
     REVIEW_CHARS         the most diff characters sent, default 30000.
+    REVIEW_PROD_CHARS    the most characters of production files sent, default 80000:
+                         production goes whole up to this, tests and docs get what is
+                         left of REVIEW_CHARS. Lowered for a prompt that would not fit
+                         one command-line argument (the judge's `-p`).
     REVIEW_LONG_FN       function length logged as long, default 150.
     REVIEW_REFACTOR_LINES  a diff that grows a function past this many lines writes
                          a review_long_function event, default 300.
@@ -119,6 +123,9 @@ GATE_ON = os.environ.get("REVIEW_GATE", "on").strip().lower() not in ("off", "0"
 RECORD_DIRS = config.record_dirs("review")  # written to the first; read from all
 RECORDS = RECORD_DIRS[0]
 MAX_CHARS = int(os.environ.get("REVIEW_CHARS", "30000"))
+PROD_CHARS = int(os.environ.get("REVIEW_PROD_CHARS", "80000"))
+# The judge gets the prompt as one argument, and Linux caps one at 128 KiB.
+PROMPT_BYTES = 120_000
 MAX_REJECTS = int(os.environ.get("REVIEW_MAX_REJECTS", "2"))
 MAX_ERRORS = int(os.environ.get("REVIEW_MAX_ERRORS", "3"))
 LONG_FN = int(os.environ.get("REVIEW_LONG_FN", "150"))
@@ -325,27 +332,45 @@ def compact(part: str, context: int = 3) -> str:
     return "".join(out)
 
 
-def cap_diff(diff: str, limit: int) -> tuple[str, bool]:
-    """Production files get the whole budget before any test, fixture or doc file, with
-    context far from a change dropped. Equal shares once cut a long production file
-    in half while a test went whole, and a branch in the part cut merged unseen."""
+def fair_share(sizes: list[int], budget: int) -> int:
+    """The most characters each part may keep so that the parts fit `budget`: parts
+    under it stay whole and what they leave goes to the longer ones."""
+    left, n = budget, len(sizes)
+    for k, size in enumerate(sorted(sizes)):
+        if size * (n - k) > left:
+            return max(0, left // (n - k))
+        left -= size
+    return max(sizes, default=0)
+
+
+def cap_diff(diff: str, limit: int, prod_limit: int = 0) -> tuple[str, bool]:
+    """Production files get their own budget (prod_limit, at least limit) before any
+    test, fixture or doc file, which get what is left of limit; context far from a
+    change is dropped. A production file cut leaves a branch unread: the judge rejects
+    such a diff, and three ordinary PRs in one run were rejected that way at 30000
+    characters, two of them with a third of the budget unused because each production
+    file got an equal share."""
+    prod_limit = max(limit, prod_limit)
     if len(diff) <= limit:
         return diff, False
     files = split_files(diff)
     prod = [compact(p) for path, p in files if is_prod(path)]
     rest = [compact(p) for path, p in files if not is_prod(path)]
     cut = False
-    if sum(map(len, prod)) > limit:
-        share = max(1500, limit // max(1, len(prod)))
-        prod = [p if len(p) <= share else p[:share] + "\n... (cut)\n" for p in prod]
+    if sum(map(len, prod)) > prod_limit:
+        mark = "\n... (cut)\n"
+        share = max(1500, fair_share([len(p) for p in prod], prod_limit - len(mark) * len(prod)))
+        prod = [p if len(p) <= share else p[:share] + mark for p in prod]
         rest, cut = [], True
-    room = limit - sum(map(len, prod))
+    used = sum(map(len, prod))
+    room = max(0, limit - used)
     if rest and sum(map(len, rest)) > room:
         share = max(0, room // len(rest))
         rest = [p if len(p) <= share else p[:share] + "\n... (cut)\n" for p in rest if share > 200]
         cut = True
     out = "".join(prod + rest)
-    return out[:limit], cut or len(out) > limit
+    cap = max(limit, used)
+    return out[:cap], cut or len(out) > cap
 
 
 SPLIT_MARK = "<!-- split -->"
@@ -923,11 +948,19 @@ def review(pr: int, hand: bool = True) -> int:
     shown, moved = diff, 0
     if len(diff) > MAX_CHARS and is_split_issue(repo, issue):
         shown, moved = summarize_moves(diff)
-    text, cut = cap_diff(shown, MAX_CHARS)
-    gone = left_out(shown, text) if cut else []
-    prompt = build_prompt(
-        issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone)
-    )
+    prod_limit = PROD_CHARS
+    for _ in range(3):
+        text, cut = cap_diff(shown, MAX_CHARS, prod_limit)
+        gone = left_out(shown, text) if cut else []
+        prompt = build_prompt(
+            issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone)
+        )
+        size = len(prompt.encode())
+        if size <= PROMPT_BYTES or prod_limit <= MAX_CHARS:
+            break
+        # What the rest of the prompt leaves for the diff, at this diff's bytes per character.
+        room = PROMPT_BYTES - (size - len(text.encode()))
+        prod_limit = max(MAX_CHARS, int(len(text) * room / max(1, len(text.encode())) * 0.95))
     hints = {
         "key": key,
         "flags": len(flags),
