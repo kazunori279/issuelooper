@@ -738,6 +738,30 @@ def test_ux_proposed_is_never_claimed() -> None:
     assert len(FAILURES) == before, FAILURES[before:]
 
 
+def test_secondary_rate_limit_is_waited_out() -> None:
+    # 11 claims failed in one run on GitHub's secondary rate limit after bulk filing.
+    with tempfile.TemporaryDirectory() as d:
+        tmp = pathlib.Path(d)
+        (tmp / "gh").write_text(f"""#!/usr/bin/env bash
+n=$(cat "{tmp}/n" 2>/dev/null || echo 0); echo $((n + 1)) > "{tmp}/n"
+if [ "$n" -lt "$LIMITED" ]; then
+  echo "gh: You have exceeded a secondary rate limit and have been temporarily blocked from content creation. (HTTP 403)" >&2
+  exit 1
+fi
+echo '{{"ok": true}}'
+""")
+        (tmp / "gh").chmod(0o755)
+        code = "import claim; print(claim.gh_json('api', '-X', 'POST', 'x'))"
+        for limited, want in (("2", (0, "{'ok': True}", "3")), ("9", (1, "", "4"))):
+            (tmp / "n").unlink(missing_ok=True)
+            env = dict(os.environ, CLAIM_GH=str(tmp / "gh"), CLAIM_RATE_WAIT_S="0", LIMITED=limited,
+                       SHARED_REPO_PATH="/nonexistent")
+            r = subprocess.run([sys.executable, "-c", code], cwd=HERE, env=env, capture_output=True, text=True)
+            check(f"rate limited {limited} times: (exit, result, gh calls)",
+                  (0 if r.returncode == 0 else 1, r.stdout.strip(), (tmp / "n").read_text().strip()), want)
+        check("and the give-up names the limit", "secondary rate limit" in r.stderr, True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

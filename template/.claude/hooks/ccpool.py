@@ -361,6 +361,7 @@ class Config:
     ccrole: str = str(HERE / "ccrole.sh")
     render: str = f"python3 {HERE / 'ccloop_render.py'}"
     gh: str = "gh"
+    gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
     guard_cmd: str = f"{sys.executable} {HERE / 'role_guard.py'}"
@@ -455,6 +456,7 @@ class Config:
             ccrole=e("POOL_CCROLE", str(HERE / "ccrole.sh")),
             render=e("POOL_RENDER", f"python3 {HERE / 'ccloop_render.py'}"),
             gh=e("POOL_GH", e("CLAIM_GH", "gh")),
+            gh_rate_wait_s=float(e("POOL_GH_RATE_WAIT_S", "") or 30),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -1288,6 +1290,22 @@ def repo_root() -> pathlib.Path:
     return pathlib.Path(shared) if shared else HERE.parents[1]
 
 
+RATE_LIMITED = re.compile(r"(?i)secondary rate limit|abuse detection|submitted too quickly")
+
+
+def run_gh(cfg: "Config", args: tuple[str, ...], stdin: str | None = None) -> subprocess.CompletedProcess:
+    """gh, retried after GitHub's secondary rate limit, which blocks content creation for
+    a minute or more after a burst of writes. `gh issue create` has exited 0 on it with
+    no URL, so the text counts on either stream."""
+    for attempt in range(4):
+        r = subprocess.run([cfg.gh, *args], input=stdin, capture_output=True, text=True, timeout=120,
+                           cwd=repo_root())
+        if attempt == 3 or not RATE_LIMITED.search(r.stderr + r.stdout):
+            return r
+        time.sleep(cfg.gh_rate_wait_s * 2 ** attempt)
+    return r
+
+
 SOURCE_EXT = (".py", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".html", ".vue", ".svelte",
               ".go", ".rs", ".java", ".kt", ".rb", ".php", ".c", ".cc", ".cpp", ".h", ".swift", ".cs")
 
@@ -1874,10 +1892,7 @@ class Session(threading.Thread):
 
     # --- units without an agent ---
     def gh(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [self.pool.cfg.gh, *args], input=stdin, capture_output=True, text=True, timeout=120,
-            cwd=repo_root(),
-        )
+        return run_gh(self.pool.cfg, args, stdin)
 
     def issue_thread(self, n: int) -> dict:
         """{"body": ..., "comments": [{"a": author, "b": body}, ...]} or {} if gh fails."""
@@ -2603,14 +2618,21 @@ class Pool:
                 "every new file with its line count, the old file's line count before and "
                 "after, and the output of `git diff --stat origin/main...HEAD`."
             )
-            r = subprocess.run(
-                [self.cfg.gh, "issue", "create", "--title", f"Split {f}: it is where parallel work collides",
-                 "--label", "P1", "--label", "stage:triage", "--body", body],
-                capture_output=True, text=True, timeout=120, cwd=repo_root(),
-            )
-            self.log("split_filed", file=f, prs=len(prs.get(f, ())), lines=b.large.get(f), ok=r.returncode == 0)
-            self.event(f"filed a split issue for {f}: {r.stdout.strip()}")
-        return due
+            r = self.gh("issue", "create", "--title", f"Split {f}: it is where parallel work collides",
+                        "--label", "P1", "--label", "stage:triage", "--body", body)
+            # Filed only with the new issue's URL: one split logged ok had none (the secondary
+            # rate limit) and was never filed. A failed one is due again on a later look.
+            url = re.search(r"https://\S+/issues/\d+", r.stdout)
+            self.log("split_filed", file=f, prs=len(prs.get(f, ())), lines=b.large.get(f), ok=bool(url))
+            if url:
+                self.event(f"filed a split issue for {f}: {url.group(0)}")
+                continue
+            with self.lock:
+                b.split_filed.discard(f)
+                b.split_times.remove(now)
+            self.event(f"could not file a split issue for {f} (tried again later): "
+                       f"{(r.stderr or r.stdout).strip()[-200:] or f'gh exited {r.returncode}'}")
+        return [f for f in due if f in b.split_filed]
 
     def take_port(self) -> int:
         with self.lock:
@@ -2867,8 +2889,7 @@ class Pool:
 
     # --- main's own check ---
     def gh(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([self.cfg.gh, *args], capture_output=True, text=True, timeout=120,
-                              cwd=repo_root())
+        return run_gh(self.cfg, args)
 
     def main_check_due(self, st: dict):
         """Start the full check of the newest origin/main, unless one is running. The

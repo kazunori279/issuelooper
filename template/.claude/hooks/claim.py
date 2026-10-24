@@ -75,6 +75,12 @@ MAX_ATTEMPTS = int(os.environ.get("CLAIM_MAX_ATTEMPTS", "3"))
 SETTLE_S = float(os.environ.get("CLAIM_SETTLE_S", "2"))
 READ_RETRIES = int(os.environ.get("CLAIM_READ_RETRIES", "3"))  # re-reads while the claim's own comment is missing
 JITTER_S = float(os.environ.get("CLAIM_JITTER_S", "3"))
+# GitHub's secondary rate limit blocks content creation for a minute or more after a
+# burst of writes (bulk filing): 11 claims failed on it in one run. Waits double from
+# CLAIM_RATE_WAIT_S; three of them fit the supervisor's 10 minutes for a claim.
+RATE_RETRIES = int(os.environ.get("CLAIM_RATE_RETRIES", "3"))
+RATE_WAIT_S = float(os.environ.get("CLAIM_RATE_WAIT_S", "45"))
+RATE_LIMITED = re.compile(r"(?i)secondary rate limit|abuse detection|submitted too quickly")
 # Claims this much older than yours do not compete with it: they are left over
 # from an earlier cycle (a PR the merger later handed back). A live rival claimed
 # within seconds of you, because both of you read the issue as claimable.
@@ -107,10 +113,16 @@ class GhError(RuntimeError):
 
 
 def gh(*args: str, stdin: str | None = None) -> str:
-    try:
-        done = subprocess.run([GH, *args], input=stdin, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise GhError(f"gh {' '.join(args[:3])}: {exc}") from exc
+    for attempt in range(RATE_RETRIES + 1):
+        try:
+            done = subprocess.run([GH, *args], input=stdin, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GhError(f"gh {' '.join(args[:3])}: {exc}") from exc
+        if done.returncode == 0 or not RATE_LIMITED.search(done.stderr) or attempt == RATE_RETRIES:
+            break
+        wait = RATE_WAIT_S * 2 ** attempt
+        print(f"claim.py: GitHub's secondary rate limit; retrying in {wait:.0f} s", file=sys.stderr)
+        time.sleep(wait)
     if done.returncode != 0:
         raise GhError(f"gh {' '.join(args[:3])}: {done.stderr.strip()[-300:]}")
     return done.stdout

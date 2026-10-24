@@ -1435,6 +1435,14 @@ esac
 """
 
 
+def gh_log() -> str:
+    """A gh that logs its arguments and files issues (FAKE_GH_LOG), in a directory of its own."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-gh-"))
+    (d / "gh").write_text(FAKE_GH_LOG)
+    (d / "gh").chmod(0o755)
+    return str(d / "gh")
+
+
 def test_main_check_reports_a_red_main() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-maincheck-"))
     gh = d / "gh"
@@ -2117,7 +2125,7 @@ def run_rebase(test_only: bool, append_src: bool = False):
     ccpool.HERE = d
     try:
         pool = ccpool.Pool(
-            ccpool.Config(logdir=d / "pool", gh="true", split_after=1),
+            ccpool.Config(logdir=d / "pool", gh=gh_log(), split_after=1),
             fetcher=state,
             spawn=False,
         )
@@ -2302,7 +2310,7 @@ def test_supervisor_rebase() -> None:
 
 
 def test_split_rules() -> None:
-    h = Rig(state(), split_after=3, split_window_s=600, split_max=1, gh="true")
+    h = Rig(state(), split_after=3, split_window_s=600, split_max=1, gh=gh_log())
     for pr in (1, 2):
         h.pool.record_conflicts(pr, {"src/app.js", "tests/test_page.py"})
     check("two PRs: below the threshold", h.pool.book.split_filed, set())
@@ -2321,7 +2329,7 @@ def test_split_rules() -> None:
         h.pool.book.split_filed,
         {"src/app.js"},
     )
-    h2 = Rig(state(), split_after=2, split_window_s=60, gh="true")
+    h2 = Rig(state(), split_after=2, split_window_s=60, gh=gh_log())
     h2.pool.record_conflicts(1, {"main.py"})
     h2.now += 120
     h2.pool.record_conflicts(2, {"main.py"})
@@ -2360,7 +2368,7 @@ def test_supervisor_rebase_appended_source() -> None:
 
 
 def test_split_per_window_and_large_files() -> None:
-    h = Rig(state(), split_after=1, split_window_s=600, split_per_window=1, gh="true")
+    h = Rig(state(), split_after=1, split_window_s=600, split_per_window=1, gh=gh_log())
     h.pool.record_conflicts(1, {"src/a.js"})
     h.pool.record_conflicts(2, {"src/b.js"})
     check("one split issue per window", h.pool.book.split_filed, {"src/a.js"})
@@ -2378,7 +2386,7 @@ def test_split_per_window_and_large_files() -> None:
         h.pool.book.split_filed,
         {"src/a.js", "src/places.py", "src/live.py"},
     )
-    h2 = Rig(state(), split_lines=900, gh="true")
+    h2 = Rig(state(), split_lines=900, gh=gh_log())
     h2.pool.record_large({"src/ok.py": 900})
     check("at the limit is not over it", h2.pool.book.split_filed, set())
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-splitmark-"))
@@ -2389,6 +2397,26 @@ def test_split_per_window_and_large_files() -> None:
     log = (d / "gh.log").read_text()
     check("a split issue is signed and marked for the review gate, and asks for verbatim moves",
           ("--body <!-- merger -->\n<!-- split -->" in log, "Move code as it is" in log), (True, True))
+    # Run 7: a split logged ok was never filed (GitHub's secondary rate limit, no URL).
+    limited = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-ratelimit-"))
+    (limited / "gh").write_text(f"""#!/bin/sh
+n=$(cat "{limited}/n" 2>/dev/null || echo 0); echo $((n + 1)) > "{limited}/n"
+[ "$n" -lt "$(cat {limited}/limit)" ] && {{ echo "was submitted too quickly: secondary rate limit" >&2; exit 0; }}
+echo "https://github.com/o/r/issues/88"
+""")
+    (limited / "gh").chmod(0o755)
+    (limited / "limit").write_text("1")
+    h4 = Rig(state(), split_lines=900, gh=str(limited / "gh"), gh_rate_wait_s=0)
+    h4.pool.record_large({"src/big.py": 1200})
+    check("rate limited once: waited out and filed", (h4.pool.book.split_filed, (limited / "n").read_text().strip(),
+          any("issues/88" in e for e in h4.pool.events)), ({"src/big.py"}, "2", True))
+    (limited / "n").unlink()
+    (limited / "limit").write_text("9")
+    h5 = Rig(state(), split_lines=900, gh=str(limited / "gh"), gh_rate_wait_s=0)
+    h5.pool.record_large({"src/big.py": 1200})
+    check("still limited: not counted as filed, logged as failed, due again later",
+          (h5.pool.book.split_filed, h5.pool.book.split_times, any("could not file a split issue" in e for e in h5.pool.events)),
+          (set(), [], True))
 
 
 def test_ux_runs_never_run_out() -> None:
