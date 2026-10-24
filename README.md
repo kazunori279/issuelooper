@@ -70,8 +70,11 @@ environment on a port of its own, runs the project's smoke (`[devcheck] command`
 and the worker's replay of the issue against it, and records the result. Gate 7
 asks for that record on every PR for an issue labelled as `[devcheck] labels` lists
 and every PR that changes `[devcheck] paths`. A rebase that only moved the branch
-keeps the check. Checks share `[devcheck] slots` and use the real services, so
-they cost what the app costs to run; workers get 60 minutes instead of 45.
+keeps the check; when resolving a conflict changed what the branch does (the
+change key moved), the supervisor replays the recorded check on the new head
+itself (`devcheck.py --rerun`) and hands the PR back only when the replay fails.
+Checks share `[devcheck] slots` and use the real services, so they cost what the
+app costs to run; workers get 60 minutes instead of 45.
 
 A gate that cannot be checked counts as refused: when the guard fails, gives no
 answer, or cannot read the PR or a changed file from GitHub, the supervisor does

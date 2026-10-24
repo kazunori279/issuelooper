@@ -2409,7 +2409,7 @@ def test_ux_runs_never_run_out() -> None:
 
 
 def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, record: bool = False,
-                    main_check: dict | None = None, sweeps: list | None = None):
+                    main_check: dict | None = None, sweeps: list | None = None, devchecks: list | None = None):
     """auto_merge with a fake resweep that notes whether the merge lock was held, a gh
     whose `pr view` prints `body` (None: gh pr view fails), and a guard script."""
     calls = []
@@ -2423,6 +2423,12 @@ def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, 
         return sweep_ok, "FAILED tests/e2e/test_issue_20.py::test_map - boom\n" if not sweep_ok else "281 green"
 
     ccpool.Session.resweep = fake
+    real_devcheck = ccpool.Session.devcheck_rerun
+
+    def fake_devcheck(self, pr, branch, head, earlier, env):
+        calls.append(("devcheck", earlier, self.pool.merge_lock.locked()))
+        return devchecks.pop(0) if devchecks else (True, "devcheck: pass")
+    ccpool.Session.devcheck_rerun = fake_devcheck
     old = os.environ.get("SWEEP_RECORD_DIR")
     os.environ["SWEEP_RECORD_DIR"] = str(d / "records")
     try:
@@ -2453,6 +2459,7 @@ def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, 
         outcome = w.work()
     finally:
         ccpool.Session.resweep = real
+        ccpool.Session.devcheck_rerun = real_devcheck
         if old is None:
             os.environ.pop("SWEEP_RECORD_DIR", None)
         else:
@@ -2568,6 +2575,38 @@ def test_a_flaky_red_main_gets_an_issue() -> None:
           (["issue create --title Flaky test: tests/e2e/test_issue_14.py::test_weather_card --label type:bug "
             "--label P1 --label stage:triage"], True))
     check("red and green after a commit that touched it: no second one", log.count("Flaky test:"), 1)
+
+
+GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "
+              "echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
+              "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'; fi\n")
+
+
+def test_gate7_after_a_rebase_replays_the_live_check() -> None:
+    """Resolving a conflict changes the removed lines, so gate 7 refused every rebased head
+    whose change moved; each refusal cost a worker session (#5: 53 minutes)."""
+    fresh = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "c" * 12 + "\n"
+    outcome, calls, log, _ = resweep_session(fresh, GATE7_ONCE, record=True)
+    check("the supervisor replays the live check outside the lock, then merges, with no extra sweep",
+          (outcome, calls, "pr merge 9" in log), ("ok", [("devcheck", "aeb98a0d9c57", False)], True))
+    outcome, calls, log, _ = resweep_session(fresh, GATE7_ONCE, record=True,
+                                             devchecks=[(False, "  script 1: exit 1\n    | AssertionError: no card")])
+    check("a replay that fails: handed back with what failed, not merged",
+          (outcome, "AssertionError: no card" in log, "pr merge" in log),
+          ("live check fails on the rebased head (handed back)", True, False))
+    outcome, _, log, _ = resweep_session(fresh, GATE7_ONCE, record=True,
+                                         devchecks=[(None, "devcheck: no free slot in time; NOT run")])
+    check("a replay that could not run: held, not handed back", (outcome, "pr comment" in log),
+          ("held (the live check could not be replayed)", False))
+    always = ("echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
+              "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'\n")
+    outcome, calls, log, _ = resweep_session(fresh, always, record=True)
+    check("still refused after a passing replay: handed back by the gates, replayed once",
+          (outcome, sum(1 for c in calls if c[0] == "devcheck")), ("refused by the merge gates (handed back)", 1))
+    m = ccpool.merger_prompt(
+        ccpool.Unit("merger", "land", "k", "f", 9, (0,), {"issue": 2, "head": "c" * 40, "mergeable": "X"}), "45m")
+    check("the merger reruns it without judging whether the behavior changed",
+          "naming another sha than your" in " ".join(m.split()), True)
 
 
 def test_auto_merge_resweeps_outside_the_merge_lock() -> None:

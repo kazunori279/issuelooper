@@ -57,10 +57,12 @@ python3 .claude/hooks/sweep_locked.py --update-pr $P     # rewrites Sweep SHA an
 gh pr view $P --json headRefOid -q .headRefOid            # must equal git rev-parse HEAD
 ```
 
-When the body has a `- **Live check:** <sha>` line and your resolution changed what
-the branch does (not only where it sits), check it again before you stop:
+When the body has a `- **Live check:** <sha>` line naming another sha than your
+new head, check it again before you stop, after the sweep:
 `python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr $P`. Gate 7
-refuses a changed branch with the old check; a clean rebase keeps it.
+refuses a head whose change moved since its check, and resolving a conflict moves
+it even when the behavior stays the same (main's side of the removed lines
+changes); do not judge it, rerun it. A failed rerun is a hand-back (step 7).
 
 A red sweep after a clean rebase: hand back, naming the failing test.
 

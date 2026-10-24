@@ -25,7 +25,8 @@ UNITS
           GitHub calls MERGEABLE. The review gate (review_gate.py) reads the diff,
           role_guard.py's merge gates run with CC_ROLE=merger, and the PR is
           squash-merged; a refusal hands the PR back to a worker (a head the gates
-          would refuse for its sweep is swept here first, outside the merge lock). With POOL_FAST_CHECK_CMD set, a
+          would refuse for its sweep is swept here first, outside the merge lock; a
+          gate 7 refusal after a rebase replays the live check outside the lock). With POOL_FAST_CHECK_CMD set, a
           PR whose head is behind main is first merged with main in a worktree and
           the command runs there, under the merge lock right before the merge: a
           failure hands the PR back, unless main alone fails it too. rebase: a CONFLICTING PR is first rebased here, once per
@@ -589,6 +590,8 @@ def pr_issue(pr: dict) -> int | None:
 
 
 FAILED_LINE = re.compile(r"(?m)^(?:FAILED|ERROR) (\S+)")
+# Gate 7's refusal of a head whose change key moved since its live check (role_guard).
+GATE7_MOVED = re.compile(r"Gate 7 \(live check\): the live check ran at `([0-9a-fA-F]{7,40})`, and the head")
 # Gate 2's reading of a PR body (role_guard.SWEEP_SHA_PATTERN and SWEEP_WAIVER).
 SWEEP_SHA = re.compile(r"(?i)\bSweep\s+SHA\b[*`:\s]*([0-9a-f]{7,40})")
 SWEEP_WAIVED = re.compile(r"(?i)\bSweep\b[*`:\s]*waived\s*[-–—:]\s*(loop/process|docs\s+only|owner\s+ruling)\b")
@@ -1114,9 +1117,10 @@ from a merger session, and any write to a PR but #{pr}.
 1. Rebase onto origin/main in {scratch(f"mrg-{pr}-wt")} and resolve the conflicts so that both this
    change and what landed on main survive ({PROJECT} says how to set up a worktree).
    Then run `python3 .claude/hooks/sweep_locked.py --update-pr {pr}` there and push with
-   --force-with-lease. If the PR body has a `Live check:` line and your resolution changed
-   what the branch does, also run `python3 .claude/hooks/devcheck.py --rerun <its sha>
-   --update-pr {pr}` (merge gate 7 refuses a changed branch with the old check).
+   --force-with-lease. If the PR body has a `Live check:` line naming another sha than your
+   new head, also run `python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr {pr}`
+   there after the sweep (merge gate 7 refuses a head whose change moved since its check, and
+   resolving a conflict moves it; the supervisor replays it too, but that costs a merge round).
 2. Catch up with main, which moved while you worked: once the sweep is green,
    `git fetch -q origin main`, and if `git merge-base --is-ancestor origin/main HEAD` fails,
    `git rebase origin/main` again. A clean rebase: push it with --force-with-lease and do
@@ -1921,13 +1925,15 @@ class Session(threading.Thread):
 
         branch = u.info.get("branch") or ""
         swept = None  # this unit's re-sweep of the head: None (none yet), True or False
-        for attempt in range(2):
+        recheck = ""  # the earlier head whose live check gate 7 wants replayed on this one
+        want_sweep = False  # the gates asked for a sweep
+        for attempt in range(3):
             # A missing or stale sweep record is mechanical: sweep the head here before
             # anything is handed back (most merge-gate hand-backs were a missing sweep
             # line or record). Outside the merge lock: a merger's clean re-rebase comes
             # without a sweep, and re-sweeping it (5-10 minutes) under the lock held every
             # other merge, whose PRs then conflicted again and got mergers of their own.
-            if swept is None and (attempt or self.needs_sweep(pr, head)):
+            if swept is None and (want_sweep or (attempt == 0 and self.needs_sweep(pr, head))):
                 swept, out = self.resweep(pr, branch, head, env)
                 held = "" if swept else self.red_like_main(pr, out)
                 if held:
@@ -1941,6 +1947,18 @@ class Session(threading.Thread):
                         return self.flaky_hold(pr, "re-sweep", out, again)
                     else:
                         return self.sweep_hand_back(pr, n, head, again)
+            if recheck:
+                # Gate 7 refuses a head whose change moved since its live check, and a rebase
+                # that resolves a conflict moves it; each such refusal cost a worker session.
+                # Replay the recorded check on this head here, outside the lock, as the sweep.
+                passed, out = self.devcheck_rerun(pr, branch, head, recheck, env)
+                if passed is None:
+                    self.pool.event(f"auto-merge of PR #{pr} held: its live check could not be replayed "
+                                    f"({out.strip().splitlines()[-1][:200] if out.strip() else 'no output'})")
+                    return "held (the live check could not be replayed)"
+                if not passed:
+                    return self.devcheck_hand_back(pr, n, head, recheck, out)
+                recheck = "done"
             with self.pool.merge_lock:
                 # A head swept on an older main says nothing about the merged result: one PR
                 # moved an import, another (swept before it) still used it, GitHub saw no
@@ -1954,9 +1972,15 @@ class Session(threading.Thread):
                     if held:
                         return held
                 verdict = gates()
-                if swept is None and verdict.get("decision") in ("block", "deny") and re.search(
+                moved = GATE7_MOVED.search(str(verdict.get("reason") or "")) \
+                    if verdict.get("decision") in ("block", "deny") else None
+                if moved and not recheck:
+                    recheck = moved.group(1)
+                    continue  # leave the lock, replay the live check on this head, ask again
+                if not moved and swept is None and verdict.get("decision") in ("block", "deny") and re.search(
                     r"(?i)sweep", str(verdict.get("reason") or "")
                 ):
+                    want_sweep = True
                     continue  # the gates want a sweep after all: leave the lock, sweep, ask again
                 outcome = self.land(pr, n, head, verdict)
                 if outcome:
@@ -2110,6 +2134,41 @@ class Session(threading.Thread):
                 break
             time.sleep(2 + 2 * attempt)
         return self.git(root, "merge-base", "--is-ancestor", "origin/main", head).returncode == 1
+
+    def devcheck_rerun(self, pr: int, branch: str, head: str, earlier: str, env: dict) -> tuple[bool | None, str]:
+        """`devcheck.py --rerun <earlier> --update-pr <pr>` in a worktree at head: (True
+        passed and the PR body names head, False the check failed, None it could not run;
+        its output)."""
+        if not branch:
+            return None, "no branch"
+        root, wt = str(repo_root()), scratch(f"mrg-{pr}-devcheck")
+        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        try:
+            self.git(root, "fetch", "-q", "origin", branch)
+            if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
+                return None, f"could not add a worktree at {head[:12]}"
+            r = self.pool.run_owned(
+                [sys.executable, str(HERE / "devcheck.py"), "--rerun", earlier, "--update-pr", str(pr)], 3600,
+                cwd=wt, env=env, stdin=subprocess.DEVNULL,
+            )
+            out = r.stdout + r.stderr
+            self.note(f"live check replay of {earlier[:12]} on {head[:12]}: exit {r.returncode}: {out.strip()[-400:]}")
+            # devcheck.py: 0 a recorded pass, 1 a failed check, 2 or 3 it did not run.
+            return (True if r.returncode == 0 else False if r.returncode == 1 else None), out
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        finally:
+            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+
+    def devcheck_hand_back(self, pr: int, n: int, head: str, earlier: str, out: str) -> str:
+        """The replayed live check failed on this head: back to a worker, with what failed."""
+        self.hand_back(pr, n, (
+            f"**Not merged: the live check fails on this head ({head[:8]}).** A rebase changed what the "
+            f"branch does since the live check at {earlier[:8]}, so the supervisor replayed its scripts on "
+            "this head (`devcheck.py --rerun`), and they fail:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3)
+            + "\n```\n\nFix it in your worktree, check it again with devcheck.py, and push."))
+        self.pool.log("handback", pr=pr, issue=n, by="live check replay", reason=f"the replay of {earlier[:12]} failed")
+        return "live check fails on the rebased head (handed back)"
 
     def needs_sweep(self, pr: int, head: str) -> bool:
         """Whether the merge gates would ask for a sweep of this head (Gate 2): the PR body
