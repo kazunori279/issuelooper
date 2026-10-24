@@ -1879,6 +1879,72 @@ def test_git_stash_and_the_shared_checkout() -> None:
     check("agy: a bare commit runs in the shared checkout and is refused", verdict, "refuse")
 
 
+def test_a_push_of_a_stopped_rebase_is_refused() -> None:
+    # #100 and #120: `git rebase origin/main` stopped on a conflict, the push on the next
+    # line of the same command sent origin/main's head to the issue branch, and GitHub
+    # closed the pull request for good.
+    for role in ("worker", "merger"):
+        for cmd in ('cd "$WT" || exit 1\ngit rebase origin/main\ngit push --force-with-lease -u origin "HEAD:issue-4"',
+                    'cd "$WT" || exit 1\ngit merge-base --is-ancestor origin/main HEAD || git rebase origin/main\n'
+                    'git push --force-with-lease origin "HEAD:issue-33"',
+                    'cd "$WT" && git rebase origin/main && uv run ruff check src; git push origin HEAD:issue-4',
+                    'git -C "$WT" pull --rebase origin main | tail -3 && git -C "$WT" push origin HEAD:issue-4',
+                    'cd "$WT"\ngit add a.py\nGIT_EDITOR=true git rebase --continue\ngit push -f origin HEAD:issue-4'):
+            verdict, reason = run(cmd, role=role, host=AGY)
+            check(f"{role}: a push after an unchecked rebase is refused: {cmd!r}", verdict, "refuse")
+        check(f"{role}: the refusal says to join them with &&", "Join them with `&&`" in reason, True)
+    for cmd in ('cd "$WT" && git rebase origin/main && git push --force-with-lease origin HEAD:issue-4',
+                'cd "$WT" || exit 1\ngit rebase origin/main || exit 1\nuv run ruff check src\ngit push -f origin HEAD:issue-4',
+                'set -e\ncd "$WT"\ngit rebase origin/main\ngit push -f origin HEAD:issue-4',
+                'cd "$WT" && git add a.py && GIT_EDITOR=true git rebase --continue && git push -f origin HEAD:issue-4',
+                'cd "$WT"\ngit rebase origin/main\ngit status'):
+        verdict, reason = run(cmd, role="worker", host=AGY)
+        check(f"allowed: {cmd!r}", (verdict, reason), ("allow", ""))
+
+    # The state the push would send: a worktree stopped mid-rebase, and a head with no
+    # commits beyond origin/main.
+    with tempfile.TemporaryDirectory(prefix="rg-push-") as tmp:
+        root = pathlib.Path(tmp)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@x", "GIT_CONFIG_GLOBAL": "/dev/null"}
+
+        def git(*args: str, cwd: pathlib.Path = root / "clone", ok: bool = True) -> None:
+            subprocess.run(["git", *args], cwd=cwd, env=env, check=ok, capture_output=True)
+
+        git("init", "-q", "--bare", "-b", "main", str(root / "origin.git"), cwd=root)
+        git("clone", "-q", str(root / "origin.git"), str(root / "clone"), cwd=root)
+        git("checkout", "-q", "-b", "main")
+        (root / "clone/a.py").write_text("x = 1\n")
+        git("add", "a.py")
+        git("commit", "-qm", "base")
+        git("push", "-q", "origin", "main")
+        wt = root / "wt"
+        git("worktree", "add", "-q", "-b", "issue-4", str(wt), "origin/main")
+        (wt / "a.py").write_text("x = 2\n")
+        git("commit", "-qam", "fix", cwd=wt)
+        push = f"git -C {wt} push --force-with-lease origin HEAD:issue-4"
+        verdict, reason = run(push, role="worker", host=AGY)
+        check("a head with commits beyond main pushes", (verdict, reason), ("allow", ""))
+        (root / "clone/a.py").write_text("x = 3\n")
+        git("commit", "-qam", "main moved")
+        git("push", "-q", "origin", "main")
+        git("fetch", "-q", "origin", cwd=wt)
+        git("rebase", "origin/main", cwd=wt, ok=False)  # stops on the conflict in a.py
+        verdict, reason = run(push, role="worker", host=AGY)
+        check("a push from a worktree mid-rebase is refused", verdict, "refuse")
+        check("the refusal says to finish the rebase", "git rebase --continue" in reason, True)
+        verdict, reason = run(f"cd {wt} && git rebase --abort && git push -f origin HEAD:issue-4", role="worker",
+                              host=AGY)
+        check("aborting the rebase in the same command lets the push through", (verdict, reason), ("allow", ""))
+        git("rebase", "--abort", cwd=wt)
+        git("reset", "-q", "--hard", "origin/main", cwd=wt)
+        verdict, reason = run(push, role="merger", host=AGY)
+        check("a head with no commits beyond origin/main is refused", verdict, "refuse")
+        check("the refusal says to check the log", "origin/main..HEAD" in reason, True)
+        verdict, _ = run(f"git -C {wt} push origin HEAD:refs/heads/scratch", role="worker", host=AGY)
+        check("a push to a branch that is not an issue branch is not this rule's", verdict, "allow")
+
+
 def test_files_in_the_shared_checkout() -> None:
     # The shared checkout's .env (only the owner has it) disappeared in a run and live
     # checks stopped for hours; workers link it into their worktrees and remove the link.

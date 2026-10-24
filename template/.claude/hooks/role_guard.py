@@ -818,20 +818,16 @@ def file_targets(words: list[str]) -> list[str]:
     return args
 
 
-def shared_file_check(command: str, cwd: str | None) -> None:
-    """Nothing removes, moves or overwrites a file in the shared checkout: by a path in
-    it, or by a relative path in a command that runs there (agy starts each command in
-    it). The shared checkout's .env, which only the owner has, disappeared in one run and
-    live checks stopped for hours; workers link it into their worktrees and remove the
-    link again, and a bare `rm -f .env` run there, or after a `cd` that failed, removes
-    the real file."""
+def command_segments(command: str) -> list[tuple[list[str], str]]:
+    """The simple commands in `command`, each as (words, the separator after it); [] when
+    the quotes do not balance (the shell refuses it too)."""
     text = HEREDOC.sub("", command)  # a here-document's body is text, not commands
     lex = shlex.shlex(text, posix=True, punctuation_chars=";&|()\n")
     lex.whitespace, lex.whitespace_split = " \t\r", True
     try:
         tokens = list(lex)
     except ValueError:
-        return  # unbalanced quotes: the shell refuses it too
+        return []
     # shlex joins a run of separators ("\n\n", ")\n"): split it into operators again.
     split = []
     for t in tokens + ["\n"]:
@@ -843,6 +839,17 @@ def shared_file_check(command: str, cwd: str | None) -> None:
             cur = []
         else:
             cur.append(t)
+    return segments
+
+
+def shared_file_check(command: str, cwd: str | None) -> None:
+    """Nothing removes, moves or overwrites a file in the shared checkout: by a path in
+    it, or by a relative path in a command that runs there (agy starts each command in
+    it). The shared checkout's .env, which only the owner has, disappeared in one run and
+    live checks stopped for hours; workers link it into their worktrees and remove the
+    link again, and a bare `rm -f .env` run there, or after a `cd` that failed, removes
+    the real file."""
+    segments = command_segments(command)
     here = None if cwd is None else cwd  # where the next command runs (None: the session's cwd)
     shaky = False  # an earlier `cd` may have failed, leaving the command where it started
     strict = False  # `set -e`: a failed `cd` ends the command
@@ -900,6 +907,125 @@ def shared_file_check(command: str, cwd: str | None) -> None:
                     "overwrites the file there.\n\n"
                     "Join it with `&&` (`cd \"$WT\" && rm -f .env`), write `cd \"$WT\" || exit 1`, "
                     "or name the full path (`rm -f \"$WT/.env\"`)."
+                )
+
+
+# git subcommands that can stop halfway (a conflict) and leave HEAD somewhere else:
+# during a stopped rebase HEAD is the commit it is rebasing onto, origin/main itself.
+STOPPABLE = {"rebase", "merge", "pull", "cherry-pick", "am", "revert"}
+ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+ISSUE_BRANCH = re.compile(r"^(?:refs/heads/)?issue-\d+$")
+
+
+def git_words(words: list[str]) -> tuple[str | None, str | None, list[str]]:
+    """(subcommand, the `-C` directory, the arguments) of a git command, or Nones."""
+    if not words or os.path.basename(words[0]) != "git":
+        return None, None, []
+    where, i = None, 1
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] in ("-C", "-c") and i + 1 < len(words):
+            where = words[i + 1] if words[i] == "-C" else where
+            i += 1
+        i += 1
+    return (words[i], where, words[i + 1:]) if i < len(words) else (None, where, [])
+
+
+def git_out(where: str, *args: str) -> str | None:
+    try:
+        r = subprocess.run(["git", "-C", where, *args], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def operation_in_progress(where: str) -> str | None:
+    """'rebase' or 'merge' when the worktree at `where` is in the middle of one."""
+    for name, what in (("rebase-merge", "rebase"), ("rebase-apply", "rebase"), ("MERGE_HEAD", "merge"),
+                       ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")):
+        path = git_out(where, "rev-parse", "--git-path", name)
+        if path and os.path.exists(path if os.path.isabs(path) else os.path.join(where, path)):
+            return what
+    return None
+
+
+def git_push_check(command: str, cwd: str | None) -> None:
+    """No push of a head that is not the branch's work. A rebase that stops on a conflict
+    leaves HEAD at origin/main; pushed, the issue branch has no commits beyond main and
+    GitHub closes its pull request for good (#100 and #120 in one run: `git rebase
+    origin/main` and `git push --force-with-lease` on the next line of one command)."""
+    segments = [(w, sep) for w, sep in command_segments(command) if w]
+    env: dict[str, str] = {}
+    here = cwd
+    strict = False
+    pending = None  # the stoppable git command whose failure the commands since have not ended on
+    unchecked = None  # the stoppable git command a push would run after, even when it stopped
+    stopped = False  # a stoppable git command comes earlier in this command
+    for k, (words, sep) in enumerate(segments):
+        while words and ASSIGN.match(words[0]):
+            name, value = ASSIGN.match(words[0]).groups()
+            env[name] = value
+            words = words[1:]
+        if not words:
+            continue
+        if words[0] == "set" and any(re.match(r"^-\w*e", w) for w in words[1:]):
+            strict = True
+        if words[0] == "cd":
+            here = words[1] if len(words) > 1 else "~"
+            continue
+        sub, where, args = git_words(words)
+        if sub == "push" and unchecked:
+            block(
+                f"This `git push` runs after `{unchecked}` even when that stops on a conflict. A "
+                "stopped rebase leaves HEAD at origin/main, and pushing it gives the issue branch no "
+                "commits beyond main: GitHub then closes the pull request, and it cannot be reopened "
+                "(twice in one run).\n\n"
+                f"Join them with `&&` (`{unchecked} ... && git push ...`), or push in a command of its "
+                "own after checking that the rebase finished (`git status` shows no rebase in progress)."
+            )
+        if sub in STOPPABLE:
+            stopped = True  # an --abort too: it changes the state a push would see
+            if not {"--abort", "--quit"} & set(args):
+                pending = f"git {sub}"
+        # Its failure skips what `&&` joins to it; `|| exit` ends the command; anything else
+        # goes on to the next command, the push among them.
+        nxt = segments[k + 1][0][:1] if k + 1 < len(segments) else []
+        if strict or (sep == "||" and nxt == ["exit"]):
+            pending = None
+        elif pending and sep != "&&":
+            unchecked = pending
+        if sub != "push" or stopped:
+            continue  # after a stoppable command the state is the one it leaves: the rule above covers it
+        dirname = where or here
+        if dirname is None:
+            dirname = get_shared_repo_dir()
+        dirname = os.path.expanduser(os.path.expandvars(re.sub(
+            r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), dirname)))
+        if "$" in dirname or not os.path.isabs(dirname) or not os.path.isdir(dirname):
+            continue
+        busy = operation_in_progress(dirname)
+        if busy:
+            block(
+                f"A {busy} is in progress in `{dirname}`: HEAD is not your branch's work yet (during a "
+                "stopped rebase it is origin/main). Pushing it would leave the issue branch with no "
+                "commits beyond main, and GitHub closes its pull request for good.\n\n"
+                f"Finish it first: resolve the conflicts, `git add` them, `git {busy} --continue`, check "
+                f"`git status`, then push. Or `git {busy} --abort` to go back."
+            )
+        refspecs = [a for a in args if not a.startswith("-")][1:]
+        for spec in refspecs:
+            src, _, dst = spec.lstrip("+").partition(":")
+            dst = dst or src
+            if not src or not ISSUE_BRANCH.match(dst):
+                continue
+            sha = git_out(dirname, "rev-parse", "--verify", "-q", f"{src}^{{commit}}")
+            if sha and git_out(dirname, "merge-base", "--is-ancestor", sha, "refs/remotes/origin/main") is not None:
+                block(
+                    f"`{src}` ({sha[:12]}) has no commits beyond origin/main. Pushed to `{dst}`, it "
+                    "leaves the branch empty, and GitHub closes the branch's pull request for good.\n\n"
+                    "Check `git log --oneline origin/main..HEAD` in your worktree: when a rebase "
+                    "stopped, finish it (`git status`); when the work is gone, recover it from "
+                    f"`origin/{dst.removeprefix('refs/heads/')}` or the reflog. Do not push until the log "
+                    "shows your commits."
                 )
 
 
@@ -2286,6 +2412,7 @@ def main(raw: str) -> None:
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
         git_checkout_check(command, cwd or None)
         shared_file_check(command, cwd or None)
+        git_push_check(command, cwd or None)
 
     if role == "worker":
         worker_git_check(command)

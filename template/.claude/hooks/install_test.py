@@ -182,6 +182,32 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(push.returncode, 0, push.stderr)
         self.assertEqual((self.base / "pre-push.stdin").read_text(), refs)
 
+    def test_pre_push_refuses_an_empty_issue_branch(self):
+        # A rebase stopped on a conflict leaves HEAD at origin/main; pushed to the issue
+        # branch, GitHub closed its pull request for good (#100 and #120 in one run).
+        repo = self.repo()
+        main = git(repo, "rev-parse", "HEAD").strip()
+        git(repo, "update-ref", "refs/remotes/origin/main", main)
+        zero = "0" * 40
+
+        def push(sha):
+            refs = f"refs/heads/issue-4 {sha} refs/heads/issue-4 {zero}\n"
+            return subprocess.run([str(ROOT / "template/.githooks/pre-push"), "origin", "url"], input=refs,
+                                  cwd=repo, capture_output=True, text=True)
+
+        refused = push(main)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("no commits beyond origin/main", refused.stderr)
+        (repo / "a.py").write_text("x = 1\n")
+        git(repo, "add", "a.py")
+        git(repo, "commit", "-qm", "fix")
+        head = git(repo, "rev-parse", "HEAD").strip()
+        self.assertEqual(push(head).returncode, 0, push(head).stderr)
+        (repo / ".git/rebase-merge").mkdir()
+        refused = push(head)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("rebase or merge is in progress", refused.stderr)
+
     def test_hooks_in_git_hooks_are_kept_running(self):
         repo = self.repo()
         hooks = pathlib.Path(git(repo, "rev-parse", "--git-path", "hooks").strip())

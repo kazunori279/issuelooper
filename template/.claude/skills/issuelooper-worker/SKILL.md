@@ -208,7 +208,9 @@ exactly one of the four waivers in the shared skill and say why under *Could not
 settle*.
 
 **Updating a PR that came back** (your prompt names it): push the branch
-(`--force-with-lease`), run `python3 .claude/hooks/sweep_locked.py --update-pr <PR>`
+(`--force-with-lease`; only a finished rebase, never in the same command as a
+`git rebase` unless `&&` joins them: a stopped rebase pushes origin/main and
+GitHub closes the PR for good), run `python3 .claude/hooks/sweep_locked.py --update-pr <PR>`
 instead of the plain sweep (it rewrites Sweep SHA and the green line in the
 body), and with `[devcheck]` on `python3 .claude/hooks/devcheck.py --script <...> --update-pr <PR>`
 (it rewrites the Live check line), fix the body if a gate named something in it,

@@ -66,6 +66,12 @@ changes); do not judge it, rerun it. A failed rerun is a hand-back (step 7).
 
 A red sweep after a clean rebase: hand back, naming the failing test.
 
+Push only a finished rebase: in its own command after `git status` shows none in
+progress, or joined with `&&` (`git rebase origin/main && git push ...`). A
+rebase that stops on a conflict leaves HEAD at origin/main; pushed, the branch
+has no commits beyond main and GitHub closes the PR for good. The guard refuses
+such a push.
+
 ## 4. Catch up with main
 
 Resolving takes minutes, and `main` moves meanwhile: a PR that conflicts again by
@@ -76,7 +82,8 @@ git fetch -q origin main
 git merge-base --is-ancestor origin/main HEAD || git rebase origin/main
 ```
 
-- Nothing new on `main`, or a clean rebase: push the rebased head
+- Nothing new on `main`, or a clean rebase: push the rebased head in a command
+  of its own
   (`git push --force-with-lease origin "HEAD:<headRefName>"`) and do not sweep
   again. The supervisor sweeps a head that has no sweep record before its merge
   gates, and checks it merged with the current `main` under its merge lock.

@@ -16,6 +16,24 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         fi
         continue
     fi
+    # An issue branch gets the branch's work: not HEAD in the middle of a stopped rebase
+    # (origin/main itself), and never a head with no commits beyond main, which closes
+    # the branch's pull request for good.
+    case "$remote_ref" in
+    refs/heads/issue-*)
+        for p in rebase-merge rebase-apply MERGE_HEAD; do
+            if [ -e "$(git rev-parse --git-path "$p")" ]; then
+                echo "pre-push: a rebase or merge is in progress here; finish it (git status) before pushing." >&2
+                status=1
+            fi
+        done
+        if git merge-base --is-ancestor "$local_sha" refs/remotes/origin/main 2>/dev/null; then
+            echo "pre-push: ${remote_ref#refs/heads/} would have no commits beyond origin/main;" >&2
+            echo "  check git log origin/main..HEAD before pushing." >&2
+            status=1
+        fi
+        ;;
+    esac
     if [ "$protected" = yes ] && [ "$remote_sha" != "$zero" ]; then
         if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
             echo "pre-push: refusing a non-fast-forward (forced) push to main." >&2
