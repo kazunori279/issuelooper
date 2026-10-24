@@ -10,6 +10,7 @@ against GitHub. Comment ids are assigned in commit order, as GitHub's are.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import pathlib
@@ -180,7 +181,10 @@ class Repo:
         )
 
     def load(self) -> dict:
-        return json.loads(self.state.read_text())
+        # Under the fake gh's lock: reading while a gh call rewrites the file saw it empty.
+        with open(str(self.state) + ".lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            return json.loads(self.state.read_text())
 
     def save(self, s: dict) -> None:
         self.state.write_text(json.dumps(s))
