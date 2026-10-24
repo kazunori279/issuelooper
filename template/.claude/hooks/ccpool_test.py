@@ -2553,6 +2553,29 @@ def test_a_red_resweep_on_a_red_main_is_held() -> None:
     check("no main check yet: handed back, as before", outcome, "refused by the merge gates (handed back)")
 
 
+def test_while_main_is_red_only_a_pr_built_on_it_merges() -> None:
+    """Run 7: main was red for 25 minutes and four PRs merged meanwhile; one added a
+    second failure the merged-tree check could not blame, as main failed too."""
+    body = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "c" * 40 + "\n"
+    red = {"sha": "d" * 40, "ok": False, "failing": ["tests/e2e/test_issue_6.py::test_map"]}
+    real = ccpool.Session.contains
+    try:
+        for built_on_red, want in ((False, "held (main dddddddd is red; the PR is not built on it)"), (True, "ok"),
+                                   (None, "ok")):
+            ccpool.Session.contains = lambda self, head, sha, branch, v=built_on_red: v
+            outcome, calls, log, pool = resweep_session(body, ALLOW_SH, record=True, main_check=red)
+            check(f"main red, the head built on it: {built_on_red}", (outcome, "pr merge 9" in log), (want, want == "ok"))
+            if built_on_red is False:
+                check("held before any sweep or gate, not handed back, and the monitor hears it once",
+                      (calls, "pr comment" in log, sum("waits: main dddddddd is red" in e for e in pool.events)),
+                      ([], False, 1))
+        ccpool.Session.contains = lambda self, head, sha, branch: False
+        outcome, _, log, _ = resweep_session(body, ALLOW_SH, record=True, main_check={**red, "ok": True})
+        check("main green: merged as before", outcome, "ok")
+    finally:
+        ccpool.Session.contains = real
+
+
 RED_SWEEP = ("tests/unit .....F\nFAILED tests/unit/test_issue_50.py::test_cli_exits - AssertionError\n"
              "1 failed, 64 passed in 14.50s\n\n== sweep is red ==\n   `make verify` exited 2\n")
 

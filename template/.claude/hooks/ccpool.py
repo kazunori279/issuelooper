@@ -146,7 +146,9 @@ main that moved during a run is not checked, only the newest. A red main tells t
 monitor and files an issue `main is red: <first failing tests>` (type:bug, P0,
 stage:triage) with the failing tests, the commits since the last green main and the
 end of the output, or comments on the one already open; the next green main closes
-it. Merges never wait for it. When main turns green again with no commit touching the
+it. Until it is green, only a PR whose head contains that red main merges (POOL_RED_HOLD,
+on by default): its green sweep shows the merge leaves main no worse, and the fix itself
+is such a PR, so the hold ends with it. When main turns green again with no commit touching the
 files of the tests that failed, those tests are flaky: an issue `Flaky test: <tests>`
 is filed (or the open one gets a comment).
 
@@ -364,6 +366,7 @@ class Config:
     ccrole: str = str(HERE / "ccrole.sh")
     render: str = f"python3 {HERE / 'ccloop_render.py'}"
     gh: str = "gh"
+    red_hold: bool = True  # while main's full check is red, only a PR built on that main merges
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
@@ -460,6 +463,7 @@ class Config:
             render=e("POOL_RENDER", f"python3 {HERE / 'ccloop_render.py'}"),
             gh=e("POOL_GH", e("CLAIM_GH", "gh")),
             gh_rate_wait_s=float(e("POOL_GH_RATE_WAIT_S", "") or 30),
+            red_hold=env_flag("POOL_RED_HOLD", True),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -1977,6 +1981,9 @@ class Session(threading.Thread):
             return verdict
 
         branch = u.info.get("branch") or ""
+        held = self.red_main_hold(pr, head, branch)
+        if held:
+            return held  # before the sweep: a held PR costs none
         swept = None  # this unit's re-sweep of the head: None (none yet), True or False
         recheck = ""  # the earlier head whose live check gate 7 wants replayed on this one
         want_sweep = False  # the gates asked for a sweep
@@ -2024,6 +2031,9 @@ class Session(threading.Thread):
                     held = self.merged_check(pr, n, head, branch, env)
                     if held:
                         return held
+                held = self.red_main_hold(pr, head, branch)  # main may have turned red meanwhile
+                if held:
+                    return held
                 verdict = gates()
                 moved = GATE7_MOVED.search(str(verdict.get("reason") or "")) \
                     if verdict.get("decision") in ("block", "deny") else None
@@ -2179,6 +2189,31 @@ class Session(threading.Thread):
             finally:
                 subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
         return cache[main]
+
+    def red_main_hold(self, pr: int, head: str, branch: str) -> str:
+        """'' unless main's latest full check is red and this head is not built on that main.
+        In run 7 main was red for 25 minutes and four PRs merged meanwhile; one added a
+        second failure, which the merged-tree check could not blame because main failed
+        too. While main is red, a PR built on it merges, since its own green sweep (Gate 2)
+        then shows the result is not red: the fix itself, rebased onto main, merges, so the
+        hold cannot outlast it. A head git cannot place is not held, as in behind_main."""
+        last = self.pool.main_check_last
+        red = str(last.get("sha") or "") if last.get("ok") is False else ""
+        if not red or not self.pool.cfg.red_hold or self.contains(head, red, branch) is not False:
+            return ""
+        with self.pool.lock:
+            first = (pr, red) not in self.pool.red_held
+            self.pool.red_held.add((pr, red))
+        if first:
+            self.pool.event(f"PR #{pr} waits: main {red[:8]} is red, and until it is green only a PR built on it "
+                            "(rebased onto it, its sweep green) merges")
+        return f"held (main {red[:8]} is red; the PR is not built on it)"
+
+    def contains(self, head: str, sha: str, branch: str) -> bool | None:
+        """Whether sha is in head's history (None: git cannot tell)."""
+        self.behind_main(head, branch)  # fetches main and the branch
+        r = self.git(str(repo_root()), "merge-base", "--is-ancestor", sha, head).returncode
+        return True if r == 0 else False if r == 1 else None
 
     def behind_main(self, head: str, branch: str) -> bool:
         """Whether origin/main has commits the PR head lacks. Unknown counts as not behind."""
@@ -2549,6 +2584,7 @@ class Pool:
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
         self.red_failing: tuple = ()  # the failing tests last reported on it
+        self.red_held: set = set()  # (pr, red main) pairs the monitor was told about
         self.red_since = ""  # the first red main of the current red spell
         self.red_seen: list[str] = []  # every test that failed during it
         self.own_deployed = ""
@@ -3057,7 +3093,8 @@ class Pool:
         body = (
             f"<!-- merger -->\nThe full check suite (`{os.environ.get('SWEEP_COMMAND', '')}`) fails on "
             f"origin/main at {sha[:8]}, so every pull request is now checked against a broken main. "
-            "Merges go on; fix this first.\n\nFailing:\n"
+            "Until it is green, only a pull request built on this main (rebased onto it, its sweep green) "
+            "merges; fix this first.\n\nFailing:\n"
             + ("\n".join(f"- `{t}`" for t in failing[:20]) or "- (no test named; see the output)")
             + f"\n\n{since}\n" + ("\n".join(f"- {c}" for c in commits) or "- (could not list them)")
             + "\n\nThe end of the output:\n\n```\n" + out.strip()[-3000:].replace("```", "'''")
@@ -3077,7 +3114,7 @@ class Pool:
             return  # still red on the same tests: the issue already says so
         self.red_failing = tuple(failing)
         self.event(f"main {sha[:8]} is RED: the full check suite fails ({names or 'no test named'}); {what}. "
-                   "Merges go on; the fix is P0")
+                   "Until it is green only a PR built on it merges; the fix is P0")
 
     # --- monitor feed ---
     def observe(self, st: dict, now: float, started: list[Unit], stuck: list[Unit]):

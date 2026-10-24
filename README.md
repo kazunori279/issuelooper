@@ -97,8 +97,11 @@ supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
 background, one run at a time. A red `main` tells the monitor and files an issue
 titled `main is red: <failing tests>` (P0) with the failing tests, the commits since
 the last green `main` and the end of the output; the next green `main` closes it.
-Merges do not wait for it, and a PR whose re-sweep fails only where that red `main`
-fails is held for a later try rather than handed back. The merged-tree check and
+Until it is green, only a PR built on that red `main` merges (rebased onto it, so
+its own green sweep shows the result is not red; the fix itself is such a PR);
+others wait, without a hand-back (`POOL_RED_HOLD=0` lets them through). A PR whose
+re-sweep fails only where that red `main` fails is held for a later try rather than
+handed back. The merged-tree check and
 re-sweeps run once more before acting on a failure (a PR that fails twice the same
 way is handed back with the failing tests; twice differently, it is held as flaky),
 and when `main` turns green again with no commit touching the tests that failed,
