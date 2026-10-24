@@ -50,7 +50,7 @@ redirections that would change the shared checkout the supervisor merges and
 deploys from (it holds what only the owner has, such as `.env`); a relative path
 after a `cd` that is not checked (`cd X && ...`, `cd X || exit 1`) counts as the
 shared checkout's. It refuses a push that would empty an issue branch, which makes
-GitHub close its pull request for good: a push after a `git rebase` (or merge,
+GitHub close its pull request: a push after a `git rebase` (or merge,
 pull) in the same command unless `&&` joins them, a push from a worktree in the
 middle of a rebase, and a head with no commits beyond origin/main (`.githooks/pre-push`
 checks the last two at push time too). A pull request merges only when:

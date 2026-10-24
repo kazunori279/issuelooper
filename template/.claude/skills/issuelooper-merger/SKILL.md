@@ -69,7 +69,7 @@ A red sweep after a clean rebase: hand back, naming the failing test.
 Push only a finished rebase: in its own command after `git status` shows none in
 progress, or joined with `&&` (`git rebase origin/main && git push ...`). A
 rebase that stops on a conflict leaves HEAD at origin/main; pushed, the branch
-has no commits beyond main and GitHub closes the PR for good. The guard refuses
+has no commits beyond main and GitHub closes the PR. The guard refuses
 such a push.
 
 ## 4. Catch up with main

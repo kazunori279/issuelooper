@@ -18,7 +18,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
     # An issue branch gets the branch's work: not HEAD in the middle of a stopped rebase
     # (origin/main itself), and never a head with no commits beyond main, which closes
-    # the branch's pull request for good.
+    # the branch's pull request.
     case "$remote_ref" in
     refs/heads/issue-*)
         for p in rebase-merge rebase-apply MERGE_HEAD; do

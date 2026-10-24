@@ -951,8 +951,9 @@ def operation_in_progress(where: str) -> str | None:
 def git_push_check(command: str, cwd: str | None) -> None:
     """No push of a head that is not the branch's work. A rebase that stops on a conflict
     leaves HEAD at origin/main; pushed, the issue branch has no commits beyond main and
-    GitHub closes its pull request for good (#100 and #120 in one run: `git rebase
-    origin/main` and `git push --force-with-lease` on the next line of one command)."""
+    GitHub closes its pull request (#100, #109 and #120 in one run: `git rebase
+    origin/main` and `git push --force-with-lease` on the next line of one command; #100
+    and #120 stayed closed and their issues needed new pull requests)."""
     segments = [(w, sep) for w, sep in command_segments(command) if w]
     env: dict[str, str] = {}
     here = cwd
@@ -977,8 +978,7 @@ def git_push_check(command: str, cwd: str | None) -> None:
             block(
                 f"This `git push` runs after `{unchecked}` even when that stops on a conflict. A "
                 "stopped rebase leaves HEAD at origin/main, and pushing it gives the issue branch no "
-                "commits beyond main: GitHub then closes the pull request, and it cannot be reopened "
-                "(twice in one run).\n\n"
+                "commits beyond main: GitHub then closes the pull request (three times in one run).\n\n"
                 f"Join them with `&&` (`{unchecked} ... && git push ...`), or push in a command of its "
                 "own after checking that the rebase finished (`git status` shows no rebase in progress)."
             )
@@ -1007,7 +1007,7 @@ def git_push_check(command: str, cwd: str | None) -> None:
             block(
                 f"A {busy} is in progress in `{dirname}`: HEAD is not your branch's work yet (during a "
                 "stopped rebase it is origin/main). Pushing it would leave the issue branch with no "
-                "commits beyond main, and GitHub closes its pull request for good.\n\n"
+                "commits beyond main, and GitHub closes its pull request.\n\n"
                 f"Finish it first: resolve the conflicts, `git add` them, `git {busy} --continue`, check "
                 f"`git status`, then push. Or `git {busy} --abort` to go back."
             )
@@ -1021,7 +1021,7 @@ def git_push_check(command: str, cwd: str | None) -> None:
             if sha and git_out(dirname, "merge-base", "--is-ancestor", sha, "refs/remotes/origin/main") is not None:
                 block(
                     f"`{src}` ({sha[:12]}) has no commits beyond origin/main. Pushed to `{dst}`, it "
-                    "leaves the branch empty, and GitHub closes the branch's pull request for good.\n\n"
+                    "leaves the branch empty, and GitHub closes the branch's pull request.\n\n"
                     "Check `git log --oneline origin/main..HEAD` in your worktree: when a rebase "
                     "stopped, finish it (`git status`); when the work is gone, recover it from "
                     f"`origin/{dst.removeprefix('refs/heads/')}` or the reflog. Do not push until the log "
