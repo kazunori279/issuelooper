@@ -198,6 +198,15 @@ LINK = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|refs?)\s+#(\d
 LIVE_VERIFIED = re.compile(r"(?im)^[ \t>*-]*live-verified:[ \t]*\S")
 LIVE_BLOCKED = re.compile(r"(?im)^[ \t>*`-]*live-check-blocked:")
 LIVE_HANDBACK = "<!-- live-handback -->"
+def bare_login(login: str) -> str:
+    """A login as both GitHub APIs agree on it: REST names a GitHub App's bot
+    `<slug>[bot]` and GraphQL (`gh issue view --json`) plain `<slug>`. Comparing them
+    as written, the supervisor never recognized the loop's own tester and asked the
+    monitor about every live check."""
+    login = login.strip().lower()
+    return login[:-5] if login.endswith("[bot]") else login
+
+
 # A sub-issue the monitor split off a larger one starts with this, so it is not split again.
 PART_OF = re.compile(r"<!--\s*part of #(\d+)\s*-->")
 BRANCH = re.compile(r"^issue-(\d+)\b")
@@ -3122,13 +3131,13 @@ class Pool:
         if data.get("state") != "OPEN" or "stage:live" not in labels:
             return  # somebody already settled it
         try:
-            login = claimlib.loop_login().lower()
+            login = bare_login(claimlib.loop_login())
         except claimlib.GhError:
             self.event(ask)
             return
         # Only the loop's own account speaks for the tester and the supervisor.
         comments = [c for c in data.get("comments") or []
-                    if str((c.get("author") or {}).get("login") or "").lower() == login]
+                    if bare_login(str((c.get("author") or {}).get("login") or "")) == login]
         since = u.info.get("since") or ""
         verdicts = [c for c in comments if str(c.get("body", "")).lstrip().startswith("<!-- tester -->")
                     and str(c.get("createdAt", "")) >= since]

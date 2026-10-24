@@ -105,15 +105,17 @@ def git(root: str, *args: str, stdin: str | None = None) -> str | None:
 def change_key(diff: str) -> str:
     """A hash of what a diff changes: each file's name and its added and removed
     lines, in order. Context lines, line numbers and blob ids are left out, so the
-    same change on a moved base keeps its key."""
+    same change on a moved base keeps its key; so are blank lines and trailing
+    whitespace, which resolving a rebase conflict adds or drops between two blocks
+    (every Gate 7 hand-back in one run was a single added blank line)."""
     keep = []
     for ln in diff.splitlines():
         if ln.startswith("diff --git "):
             keep.append(ln)
         elif ln.startswith(("+++", "---")):
             continue
-        elif ln.startswith(("+", "-")):
-            keep.append(ln)
+        elif ln.startswith(("+", "-")) and ln[1:].strip():
+            keep.append(ln.rstrip())
     return hashlib.sha256("\n".join(keep).encode()).hexdigest()[:20]
 
 

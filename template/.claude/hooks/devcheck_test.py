@@ -136,6 +136,13 @@ def test_change_key_ignores_where_the_change_sits() -> None:
         devcheck.change_key(a) == devcheck.change_key(other),
         False,
     )
+    # A rebase that resolves two additions at one place often leaves a blank line
+    # between them, or drops one; every Gate 7 hand-back in a run was that.
+    blank = a.replace("+added\n", "+added   \n+\n")
+    check("an added blank line and trailing whitespace do not change the key",
+          devcheck.change_key(a), devcheck.change_key(blank))
+    indented = a.replace("+added", "+    added")
+    check("indentation does", devcheck.change_key(a) == devcheck.change_key(indented), False)
 
 
 def test_a_passing_check_writes_its_record() -> None:
