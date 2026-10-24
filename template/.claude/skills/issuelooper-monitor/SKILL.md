@@ -111,8 +111,9 @@ for the rest say what the blocker still owes it.
 
 ## Split a large issue
 
-When the supervisor says an issue has had several worker sessions without a
-merge, read why each ended (the release comments, hand-backs, the review gate's
+When the supervisor says an issue has failed several times without a merge
+(worker sessions that held its claim and ended without a pull request, or pull
+requests handed back for red tests or the review), read why each ended (the release comments, hand-backs, the review gate's
 rejects). Split it only when it was too big for one session (timeouts with work
 left, a diff over the review gate's limit, a release that lists several separate
 pieces still to do) and it falls into two to four parts that can each be built,

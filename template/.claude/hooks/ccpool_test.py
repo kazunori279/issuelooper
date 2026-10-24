@@ -835,30 +835,62 @@ def test_long_dependency_waits_are_pointed_out() -> None:
 
 def test_monitor_is_asked_to_split_an_issue_that_keeps_failing() -> None:
     """The monitor may split any issue, and in a 12-hour run split none; one took eleven
-    worker sessions."""
+    worker sessions. Only the issue's own failures count: all seven requests in run 7
+    counted claim failures, sessions that delivered a PR, and gate 7 or merger-loop
+    hand-backs."""
     h = Rig(state([iss(9, ["stage:triage", "P0"]), iss(10, ["stage:pr", "P1"]),
-                   iss(11, ["stage:triage", "P1"], body="<!-- monitor -->\n<!-- part of #9 -->\nPart")]))
+                   iss(11, ["stage:triage", "P1"], body="<!-- monitor -->\n<!-- part of #9 -->\nPart"),
+                   iss(12, ["stage:triage", "P1"])]))
+    seq = iter(range(1, 100))
+
+    def worker(n: int, outcome: str, claimed: bool = True, left_pr: bool = False) -> None:
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", f"wrk:{n}@{next(seq)}", f"wrk:{n}", n, (0, n)),
+                           next(seq))
+        w.dir.mkdir(parents=True)
+        if claimed:
+            (w.dir / "claim").write_text("{}")
+        w.left_pr = left_pr
+        h.pool.finished(w, outcome)
+
     for n in (9, 10, 11, 12):
-        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", f"wrk:{n}@x", f"wrk:{n}", n, (0, n)), 1)
-        h.pool.finished(w, "ok")
+        worker(n, "ok")
     h.step()
-    check("one worker session is not enough to ask", [e for e in h.pool.events if "worker sessions" in e], [])
+    check("one failed try is not enough to ask", [e for e in h.pool.events if "has failed" in e], [])
     for n in (9, 10, 11):
-        h.pool.finished(ccpool.Session(h.pool, ccpool.Unit("worker", "implement", f"wrk:{n}@y", f"wrk:{n}", n,
-                                                             (0, n)), 1), "ok")
-    h.pool.finished(ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:9@z", "wrk:9", 9, (0, 9)), 1),
-                    "quota error (exit 3)")
+        worker(n, "timed out after 45m")
+    for n, outcome, claimed, left_pr in ((12, "claim failed (exit 1)", False, False), (12, "ok", True, True),
+                                         (12, "quota error (exit 3)", True, False),
+                                         (12, "stopped with the supervisor", True, False)):
+        worker(n, outcome, claimed, left_pr)
     h.step()
-    said = [e for e in h.pool.events if "worker sessions" in e]
-    check("after two, the monitor is asked about the claimable issue only (not one at stage:pr, not a part)",
-          [e.split(":")[0] for e in said], ["#9 has had 2 worker sessions and is not merged"])
+    said = [e for e in h.pool.events if "has failed" in e]
+    check("after two, the monitor is asked about the claimable issue only (not one at stage:pr, not a part); "
+          "a claim failure, a PR delivered, quota and a stop do not count",
+          [e.split(":")[0] for e in said], ["#9 has failed 2 times and is not merged"])
+    h.pool.failed_try(12)
     h.step()
-    check("once", sum("worker sessions" in e for e in h.pool.events), 1)
-    check("a closed issue is forgotten", sorted(h.pool.book.worker_runs), [9, 10, 11])
+    check("a hand-back for the issue's own failure counts", sum("#12 has failed 2 times" in e for e in h.pool.events), 1)
+    h.step()
+    check("once", sum("has failed" in e for e in h.pool.events), 2)
+    check("a closed issue is forgotten", sorted(h.pool.book.failed_tries), [9, 10, 11, 12])
     off = Rig(state([iss(9, ["stage:triage"])]), decompose_after=0)
-    off.pool.book.worker_runs[9] = 5
+    off.pool.book.failed_tries[9] = 5
     off.step()
-    check("POOL_DECOMPOSE_AFTER=0: never asked", [e for e in off.pool.events if "worker sessions" in e], [])
+    check("POOL_DECOMPOSE_AFTER=0: never asked", [e for e in off.pool.events if "has failed" in e], [])
+    # The review gate's reject of a diff it saw only in part is not the issue's failure.
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-reviewcut-"))
+    old = os.environ.get("REVIEW_DIR")
+    os.environ["REVIEW_DIR"] = str(d)
+    try:
+        (d / ("c" * 40 + ".json")).write_text(json.dumps({"verdict": "reject", "left_out": ["src/live.py (cut)"]}))
+        (d / ("d" * 40 + ".json")).write_text(json.dumps({"verdict": "reject", "left_out": ["tests/test_a.py (cut)"]}))
+        check("a production file cut is a review cut; a test cut is not",
+              (ccpool.review_cut("c" * 40), ccpool.review_cut("d" * 40), ccpool.review_cut("e" * 40)), (True, False, False))
+    finally:
+        if old is None:
+            os.environ.pop("REVIEW_DIR", None)
+        else:
+            os.environ["REVIEW_DIR"] = old
 
 
 def test_new_ux_proposals_go_to_the_monitor_to_screen() -> None:

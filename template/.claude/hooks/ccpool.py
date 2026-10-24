@@ -76,7 +76,10 @@ waiting for the owner: no unit and no triage, but the monitor is told of each ne
 to screen it (POOL_UX_SCREEN, on by default). A reopened issue is an open issue
 like any other; its newest comments say why it came back. The monitor is also told,
 once, of a claimable P0/P1 issue blocked for POOL_BLOCKED_REVIEW_MIN (60), and of an
-issue POOL_DECOMPOSE_AFTER (2; 0 is off) worker sessions have not landed, to split it.
+issue that has failed POOL_DECOMPOSE_AFTER (2; 0 is off) times, to split it: a worker
+session that held its claim and ended without a pull request, or a pull request handed
+back for red tests, the merged-tree check, a failed live-check replay or a review reject
+of a diff it read whole (not gate refusals, merger loops or review cuts).
 
 A unit's key carries the state it was computed from (the issue's updatedAt, the
 PR's head and main). A key never runs twice at once, never again after a clean
@@ -320,7 +323,7 @@ class Config:
     stall_s: float = 600
     hold_review_s: float = 3600  # a hold:monitor this old is pointed out to the monitor
     blocked_review_s: float = 3600  # a claimable P0/P1 issue blocked this long is pointed out too
-    decompose_after: int = 2  # worker sessions on one issue without its merge before the monitor is asked to split it
+    decompose_after: int = 2  # failed tries on one issue (Book.failed_tries) before the monitor is asked to split it
     ux_screen: bool = True  # the monitor screens ux:proposed proposals before the owner reads them
     background_idle_s: float = 120  # agy idle on a background task this long: resumed (Session.background_idle)
     unseen_idle_s: float = 180  # agy's conversation over this long behind a stuck stream: ended (Session.finished_unseen)
@@ -682,7 +685,9 @@ class Book:
         self.holds_told: set[int] = set()  # holds the monitor was reminded of
         self.blocked: dict[int, float] = {}  # claimable P0/P1 issue -> when it was first seen blocked
         self.blocked_told: set[int] = set()  # blocked issues the monitor was pointed to
-        self.worker_runs: collections.Counter = collections.Counter()  # issue -> worker sessions ended on it
+        # issue -> its own failures: worker sessions that held its claim and ended without a
+        # pull request, and pull requests handed back for red tests or the review's reject.
+        self.failed_tries: collections.Counter = collections.Counter()
         self.decompose_told: set[int] = set()  # issues the monitor was asked to split
         self.last_ux_t = 0.0  # when the last UX run started
         self.last_spec_t = 0.0  # when the last spec check started
@@ -1254,6 +1259,12 @@ def review_reason(head: str) -> str:
     return str(review_record(head).get("reason") or "")[:300]
 
 
+def review_cut(head: str) -> bool:
+    """Whether the review gate saw a production file of HEAD only in part: its reject
+    then says the diff was too long, not that the change is wrong."""
+    return any(is_source(str(f).rsplit(" (", 1)[0]) for f in review_record(head).get("left_out") or [])
+
+
 class BrokerLink:
     """The supervisor's link to a monitor hosted by broker.py (the headless launch)."""
 
@@ -1393,6 +1404,7 @@ class Session(threading.Thread):
         self.proc: subprocess.Popen | None = None
         self.started = time.time()
         self.port = 0
+        self.left_pr = False  # a worker session that ended with its pull request open (claim.py finish)
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
         self.dir = pool.cfg.logdir / f"{seq:04d}-{unit.role}-{slug}"
         try:
@@ -1885,6 +1897,10 @@ class Session(threading.Thread):
             if outcome != "ok":
                 args += ["--reason", f"the worker session {outcome}"]
             self.sh(args, dict(env, CC_ROLE="worker"), "finish")
+            try:
+                self.left_pr = bool(re.search(r"#\d+: pr #\d+", (self.dir / "finish.out").read_text(errors="replace")))
+            except OSError:
+                pass
             self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
         elif u.role == "merger":
             self.cleanup(scratch(f"mrg-{u.number}-wt"))
@@ -1927,6 +1943,8 @@ class Session(threading.Thread):
             return "waits for the owner (review gate)"
         if r.returncode == 1:
             self.pool.log("handback", pr=pr, issue=n, by="review", reason=review_reason(head))
+            if not review_cut(head):
+                self.pool.failed_try(n)  # a reject of a diff it read whole is the issue's own
             return "rejected by the review gate (handed back)"
         if r.returncode != 0:
             return f"failed (review gate exit {r.returncode})"
@@ -2054,6 +2072,7 @@ class Session(threading.Thread):
             + "\n\nThe end of the output:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3) + "\n```\n\n"
             "Fix it in your worktree, then sweep and push."))
         self.pool.log("handback", pr=pr, issue=n, by="sweep", reason=(failing or ["the sweep is red"])[0][:200])
+        self.pool.failed_try(n)
         return "sweep red at the head (handed back)"
 
     def red_like_main(self, pr: int, out: str) -> str:
@@ -2142,6 +2161,7 @@ class Session(threading.Thread):
                 "Rebase onto origin/main in your worktree, fix it, sweep again and push."))
             self.pool.log("handback", pr=pr, issue=n, by="merged-tree check", reason=why.strip().splitlines()[-1][:200]
                           if why.strip() else "")
+            self.pool.failed_try(n)
             return "breaks main once merged (handed back)"
         finally:
             subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
@@ -2203,6 +2223,7 @@ class Session(threading.Thread):
             "this head (`devcheck.py --rerun`), and they fail:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3)
             + "\n```\n\nFix it in your worktree, check it again with devcheck.py, and push."))
         self.pool.log("handback", pr=pr, issue=n, by="live check replay", reason=f"the replay of {earlier[:12]} failed")
+        self.pool.failed_try(n)
         return "live check fails on the rebased head (handed back)"
 
     def needs_sweep(self, pr: int, head: str) -> bool:
@@ -2737,9 +2758,13 @@ class Pool:
                     )
             elif outcome != "unclaimable" and not outcome.startswith("quota error"):
                 self.crashes[u.role] = 0
-            if u.role == "worker" and u.number is not None and outcome != "unclaimable" \
-                    and not outcome.startswith("quota error"):
-                b.worker_runs[u.number] += 1
+            # Only the issue's own failures count toward asking for a split: a session that
+            # never got the claim, or ended on quota, a crash or a stop, says nothing about
+            # the issue, and one that left a pull request delivered. Every one of seven
+            # split requests in run 7 counted those (and gate 7 or merger-loop hand-backs).
+            if u.role == "worker" and u.number is not None and (w.dir / "claim").exists() and not w.left_pr \
+                    and not outcome.startswith(NOT_A_FAILURE):
+                b.failed_tries[u.number] += 1
             if outcome not in ("ok", "unclaimable") and not outcome.startswith("quota error"):
                 self.events.append(
                     f"{u.role} session {w.seq} on {u.kind} {self.label(u)} {outcome} (log {w.dir})"
@@ -3321,27 +3346,34 @@ class Pool:
                     "(issuelooper-monitor skill, Dependencies)"
                 )
 
+    def failed_try(self, n: int | None) -> None:
+        """Count a failure of issue n's own toward asking for its split (ask_decompose)."""
+        if n is not None:
+            with self.lock:
+                self.book.failed_tries[n] += 1
+
     def ask_decompose(self, st: dict) -> None:
-        """Ask the monitor, once per issue, to split one that POOL_DECOMPOSE_AFTER worker
-        sessions have not landed and that is waiting for the next. The monitor may split
+        """Ask the monitor, once per issue, to split one that has failed POOL_DECOMPOSE_AFTER
+        times (Book.failed_tries) and is waiting for the next worker. The monitor may split
         any issue, and in a 12-hour run split none: one issue took eleven sessions."""
         b, k = self.book, self.cfg.decompose_after
         if not k:
             return
         open_ = {i["number"]: i for i in st["open"]}
-        for n in list(b.worker_runs):
+        for n in list(b.failed_tries):
             i = open_.get(n)
             if i is None:
-                del b.worker_runs[n]  # closed: done with
+                del b.failed_tries[n]  # closed: done with
                 continue
             labels = set(i["labels"])
-            if (n in b.decompose_told or b.worker_runs[n] < k or not labels & (CLAIMABLE | {"stage:owner"})
+            if (n in b.decompose_told or b.failed_tries[n] < k or not labels & (CLAIMABLE | {"stage:owner"})
                     or labels & (HOLDS | IGNORED) or PART_OF.search(i.get("body") or "")):
                 continue
             b.decompose_told.add(n)
             self.event(
-                f"#{n} has had {b.worker_runs[n]} worker sessions and is not merged: {i['title']}. Read why each "
-                "ended (the release and hand-back comments): if it is too big for one session, split it into "
+                f"#{n} has failed {b.failed_tries[n]} times and is not merged: {i['title']} (worker sessions that "
+                "ended without a pull request, or pull requests handed back for red tests or the review). Read why "
+                "each ended (the release and hand-back comments): if it is too big for one session, split it into "
                 "sub-issues (issuelooper-monitor skill, Split a large issue); if it failed for another reason, "
                 "re-scope it or leave it"
             )
