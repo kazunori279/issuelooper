@@ -271,7 +271,8 @@ def check(root: str, scripts: list[pathlib.Path], port: int) -> dict:
     saved = []
     for i, s in enumerate(scripts, 1):
         # A rerun copies copies: strip their prefix, or names nest (script-1-script-1-...).
-        copy = out / f"script-{i}-{re.sub(r'^(?:script-\d+-)+', '', s.name)}"
+        name = re.sub(r"^(?:script-\d+-)+", "", s.name)
+        copy = out / f"script-{i}-{name}"
         shutil.copyfile(s, copy)
         saved.append(copy)
     env = dict(
