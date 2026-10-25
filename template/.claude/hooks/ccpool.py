@@ -86,8 +86,10 @@ PR's head and main). A key never runs twice at once, never again after a clean
 exit, and at most POOL_KEY_TRIES times after failures; a role+number family runs
 one unit at a time and fails at most POOL_FAMILY_MAX times per supervisor lifetime
 (sessions that end ok do not count; workers, bounded by claim.py's failed attempts,
-and UX runs, one family per sha, are exempt). A pull request's family starts afresh
-when its head changes and when it is handed back.
+and UX runs, one family per sha, are exempt). A unit that ends held (a red main, the
+guard or the review gate failing, a dirty shared checkout) spends neither and is due
+again after POOL_HOLD_RETRY_S (60). A pull request's family starts afresh when its head
+changes and when it is handed back.
 
 SESSIONS
 
@@ -317,6 +319,7 @@ class Config:
     deploy_grace_s: float = 300
     key_tries: int = 2
     family_max: int = 6
+    hold_retry_s: float = 60  # a unit that ended held is due again after this, without spending a try
     crash_max: int = 3
     crash_pause_s: float = 120
     quota_resumes: int = 8
@@ -418,6 +421,7 @@ class Config:
             deploy_grace_s=float(e("POOL_DEPLOY_GRACE_S", "300")),
             key_tries=env_int("POOL_KEY_TRIES", 2),
             family_max=env_int("POOL_FAMILY_MAX", 6),
+            hold_retry_s=float(e("POOL_HOLD_RETRY_S", "") or 60),
             crash_max=env_int("POOL_CRASH_MAX", 3),
             crash_pause_s=float(e("POOL_CRASH_PAUSE_S", "120")),
             quota_resumes=env_int("POOL_QUOTA_RESUMES", 8),
@@ -677,6 +681,7 @@ class Book:
         self.family_starts: collections.Counter = collections.Counter()
         self.clean: set[str] = set()  # keys whose session ended cleanly
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
+        self.held_until: dict[str, float] = {}  # key -> when a unit that ended held is due again
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
@@ -715,11 +720,13 @@ class Book:
         for k in [k for k in self.tries if re.match(rf"(?:merge|rebase|mrg|handback):{n}@", k)]:
             del self.tries[k]
 
-    def why_not(self, u: Unit, cfg: Config) -> str:
+    def why_not(self, u: Unit, cfg: Config, now: float | None = None) -> str:
         if u.family in self.running:
             return "running"
         if u.key in self.clean:
             return "done"
+        if now is not None and self.held_until.get(u.key, 0) > now:
+            return "held"
         if self.tries[u.key] >= cfg.key_tries:
             return "tries"
         # The family cap is a backstop against a unit that keeps failing under a new key.
@@ -919,7 +926,7 @@ def plan(
     # wait): another UX run once POOL_UX_IDLE_GAP_MIN passed since the last one, and,
     # with POOL_SPEC=1, a check of the app against the spec every POOL_SPEC_GAP_MIN.
     busy = any(r in ("worker", "merger") for r in book.role_counts()) or any(
-        u.role in ("worker", "merger") and not book.why_not(u, cfg) for u in units
+        u.role in ("worker", "merger") and not book.why_not(u, cfg, now) for u in units
     )
     if ux_sha and not busy:
         info = {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd)}
@@ -937,7 +944,7 @@ def plan(
         # (the "tst:spec" family keeps it to one at a time). Without a global cap there
         # is no half to measure; the idle trigger alone applies.
         agents = sum(v for r, v in book.role_counts().items() if r != "auto")
-        due_agents = sum(1 for u in units if u.role != "auto" and not book.why_not(u, cfg))
+        due_agents = sum(1 for u in units if u.role != "auto" and not book.why_not(u, cfg, now))
         if cfg.global_cap and cfg.global_cap - agents - due_agents >= cfg.global_cap / 2:
             units.append(Unit("tester", "spec", f"spec:{ux_sha[:12]}:{book.extra_runs}", "tst:spec", None,
                               (2, 0, 1), {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd), "spare": True}))
@@ -945,7 +952,7 @@ def plan(
     units.sort(key=lambda u: u.rank)
     due, stuck = [], []
     for u in units:
-        why = book.why_not(u, cfg)
+        why = book.why_not(u, cfg, now)
         if not why:
             due.append(u)
         elif u.kind != "ux" and (why in ("tries", "family") or (why == "done" and u.kind != "live")):
@@ -1951,7 +1958,7 @@ class Session(threading.Thread):
                 self.pool.failed_try(n)  # a reject of a diff it read whole is the issue's own
             return "rejected by the review gate (handed back)"
         if r.returncode != 0:
-            return f"failed (review gate exit {r.returncode})"
+            return f"held (the review gate exited {r.returncode})"  # an error: reviewed again later
         command = f"gh pr merge {pr} --squash --delete-branch --match-head-commit {head}"
 
         def gates() -> dict:
@@ -2108,7 +2115,7 @@ class Session(threading.Thread):
             reason = str(verdict.get("reason") or "")
             if "shared checkout" in reason.lower():
                 self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
-                return "failed (gate 0: shared checkout)"
+                return "held (gate 0: the shared checkout is not clean)"
             self.hand_back(pr, n, "**Merge gates: refused.** Not merged.\n\n" + reason[:2500])
             gate = re.search(r"(?i)\bgate\s*(\d)", reason)
             self.pool.log("handback", pr=pr, issue=n, by=f"gate {gate.group(1)}" if gate else "gates",
@@ -2762,6 +2769,14 @@ class Pool:
                 # when the pause ends.
                 b.tries[u.key] -= 1
                 b.family_starts[u.family] -= 1
+            if outcome.startswith("held"):
+                # Waiting on something outside the PR (a red main, the guard, the review
+                # gate): no try spent, and due again after POOL_HOLD_RETRY_S. Counted as
+                # failures, red-main holds took PRs #82, #88 and #89 to POOL_FAMILY_MAX,
+                # and they stayed stopped after main was green again.
+                b.tries[u.key] -= 1
+                b.family_starts[u.family] -= 1
+                b.held_until[u.key] = now + self.cfg.hold_retry_s
             if outcome == "unclaimable" and u.number is not None:
                 # claim.py's own read refused it (a native dependency, attempts): no
                 # try spent; the memo holds it back until the issue or main changes, or
@@ -2801,7 +2816,8 @@ class Pool:
             if u.role == "worker" and u.number is not None and (w.dir / "claim").exists() and not w.left_pr \
                     and not outcome.startswith(NOT_A_FAILURE):
                 b.failed_tries[u.number] += 1
-            if outcome not in ("ok", "unclaimable") and not outcome.startswith("quota error"):
+            # A hold has its own event, once, and is retried every POOL_HOLD_RETRY_S.
+            if outcome not in ("ok", "unclaimable") and not outcome.startswith(("quota error", "held")):
                 self.events.append(
                     f"{u.role} session {w.seq} on {u.kind} {self.label(u)} {outcome} (log {w.dir})"
                 )

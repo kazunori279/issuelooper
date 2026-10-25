@@ -267,12 +267,12 @@ def test_merges_one_per_pr() -> None:
     check("no second unit for the same PR", h.step(), [])
     h.finish(next(k for k in h.running("merger")), "ok")
     h.finish(
-        next(u.key for u in started if u.number == 11), "failed (review gate exit 2)"
+        next(u.key for u in started if u.number == 11), "failed (exit 1)"
     )
     check("a failed auto-merge is retried once", [u.number for u in h.step()], [11])
     h.finish(
         next(k for k in h.running("auto") if k.startswith("merge:11")),
-        "failed (review gate exit 2)",
+        "failed (exit 1)",
     )
     check("then not again for the same head and main", [u.number for u in h.step()], [])
     check(
@@ -372,11 +372,26 @@ def test_pr_family_starts_afresh() -> None:
            any(k.startswith(("rebase:103@", "handback:103@")) for k in h.pool.book.tries)), (0, 0, False))
     h2 = Rig(state([iss(1, ["stage:pr"])], prs=[pr(11, 1)]), key_tries=1)
     u = h2.step()[0]
-    h2.finish(u.key, "failed (review gate exit 2)")
+    h2.finish(u.key, "failed (exit 1)")
     h2.step()
     check("a key out of tries says so",
           [e for e in h2.pool.events if e.startswith("stuck:")],
           ["stuck: auto unit merge PR #11 is still due, held: 1 session(s) on this state reached POOL_KEY_TRIES (1)"])
+
+
+def test_a_hold_spends_no_try() -> None:
+    """Run 8: red-main holds counted as failures; PRs #82, #88 and #89 reached
+    POOL_FAMILY_MAX and stayed stopped after main was green again."""
+    h = Rig(state([iss(1, ["stage:pr"])], prs=[pr(11, 1)]), key_tries=2, family_max=3, hold_retry_s=60)
+    for k in range(5):
+        started = h.step()
+        check(f"hold {k + 1}: the merge is due again", [u.number for u in started], [11])
+        h.finish(started[0].key, "held (main dddddddd is red; the PR is not built on it)")
+        check(f"hold {k + 1}: not before POOL_HOLD_RETRY_S", h.step(), [])
+        h.now += 61
+    check("no try, no family start spent, and nothing stuck",
+          (h.pool.book.tries[started[0].key], h.pool.book.family_starts["mrg:11"],
+           [e for e in h.pool.events if e.startswith("stuck:")]), (0, 0, []))
 
 
 def test_no_merger_while_its_worker_runs() -> None:
@@ -1975,7 +1990,7 @@ def test_auto_merge_paths() -> None:
     check(
         "Gate 0 (the shared checkout) is not the PR's fault: no hand-back",
         (outcome, log),
-        ("failed (gate 0: shared checkout)", []),
+        ("held (gate 0: the shared checkout is not clean)", []),
     )
     check("the monitor hears it", any("Gate 0" in e for e in pool.events), True)
     outcome, log, _ = auto_session(ALLOW, review_rc=1)
