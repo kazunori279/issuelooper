@@ -359,6 +359,7 @@ def test_claude_stream() -> None:
 
 FAKE_CLI = r"""#!/bin/sh
 echo "CC_ROLE=$CC_ROLE" > "$FAKE_OUT"
+echo "GIT_EDITOR=$GIT_EDITOR GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT GIT_MERGE_AUTOEDIT=$GIT_MERGE_AUTOEDIT GH_PAGER=$GH_PAGER" >> "$FAKE_OUT"
 for a in "$@"; do echo "$a" >> "$FAKE_OUT"; done
 """
 
@@ -435,6 +436,19 @@ def test_ccrole_launch() -> None:
         (r.returncode, "unknown CLI" in r.stderr),
         (1, True),
     )
+
+
+def test_ccrole_sessions_never_wait_for_a_terminal() -> None:
+    """An editor or a credential prompt in a session never returns (19 of 60 mergers)."""
+    def env_seen(extra):
+        _, out = run_ccrole(extra)
+        return next(ln for ln in out if ln.startswith("GIT_EDITOR="))
+
+    for k in ("GIT_EDITOR", "GIT_TERMINAL_PROMPT", "GIT_MERGE_AUTOEDIT", "GH_PAGER"):
+        os.environ.pop(k, None)
+    check("ccrole: no editor, no prompt, no pager by default", env_seen({}),
+          "GIT_EDITOR=true GIT_TERMINAL_PROMPT=0 GIT_MERGE_AUTOEDIT=no GH_PAGER=cat")
+    check("ccrole: an exported value wins", env_seen({"GIT_EDITOR": "vi"}).split()[0], "GIT_EDITOR=vi")
 
 
 def test_model_from_init() -> None:
