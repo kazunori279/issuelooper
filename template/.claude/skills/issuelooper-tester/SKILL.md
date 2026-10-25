@@ -200,6 +200,11 @@ are the same symptom under another title.
   first line after the marker.
 - **New**: file it.
 
+Check every requirement ID you cite: `grep -rn "<id>" spec/` (or where
+`.issuelooper/project.md` says the spec is) must find it, or leave the ID out. If
+the spec asks for what you saw, the finding is not a bug: do not file it. Owners
+answered three issues citing IDs that do not exist.
+
 ```bash
 gh issue create --title "UX: <what the user sees, short>" --label type:bug --label P2 \
   --label stage:triage --body-file $ISSUELOOPER_TMP/tst-$TST_PORT-issue.md

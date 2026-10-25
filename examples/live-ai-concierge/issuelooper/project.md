@@ -58,7 +58,8 @@ setting a location, ask for something "near here").
 ## Spec check
 
 The spec is `spec/REQUIREMENTS.md` (requirements numbered `R-XXX-N`) and
-`spec/ACCEPTANCE.md`. Worth checking: phone layouts, Japanese, settings, error
+`spec/ACCEPTANCE.md` (cases `A-NN`). Cite only IDs that `grep -n` finds there, in a
+UX run too (R-UI-3, R-CARD-5 and R-MAPS-2 do not exist). Worth checking: phone layouts, Japanese, settings, error
 and empty states, and the cards' maps.
 
 ## UX run journeys
