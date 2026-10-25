@@ -2262,6 +2262,55 @@ def test_devcheck_at_pr_create() -> None:
     (TEST_DEVCHECK_RECORDS / f"{head}.json").unlink()
 
 
+def test_devcheck_at_pr_create_reads_the_worktree() -> None:
+    """Run 8: `cd <worktree> && gh pr create` was diffed in the guard's own directory (for
+    agy the shared checkout, on main), so four PRs changing src/ opened without a Live
+    check line and were handed back at the merge."""
+    with tempfile.TemporaryDirectory(prefix="rg-create-") as tmp:
+        root = pathlib.Path(tmp)
+        genv = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@x", "GIT_CONFIG_GLOBAL": "/dev/null"}
+
+        def git(*args: str, cwd: pathlib.Path = root / "clone") -> None:
+            subprocess.run(["git", *args], cwd=cwd, env=genv, check=True, capture_output=True)
+
+        git("init", "-q", "--bare", "-b", "main", str(root / "origin.git"), cwd=root)
+        git("clone", "-q", str(root / "origin.git"), str(root / "clone"), cwd=root)
+        git("checkout", "-q", "-b", "main")
+        (root / "clone/README.md").write_text("x\n")
+        git("add", "README.md")
+        git("commit", "-qm", "base")
+        git("push", "-q", "origin", "main")
+        wt = root / "wt"
+        git("worktree", "add", "-q", "-b", "issue-5", str(wt), "origin/main")
+        (wt / "src").mkdir()
+        (wt / "src/card.js").write_text("show()\n")
+        git("add", "src/card.js", cwd=wt)
+        git("commit", "-qm", "card", cwd=wt)
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("<!-- worker -->\nFixes #5\n- **Sweep SHA:** abc1234\n"
+                     "- **Fail-before:** tests/unit/test_app.py 7 -> 8\n")
+        env, _ = with_fake_gh(labels={"5": ["P0"]})
+        env = {**env, **claim_env(5), "POOL_DEVCHECK": "1", "DEVCHECK_PATHS": "src/", "SHARED_REPO_PATH": str(root / "clone")}
+        try:
+            verdict, reason = run(f"cd {wt} && git push -u origin HEAD:issue-5 && gh pr create --head issue-5 "
+                                  f"--title t --body-file {fh.name}", role="worker", host=AGY, extra_env=env)
+            check("agy, cd into the worktree: its change to src/ needs a live check", verdict, "refuse")
+            check("and the refusal names the file", "src/card.js" in reason, True)
+            verdict, _ = run(f'WT="{wt}"\ncd "$WT" || exit 1\ngh pr create --title t --body-file {fh.name}',
+                             role="worker", host=AGY, extra_env=env)
+            check("the worktree named by a variable set in the command", verdict, "refuse")
+            git("push", "-q", "origin", "issue-5", cwd=wt)
+            git("fetch", "-q", "origin")
+            verdict, _ = run(f"gh pr create --head issue-5 --title t --body-file {fh.name}", role="worker",
+                             host=AGY, extra_env=env)
+            check("no worktree, --head: the branch on origin is read", verdict, "refuse")
+            verdict, _ = run(f"gh pr create --title t --body-file {fh.name}", role="worker", host=AGY, extra_env=env)
+            check("nothing to read the branch from: allowed, as before (the merge gate checks)", verdict, "allow")
+        finally:
+            pathlib.Path(fh.name).unlink(missing_ok=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

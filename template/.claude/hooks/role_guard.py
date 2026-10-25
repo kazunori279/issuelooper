@@ -948,6 +948,31 @@ def operation_in_progress(where: str) -> str | None:
     return None
 
 
+def expand_dir(path: str, env: dict[str, str]) -> str | None:
+    """A directory as a command names it, with $VARs from the command's own assignments
+    or the environment; None when it does not name an existing absolute directory."""
+    path = os.path.expanduser(os.path.expandvars(re.sub(
+        r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), path)))
+    return path if "$" not in path and os.path.isabs(path) and os.path.isdir(path) else None
+
+
+def command_dir(command: str, cwd: str | None, starts: tuple[str, ...]) -> str | None:
+    """Where the first simple command whose words begin with `starts` runs: after the
+    `cd`s before it (agy runs each command in the shared checkout), else cwd."""
+    env: dict[str, str] = {}
+    here = cwd
+    for words, _ in command_segments(command):
+        while words and ASSIGN.match(words[0]):
+            name, value = ASSIGN.match(words[0]).groups()
+            env[name] = value
+            words = words[1:]
+        if words[:1] == ["cd"]:
+            here = words[1] if len(words) > 1 else "~"
+        elif tuple(words[:len(starts)]) == starts:
+            return expand_dir(here, env) if here else None
+    return None
+
+
 def git_push_check(command: str, cwd: str | None) -> None:
     """No push of a head that is not the branch's work. A rebase that stops on a conflict
     leaves HEAD at origin/main; pushed, the issue branch has no commits beyond main and
@@ -995,12 +1020,8 @@ def git_push_check(command: str, cwd: str | None) -> None:
             unchecked = pending
         if sub != "push" or stopped:
             continue  # after a stoppable command the state is the one it leaves: the rule above covers it
-        dirname = where or here
+        dirname = expand_dir(where or here or get_shared_repo_dir(), env)
         if dirname is None:
-            dirname = get_shared_repo_dir()
-        dirname = os.path.expanduser(os.path.expandvars(re.sub(
-            r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), dirname)))
-        if "$" in dirname or not os.path.isabs(dirname) or not os.path.isdir(dirname):
             continue
         busy = operation_in_progress(dirname)
         if busy:
@@ -2042,12 +2063,12 @@ def pr_issues(data: dict, body: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def branch_paths() -> list[str]:
-    """Files this worktree's branch changes since it left origin/main; [] when git
-    cannot say."""
+def branch_paths(where: str | None = None, head: str = "HEAD") -> list[str]:
+    """Files a branch changes since it left origin/main, from the worktree `where` (the
+    guard's own directory when None); [] when git cannot say."""
     try:
         done = subprocess.run(
-            ["git", "diff", "--name-only", "origin/main...HEAD"],
+            ["git", *(["-C", where] if where else []), "diff", "--name-only", f"origin/main...{head}"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -2055,6 +2076,22 @@ def branch_paths() -> list[str]:
     except Exception:
         return []
     return done.stdout.split() if done.returncode == 0 else []
+
+
+PR_HEAD = re.compile(r"(?:--head|-H)[=\s]+[\"']?([\w./-]+)")
+
+
+def pr_create_paths(command: str, cwd: str | None) -> list[str]:
+    """What the branch of a `gh pr create` changes: from the worktree the command runs
+    in, else from `--head`'s branch on origin. The guard runs in its own directory (for
+    agy the shared checkout, on main), so `cd <worktree> && gh pr create` was diffed
+    there, saw nothing, and four PRs in run 8 opened without a Live check line."""
+    where = command_dir(command, cwd, ("gh", "pr", "create"))
+    shared = get_shared_repo_dir()
+    if where and not (shared and os.path.realpath(where) == os.path.realpath(shared)):
+        return branch_paths(where)
+    m = PR_HEAD.search(command)
+    return branch_paths(shared or None, f"origin/{m.group(1)}") if m else []
 
 
 FAIL_BEFORE_HOW = (
@@ -2302,7 +2339,7 @@ def extract_pr_create_body(command: str) -> str | None:
     return None
 
 
-def check_pr_create(command: str) -> None:
+def check_pr_create(command: str, cwd: str | None = None) -> None:
     """Pre-creation gates: draft carve-out, Sweep SHA, and Fail-before verification.
 
     Draft carve-out: If --draft or -d is present, allow without Gate 2/3 checks.
@@ -2342,7 +2379,7 @@ def check_pr_create(command: str) -> None:
                 )
         elif not m_live:
             issues = [n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body)
-            scope = devcheck_scope(issues, branch_paths(), "")
+            scope = devcheck_scope(issues, pr_create_paths(command, cwd), "")
             if scope and not devcheck_waiver_ok(body, scope, "This PR"):
                 block(
                     f"Gate 7 (live check): the body has no `Live check:` line, and {scope[1]}.\n\n"
@@ -2544,7 +2581,8 @@ def main(raw: str) -> None:
         check_issue_close(command)
 
     if PR_CREATE.search(command):
-        check_pr_create(command)
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        check_pr_create(command, cwd or None)
 
     allow()
 
