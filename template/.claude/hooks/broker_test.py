@@ -7,13 +7,24 @@ Every case runs twice: on agy's stream-json, and on Claude Code's documented one
 (not recorded from a live run).
 """
 
+import atexit
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import time
 import unittest
+
+# Every temporary file this file and what it runs make goes under one directory,
+# removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
+# ran out of inodes. Once per process: a test file another one imports keeps it.
+if "IL_TEST_TMP" not in os.environ:
+    os.environ["IL_TEST_TMP"] = os.environ["TMPDIR"] = tempfile.mkdtemp(prefix="il-test-")
+    os.environ["ISSUELOOPER_TMP"] = os.path.join(os.environ["IL_TEST_TMP"], "scratch")
+    atexit.register(shutil.rmtree, os.environ["IL_TEST_TMP"], True)
+tempfile.tempdir = os.environ["IL_TEST_TMP"]
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 

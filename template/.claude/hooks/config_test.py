@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """Tests for config.py. Run: python3 config_test.py"""
 
+import atexit
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
+
+# Every temporary file this file and what it runs make goes under one directory,
+# removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
+# ran out of inodes. Once per process: a test file another one imports keeps it.
+if "IL_TEST_TMP" not in os.environ:
+    os.environ["IL_TEST_TMP"] = os.environ["TMPDIR"] = tempfile.mkdtemp(prefix="il-test-")
+    os.environ["ISSUELOOPER_TMP"] = os.path.join(os.environ["IL_TEST_TMP"], "scratch")
+    atexit.register(shutil.rmtree, os.environ["IL_TEST_TMP"], True)
+tempfile.tempdir = os.environ["IL_TEST_TMP"]
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -105,7 +116,8 @@ try:
     os.environ.pop("ISSUELOOPER_TMP", None)
     a = config.scratch_root(pathlib.Path("/srv/x/app"))
     b = config.scratch_root(pathlib.Path("/srv/y/app"))
-    check("named for the repository, under /tmp", (str(a).startswith("/tmp/issuelooper-app-"), a != b), (True, True))
+    check("named for the repository, in the temporary directory",
+          (str(a).startswith(tempfile.gettempdir() + "/issuelooper-app-"), a != b), (True, True))
     check("the same path, the same directory", config.scratch_root(pathlib.Path("/srv/x/app")), a)
     ports = {config.tester_port_base(pathlib.Path(f"/srv/r{k}")) for k in range(50)}
     check("tester ports 8021-8099, varying by repository", (min(ports) >= 8021, max(ports) <= 8099, len(ports) > 10),

@@ -14,7 +14,8 @@ variable always wins over the file.
 
 Scratch files (worktrees, sweep and review records, a tester's tree) live under one
 directory per repository, $ISSUELOOPER_TMP, by default
-/tmp/issuelooper-<repository directory name>-<8 hex digits of its path's hash>;
+/tmp/issuelooper-<repository directory name>-<8 hex digits of its path's hash> ($TMPDIR
+instead of /tmp when it is set);
 apply() and `env` export it. Fixed names such as /tmp/mrg-121-auto collided across
 repositories and runs: a leftover from another loop failed one rebase eight times.
 
@@ -29,6 +30,7 @@ import os
 import pathlib
 import shlex
 import sys
+import tempfile
 
 try:
     import tomllib
@@ -105,12 +107,13 @@ def _path_hash(root: pathlib.Path | None) -> tuple[str, int]:
 
 def scratch_root(root: pathlib.Path | None = None) -> pathlib.Path:
     """This repository's scratch directory: $ISSUELOOPER_TMP, else one named for the
-    repository's path under /tmp. Not created here."""
+    repository's path in the temporary directory ($TMPDIR, normally /tmp; apply()
+    exports the result, so every process of a loop agrees). Not created here."""
     v = os.environ.get("ISSUELOOPER_TMP", "").strip()
     if v:
         return pathlib.Path(v)
     name, h = _path_hash(root)
-    return pathlib.Path("/tmp") / f"issuelooper-{name}-{h:08x}"
+    return pathlib.Path(tempfile.gettempdir()) / f"issuelooper-{name}-{h:08x}"
 
 
 def record_dirs(kind: str) -> list[pathlib.Path]:

@@ -1473,6 +1473,97 @@ def kill_in(prefixes: tuple[str, ...]) -> list[dict]:
     return procs
 
 
+def rescue_worktree(wt: str, keep_existing: bool = False) -> bool:
+    """Write the worktree's work that is not on its branch's remote (uncommitted, or
+    committed and not pushed) to <wt>-rescued.diff beside it, unless keep_existing and
+    that file is already there. Returns whether there was such work."""
+    git = ["git", "-C", wt]
+    subprocess.run(git + ["add", "-A", "-N", "."], capture_output=True)
+    dirty = subprocess.run(git + ["status", "--porcelain"], capture_output=True, text=True).stdout
+    ahead = subprocess.run(git + ["log", "--oneline", "@{u}..HEAD"], capture_output=True, text=True)
+    if ahead.returncode != 0:
+        ahead = subprocess.run(git + ["log", "--oneline", "origin/main..HEAD"], capture_output=True, text=True)
+    if not (dirty.strip() or ahead.stdout.strip()):
+        return False
+    rescued = pathlib.Path(f"{wt}-rescued.diff")
+    if not (keep_existing and rescued.exists()):
+        rescued.write_text(subprocess.run(git + ["diff", "origin/main"], capture_output=True, text=True).stdout)
+    return True
+
+
+SESSION_SCRATCH = re.compile(r"^(?:wrk|mrg|tst|main|fresh)-")
+UNWALKED = {".git", ".venv", "node_modules", "__pycache__"}
+OTHER_ROOT = re.compile(r"^issuelooper-.+-[0-9a-f]{8}$")
+
+
+def prune_scratch(root: pathlib.Path | None = None, stale_s: float = 2 * 86400) -> list[str]:
+    """Remove what earlier runs left in scratch, once it is older than stale_s (nothing
+    in it changed since): this repository's session worktrees and files (wrk-, mrg-,
+    tst-, main-, fresh-), its live-check and UX output, and, when its scratch root is a
+    default one (issuelooper-<name>-<hash> in the temporary directory), the other default
+    roots beside it. A stale worktree that still holds work not on its remote (a
+    supervisor that crashed never saved it) leaves <wt>-rescued.diff first, unless one
+    is there; a rescued diff itself goes only once stale. The records the merge gates
+    read (sweep/, review/, devcheck/*.json) stay. Run when nothing of this repository's
+    supervisor runs: at its start, and by `issuelooper stop --all`. In run 9 /tmp ran out
+    of inodes, mostly on what earlier runs and tests left."""
+    root = root or config.scratch_root()
+    now, gone = time.time(), []
+
+    def newest(p: pathlib.Path, deep: bool = False) -> float:
+        """The newest mtime of p and what is in it (all of a worktree but its .git,
+        .venv and the like when deep; an edit deep in a tree leaves the top alone)."""
+        try:
+            times = [p.lstat().st_mtime]
+            if p.is_dir() and not p.is_symlink():
+                times += [c.lstat().st_mtime for c in p.iterdir()]
+            if deep:
+                for d, dirs, files in os.walk(p):
+                    dirs[:] = [x for x in dirs if x not in UNWALKED]
+                    times += [os.lstat(os.path.join(d, f)).st_mtime for f in files + dirs]
+            return max(times)
+        except OSError:
+            return now
+
+    def remove(p: pathlib.Path) -> None:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+        gone.append(str(p))
+
+    if root.is_dir():
+        kept = set()  # the rescued diffs of worktrees removed in this pass
+        for p in sorted(root.iterdir()):  # a worktree before its <wt>-rescued.diff
+            if not SESSION_SCRATCH.match(p.name) or p in kept:
+                continue
+            tree = p.is_dir() and (p / ".git").exists()
+            if now - newest(p, deep=tree) <= stale_s:
+                continue
+            if tree:
+                if rescue_worktree(str(p), keep_existing=True):
+                    kept.add(p.with_name(p.name + "-rescued.diff"))
+                subprocess.run(["git", "-C", str(repo_root()), "worktree", "remove", "--force", str(p)],
+                               capture_output=True)
+            if p.exists() or p.is_symlink():
+                remove(p)
+            else:
+                gone.append(str(p))
+        for sub in (root / "devcheck" / "out", root / "ux"):
+            if sub.is_dir():
+                for p in sub.iterdir():
+                    if now - newest(p) > stale_s:
+                        remove(p)
+        subprocess.run(["git", "-C", str(repo_root()), "worktree", "prune"], capture_output=True)
+    parent = root.parent
+    if OTHER_ROOT.match(root.name) and parent.is_dir():
+        for p in parent.iterdir():
+            if (OTHER_ROOT.match(p.name) and p.is_dir() and p.resolve() != root.resolve()
+                    and now - newest(p) > stale_s):
+                remove(p)
+    return gone
+
+
 def remove_worktree(root: str, wt: str, log=None) -> None:
     """Remove one of the supervisor's own worktrees, after killing what still runs in
     it. Its checks left app servers behind (a test fixture stopped `uv run` but not the
@@ -2678,23 +2769,7 @@ class Session(threading.Thread):
         """Remove the session's worktrees, rescuing unpushed work to <wt>-rescued.diff beside them."""
         root = str(repo_root())
         for wt in glob.glob(pattern):
-            git = ["git", "-C", wt]
-            subprocess.run(git + ["add", "-A", "-N", "."], capture_output=True)
-            dirty = subprocess.run(
-                git + ["status", "--porcelain"], capture_output=True, text=True
-            ).stdout
-            ahead = subprocess.run(
-                git + ["log", "--oneline", "@{u}..HEAD"], capture_output=True, text=True
-            )
-            if ahead.returncode != 0:
-                ahead = subprocess.run(
-                    git + ["log", "--oneline", "origin/main..HEAD"], capture_output=True, text=True
-                )
-            if dirty.strip() or ahead.stdout.strip():
-                diff = subprocess.run(
-                    git + ["diff", "origin/main"], capture_output=True, text=True
-                ).stdout
-                pathlib.Path(f"{wt}-rescued.diff").write_text(diff)
+            if rescue_worktree(wt):
                 self.pool.log("rescued", session=self.seq, path=wt)
             if (
                 subprocess.run(
@@ -3757,6 +3832,9 @@ class Pool:
         return started
 
     def run(self):
+        pruned = prune_scratch()
+        if pruned:
+            self.log("scratch_pruned", count=len(pruned), paths=pruned[:20])
         self.log(
             "supervisor_start",
             caps=self.cfg.caps,
@@ -3857,6 +3935,12 @@ def cmd_run(_a) -> int:
     return 0
 
 
+def cmd_prune(_a) -> int:
+    gone = prune_scratch()
+    print(f"scratch: removed {len(gone)} left from earlier runs" if gone else "scratch: nothing to remove")
+    return 0
+
+
 def cmd_plan(a) -> int:
     cfg = Config.from_env()
     st = normalize(json.loads(pathlib.Path(a.fixture).read_text())) if a.fixture else fetch(cfg)
@@ -3896,11 +3980,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan")
     p.add_argument("--fixture")
     p.add_argument("--ux-sha", default="", help="the sha a UX run would test (POOL_UX=1)")
+    sub.add_parser("prune", help="remove what earlier runs left in scratch (while the supervisor is stopped)")
     p = sub.add_parser("probe")
     p.add_argument("role", choices=ROLES)
     p.add_argument("--prompt", default="Report your CC_ROLE and the skills you can see, then stop.")
     a = ap.parse_args(argv)
-    return {"run": cmd_run, None: cmd_run, "plan": cmd_plan, "probe": cmd_probe}[a.cmd](a)
+    return {"run": cmd_run, None: cmd_run, "plan": cmd_plan, "probe": cmd_probe, "prune": cmd_prune}[a.cmd](a)
 
 
 if __name__ == "__main__":

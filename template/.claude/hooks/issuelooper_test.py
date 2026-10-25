@@ -6,6 +6,7 @@ for the herdr host (with a fake herdr). Run: `python3 issuelooper_test.py`.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import pathlib
@@ -14,6 +15,15 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# Every temporary file this file and what it runs make goes under one directory,
+# removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
+# ran out of inodes. Once per process: a test file another one imports keeps it.
+if "IL_TEST_TMP" not in os.environ:
+    os.environ["IL_TEST_TMP"] = os.environ["TMPDIR"] = tempfile.mkdtemp(prefix="il-test-")
+    os.environ["ISSUELOOPER_TMP"] = os.path.join(os.environ["IL_TEST_TMP"], "scratch")
+    atexit.register(shutil.rmtree, os.environ["IL_TEST_TMP"], True)
+tempfile.tempdir = os.environ["IL_TEST_TMP"]
 
 HERE = pathlib.Path(__file__).resolve().parent
 FAILURES: list[str] = []

@@ -313,7 +313,7 @@ Turn it off with `[dashboard] enabled = false`.
 
 `issuelooper stop` stops the supervisor (and the worker, merger and tester
 sessions it runs, and its own main checks, re-sweeps and quick checks) and the dashboard, and closes the monitor's pane; aides stay open with their
-conversations. `issuelooper stop --all` closes the aides too. A stopped worker's
+conversations. `issuelooper stop --all` closes the aides too, and removes what earlier runs left in scratch once it is two days stale (worktrees, rescued diffs, live-check and UX output, and other repositories' scratch roots; a stale worktree with unsaved work leaves a `<worktree>-rescued.diff` first, and the gates' records stay), as the supervisor also does when it starts. A stopped worker's
 unfinished work is pushed to its issue's branch and the issue goes back to the queue,
 without counting a failed attempt. `issuelooper start` starts everything again; the
 backlog lives on GitHub, so nothing is lost.

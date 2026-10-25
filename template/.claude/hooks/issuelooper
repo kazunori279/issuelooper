@@ -10,7 +10,8 @@
 #   issuelooper dashboard      the dashboard's URL (starts it if it is not running)
 #   issuelooper attach         open the herdr session the loop runs in (from a plain terminal)
 #   issuelooper plan           print the units the supervisor would start now
-#   issuelooper stop [--all]   stop the supervisor, the monitor and the dashboard (--all: the aides too)
+#   issuelooper stop [--all]   stop the supervisor, the monitor and the dashboard (--all: the aides
+#                              too, and remove what earlier runs left in scratch)
 #
 # With `[monitor] host = "herdr"` (the default) the monitor and the aides are interactive
 # agent sessions in panes of a herdr tab named "issuelooper": you talk to each one in its
@@ -281,6 +282,8 @@ cmd_stop() {
     kill -TERM "$(cat "$RUN/broker.pid")" && echo "monitor stopped"
   fi
   rm -f "$RUN/broker.pid"
+  # Everything is stopped: what the runs left in scratch can go (records stay).
+  if [ "${1:-}" = "--all" ]; then python3 "$HERE/ccpool.py" prune || true; fi
 }
 
 cmd_status() {

@@ -12,6 +12,7 @@ run a fake CLI per schema (agy, and Claude Code from its documented format).
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import pathlib
@@ -23,6 +24,15 @@ import sys
 import tempfile
 import threading
 import time
+
+# Every temporary file this file and what it runs make goes under one directory,
+# removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
+# ran out of inodes. Once per process: a test file another one imports keeps it.
+if "IL_TEST_TMP" not in os.environ:
+    os.environ["IL_TEST_TMP"] = os.environ["TMPDIR"] = tempfile.mkdtemp(prefix="il-test-")
+    os.environ["ISSUELOOPER_TMP"] = os.path.join(os.environ["IL_TEST_TMP"], "scratch")
+    atexit.register(shutil.rmtree, os.environ["IL_TEST_TMP"], True)
+tempfile.tempdir = os.environ["IL_TEST_TMP"]
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -3250,6 +3260,123 @@ def test_the_supervisors_checks_leave_no_process_behind() -> None:
               (r.stdout.strip(), not ccpool.pid_alive(child) or open(f"/proc/{child}/stat").read().split()[2] == "Z"),
               ("started", True))
     finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_scratch_from_earlier_runs_is_pruned() -> None:
+    """Run 9: /tmp ran out of inodes, largely on what earlier runs and tests had left. Only
+    what is two days stale goes, and a worktree's unsaved work is kept in a rescued diff."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-prune-"))
+    old_repo = os.environ.get("SHARED_REPO_PATH")
+    try:
+        work, g = git_repo(d)
+        (work / "a.py").write_text("a = 1\n")
+        g("add", "a.py")
+        g("commit", "-qm", "a")
+        g("push", "-q", "origin", "HEAD:main")
+        g("fetch", "-q", "origin")
+        os.environ["SHARED_REPO_PATH"] = str(work)
+        root = d / "issuelooper-app-0badc0de"
+        root.mkdir()
+        old = time.time() - 3 * 86400
+
+        def age(p: pathlib.Path) -> None:
+            for q in [p] + [pathlib.Path(dp) / n for dp, dirs, files in os.walk(p) for n in dirs + files]:
+                os.utime(q, (old, old), follow_symlinks=False)
+
+        def tree(name: str, dirty: bool, stale: bool) -> pathlib.Path:
+            wt = root / name
+            g("worktree", "add", "-q", "--detach", str(wt), "origin/main")
+            if dirty:
+                (wt / "a.py").write_text("a = 2  # not pushed\n")
+            if stale:
+                age(wt)
+            return wt
+
+        fresh_dirty = tree("wrk-1-5-wt", dirty=True, stale=False)
+        stale_dirty = tree("wrk-2-6-wt", dirty=True, stale=True)
+        stale_clean = tree("wrk-3-7-wt", dirty=False, stale=True)
+        rescued_before = tree("mrg-9-wt", dirty=True, stale=True)
+        files = {"wrk-4-8-wt-rescued.diff": False, "wrk-5-9-wt-rescued.diff": True, "mrg-9-wt-rescued.diff": True,
+                 "mrg-7-sweep/a": True, "main-abc/a": False, "sweep/x.json": True, "review/x.json": True,
+                 "devcheck/x.json": True, "devcheck/out/old/s.py": True, "devcheck/out/new/s.py": False,
+                 "ux/old/a.png": True}
+        for rel, stale in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("earlier rescue" if rel.startswith("mrg-9") else "x")
+            if stale:
+                age(root / rel.split("/")[0] if rel.startswith(("mrg-7", "main-")) else root / rel)
+                if rel.startswith(("devcheck/out/old", "ux/old")):
+                    age((root / rel).parent)
+        stale_root, busy_root = d / "issuelooper-other-deadbeef", d / "issuelooper-busy-cafebabe"
+        for r in (stale_root, busy_root):
+            (r / "sweep").mkdir(parents=True)
+        age(stale_root)
+        ccpool.prune_scratch(root)
+        left = sorted(p.name for p in root.iterdir())
+        check("fresh work stays: a dirty worktree, a rescued diff, a session directory; records stay",
+              [n for n in left if n in ("wrk-1-5-wt", "wrk-4-8-wt-rescued.diff", "main-abc", "sweep", "review")],
+              ["main-abc", "review", "sweep", "wrk-1-5-wt", "wrk-4-8-wt-rescued.diff"])
+        check("the fresh dirty worktree keeps its work", "not pushed" in (fresh_dirty / "a.py").read_text(), True)
+        check("stale ones go: a clean worktree, an old rescued diff, a session directory",
+              (stale_clean.exists(), (root / "wrk-5-9-wt-rescued.diff").exists(), (root / "mrg-7-sweep").exists()),
+              (False, False, False))
+        rescued = root / "wrk-2-6-wt-rescued.diff"
+        check("a stale dirty worktree goes and leaves its work in a rescued diff",
+              (stale_dirty.exists(), rescued.exists() and "not pushed" in rescued.read_text()), (False, True))
+        check("one that already had a rescued diff keeps that one as it was",
+              (rescued_before.exists(), (root / "mrg-9-wt-rescued.diff").read_text()), (False, "earlier rescue"))
+        check("old live-check and UX output goes, new stays",
+              ((root / "devcheck/out/old").exists(), (root / "devcheck/out/new").exists(), (root / "ux/old").exists()),
+              (False, True, False))
+        check("another repository's root untouched for two days goes, a busy one stays",
+              (stale_root.exists(), busy_root.exists()), (False, True))
+        check("git forgets the removed worktrees", sum(f"{root}/wrk-" in ln for ln in g("worktree", "list").splitlines()), 1)
+        custom = d / "scratch"
+        (custom / "wrk-1-wt").mkdir(parents=True)
+        age(custom / "wrk-1-wt")
+        (d / "issuelooper-old-11111111").mkdir()
+        age(d / "issuelooper-old-11111111")
+        ccpool.prune_scratch(custom)
+        check("an ISSUELOOPER_TMP of its own: its stale sessions go, nothing beside it is touched",
+              ((custom / "wrk-1-wt").exists(), (d / "issuelooper-old-11111111").exists()), (False, True))
+    finally:
+        if old_repo is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old_repo
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_session_cleanup_rescues_unpushed_work() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-cleanup-"))
+    old_repo = os.environ.get("SHARED_REPO_PATH")
+    try:
+        work, g = git_repo(d)
+        (work / "a.py").write_text("a = 1\n")
+        g("add", "a.py")
+        g("commit", "-qm", "a")
+        g("push", "-q", "origin", "HEAD:main")
+        g("fetch", "-q", "origin")
+        os.environ["SHARED_REPO_PATH"] = str(work)
+        dirty, clean = d / "wrk-4-1-wt", d / "wrk-4-2-wt"
+        for wt in (dirty, clean):
+            g("worktree", "add", "-q", "--detach", str(wt), "origin/main")
+        (dirty / "b.py").write_text("b = 1\n")
+        h = Rig(state())
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,), {}), 4)
+        w.cleanup(str(d / "wrk-4-*-wt"))
+        rescued = d / "wrk-4-1-wt-rescued.diff"
+        logged = [json.loads(x)["path"] for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+                  if json.loads(x)["kind"] == "rescued"]
+        check("a session's worktrees go; uncommitted work is kept in a rescued diff, and logged",
+              (dirty.exists(), clean.exists(), rescued.exists() and "b = 1" in rescued.read_text(),
+               (d / "wrk-4-2-wt-rescued.diff").exists(), logged), (False, False, True, False, [str(dirty)]))
+    finally:
+        if old_repo is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old_repo
         shutil.rmtree(d, ignore_errors=True)
 
 
