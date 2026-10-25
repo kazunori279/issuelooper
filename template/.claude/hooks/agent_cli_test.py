@@ -516,6 +516,10 @@ def test_agy_finished_unseen() -> None:
         agy_conversation(root, "c1", [(32, 15, 3), (33, 132, 1), (60, 132, 3), (85, 15, 3)], age=600)
         check("agy: a reply 50 steps past the stuck one, ten minutes old: finished", agy.finished_unseen(stuck, 180), True)
         check("agy: not yet quiet long enough", agy.finished_unseen(stuck, 900), False)
+        agy_conversation(root, "c4", [(33, 132, 1), (50, 15, 3), (51, 101, 3)], age=600)
+        told = [dict(stuck[0], conversation_id="c4"), stuck[1]]
+        check("agy: ended on a background task's completion message (merger 175): finished",
+              agy.finished_unseen(told, 180), True)
         agy_conversation(root, "c2", [(33, 132, 1), (40, 132, 1)], age=600)
         running = [dict(stuck[0], conversation_id="c2"), stuck[1]]
         check("agy: the conversation's last step still runs: not finished", agy.finished_unseen(running, 180), False)

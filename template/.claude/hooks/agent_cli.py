@@ -201,8 +201,9 @@ class Agy(Cli):
     # tests). Its stream prints steps in order, so one it loses track of (a command it
     # stopped reading after five silent minutes) holds back every later step, and the
     # process does not exit after the last one. Step codes as agy wrote them: a reply
-    # is type 15; status 1 is running, 3 done.
-    REPLY, DONE = 15, 3
+    # is type 15, a background task's completion message 101; status 1 is running, 3
+    # done. A conversation that ends on either is over (merger 175 in run 8 ended on 101).
+    ENDS, DONE = (15, 101), 3
 
     @staticmethod
     def conversations() -> pathlib.Path:
@@ -338,7 +339,7 @@ class Agy(Cli):
                 c.close()
         except (ValueError, OSError, sqlite3.Error):
             return False
-        return (bool(row) and row[0] > int(step.get("step_index") or 0) and (row[1], row[2]) == (self.REPLY, self.DONE)
+        return (bool(row) and row[0] > int(step.get("step_index") or 0) and row[1] in self.ENDS and row[2] == self.DONE
                 and time.time() - changed >= quiet)
 
     def quota_result(self, e):
