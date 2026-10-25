@@ -2982,6 +2982,36 @@ def test_a_stream_stuck_behind_a_finished_conversation_ends_early() -> None:
           (rc, timed_out, len(calls), time.time() - t0 < 90,
            "the conversation finished without it" in (m.dir / "resumes.log").read_text()),
           (0, False, 1, True, True))
+    # Run 8: two mergers had replied "waiting for the sweep" while it ran; ending them killed it.
+    tmp = d / "scratch"
+    (tmp / "mrg-5-wt").mkdir(parents=True)
+    old_tmp = os.environ.get("ISSUELOOPER_TMP")
+    os.environ["ISSUELOOPER_TMP"] = str(tmp)
+    spin = subprocess.Popen([sys.executable, "-c", "import time\nt = time.time()\nwhile time.time() - t < 20: pass"],
+                            cwd=tmp / "mrg-5-wt")
+    idle = subprocess.Popen(["sleep", "60"], cwd=tmp / "mrg-5-wt")
+    m2 = ccpool.Session(pool, ccpool.Unit("merger", "land", "mrg:5@c@d", "mrg:5", 5, (4,), {}), 2)
+    m2.dir.mkdir(parents=True)
+    (d / "agy-unseen.calls").unlink()
+    (d / "conv-7.db").unlink()
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(d)
+    try:
+        check("a sweep that works is busy, a server that sleeps is not", m2.busy_processes(), [spin.pid])
+        t0 = time.time()
+        rc, _, timed_out = m2.session("resolve PR 5", dict(os.environ, CCROLE_MERGER_CLI="agy"))
+        log = (m2.dir / "resumes.log").read_text()
+        check("it waits while the sweep works, then ends as finished, the sweep not killed",
+              (rc, timed_out, "waiting for 1 process(es)" in log, "finished without it" in log,
+               time.time() - t0 >= 15, spin.wait(5)), (0, False, True, True, True, 0))
+    finally:
+        os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+        if old_tmp is None:
+            os.environ.pop("ISSUELOOPER_TMP", None)
+        else:
+            os.environ["ISSUELOOPER_TMP"] = old_tmp
+        for p in (spin, idle):
+            if p.poll() is None:
+                p.kill()
 
 
 def test_silent_model_is_resumed() -> None:

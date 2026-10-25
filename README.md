@@ -117,7 +117,8 @@ worker, model quota errors are waited out with backoff, silent sessions are
 resumed (sooner for models that step quickly; a reply that stops mid-stream counts
 too, and so does an agy session whose turn ended while it waits on a background task;
 an agy session whose stream stopped behind a step while its conversation went on and
-finished is ended `POOL_UNSEEN_IDLE_S` after the last step), and a session's clocks stand still while the agent CLI retries a failed model
+finished is ended `POOL_UNSEEN_IDLE_S` after the last step, once nothing it started
+in its scratch paths is still working), and a session's clocks stand still while the agent CLI retries a failed model
 call (agy), up to a hard ceiling of 1.5 times its timeout (`POOL_TIMEOUT_CEILING`). Conflicting PRs that only add lines are rebased without an agent (once
 per head; a head whose rebase failed goes to a merger), a PR that conflicts again
 after three merger sessions (main kept moving) goes back to a worker, a file that keeps

@@ -102,7 +102,8 @@ one of POOL_STALL_FAST_MODELS) is resumed (twice at most), and so is one whose C
 the model's turn is over while it waits for a background task (agy), after
 POOL_BACKGROUND_IDLE_S (120); still idle after two nudges, it is ended early. An agy session
 whose stream stopped behind a step while its conversation went on and finished (agy's
-own record of it) is ended POOL_UNSEEN_IDLE_S (180) after the last step. A session that ends on a
+own record of it) is ended POOL_UNSEEN_IDLE_S (180) after the last step, unless a process in
+its scratch paths still uses CPU (a sweep it started): then it waits for that. A session that ends on a
 model quota error is resumed in the same conversation up to POOL_QUOTA_RESUMES
 times, each after a wait that doubles from POOL_QUOTA_WAIT_S up to
 POOL_QUOTA_WAIT_MAX_S; one that still ends on it is "quota error": no try spent and
@@ -1377,6 +1378,15 @@ def parse_lsof(text: str) -> dict[int, str]:
     return out
 
 
+def cpu_ticks(pid: int) -> int | None:
+    """User and system CPU time a process has used, in clock ticks (None: unknown)."""
+    try:
+        fields = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return int(fields[11]) + int(fields[12])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def process_cwds() -> dict[int, str]:
     """pid -> working directory of every process this user can read: /proc on Linux,
     else lsof ({} when neither works)."""
@@ -1490,6 +1500,7 @@ class Session(threading.Thread):
             quota_k = 0  # resumes after a quota error, each after a doubling wait
             stall_k = 0  # resumes after the model went silent between steps
             idle_k = 0  # resumes after the model's turn ended on a background task
+            waited_on: list[int] = []  # processes the stuck-stream rule last waited for
             # A worker still going at POOL_WORKER_WRAP_S is cut and resumed in the same
             # conversation with a few minutes to commit and release: workers that ran
             # their full timeout were a quarter of all worker time, and most of them
@@ -1598,6 +1609,17 @@ class Session(threading.Thread):
                     # like that, unseen, until their 45-minute timeout. Its own record of
                     # the conversation shows the end; nothing is left to resume.
                     if cfg.unseen_idle_s and self.finished_unseen(cfg.unseen_idle_s):
+                        # Not while something it started still works: two mergers in run 8
+                        # had replied "waiting for the sweep" and the sweep was killed.
+                        busy = self.busy_processes()
+                        if busy:
+                            if busy != waited_on:
+                                with open(self.dir / "resumes.log", "a") as rl:
+                                    rl.write(f"{time.time():.0f} conversation finished behind a stuck stream; "
+                                             f"waiting for {len(busy)} process(es) still working in its scratch "
+                                             f"paths ({', '.join(map(str, busy[:5]))})\n")
+                            waited_on = busy
+                            continue
                         with open(self.dir / "resumes.log", "a") as rl:
                             rl.write(f"{time.time():.0f} ended: the stream stopped behind a step; the "
                                      "conversation finished without it\n")
@@ -1774,6 +1796,27 @@ class Session(threading.Thread):
             return []
         root = str(config.scratch_root())
         return sorted({f"{t}/{name}" for t in (root, os.path.realpath(root))})
+
+    def busy_processes(self, sample: float = 2.0) -> list[int]:
+        """Processes in this session's scratch paths that used CPU over `sample` seconds
+        (a sweep, a test run), not idle ones (a server left running). Where CPU time
+        cannot be read, every process found counts."""
+        prefixes = tuple(self.scratch_prefixes())
+        if not prefixes:
+            return []
+        spare = {1, os.getpid(), os.getppid()}
+        found = [pid for pid, cwd in process_cwds().items() if pid not in spare and cwd.startswith(prefixes)]
+        before = {pid: cpu_ticks(pid) for pid in found}
+        if found:
+            time.sleep(sample)
+        busy = []
+        for pid in found:
+            if not pid_alive(pid):
+                continue
+            after = cpu_ticks(pid)
+            if before[pid] is None or (after is not None and after - before[pid] >= 5):
+                busy.append(pid)
+        return sorted(busy)
 
     def kill_leftovers(self) -> list[int]:
         """Kill the processes still running in this session's scratch paths: servers and
