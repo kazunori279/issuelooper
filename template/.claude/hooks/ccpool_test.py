@@ -3226,6 +3226,14 @@ def test_merged_check_catches_a_semantic_conflict() -> None:
         check("with the error", "is not defined" in calls.read_text(), True)
         main = g("rev-parse", "origin/main")
         check("a head that contains main needs no check", w.merged_check(5, 1, main, "", dict(os.environ)), "")
+        # PR #108: a timeout and its retry held the merge lock for ten minutes.
+        pool.cfg.fast_check_cmd, pool.cfg.fast_check_s = "if grep -q 'def config' pkg/main.py; then sleep 5; fi", 1
+        t0 = time.time()
+        first = w.merged_check(5, 1, pr_head, "issue-1", dict(os.environ))
+        check("a timeout: not retried, held the first time", (first, time.time() - t0 < 4),
+              ("held (the merged-tree check timed out)", True))
+        check("a second timeout on the same head: handed back",
+              w.merged_check(5, 1, pr_head, "issue-1", dict(os.environ)), "breaks main once merged (handed back)")
         pool.cfg.fast_check_cmd = "exit 1"
         pool.main_checks.clear()
         calls.write_text("")

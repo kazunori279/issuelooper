@@ -29,7 +29,9 @@ UNITS
           gate 7 refusal after a rebase replays the live check outside the lock). With POOL_FAST_CHECK_CMD set, a
           PR whose head is behind main is first merged with main in a worktree and
           the command runs there, under the merge lock right before the merge: a
-          failure hands the PR back, unless main alone fails it too. rebase: a CONFLICTING PR is first rebased here, once per
+          failure hands the PR back, unless main alone fails it too. It gets POOL_FAST_CHECK_S
+          (120); a timeout is not retried: the PR is held, and handed back after a second
+          timeout on the same head. rebase: a CONFLICTING PR is first rebased here, once per
           head and main, and not again for a head whose rebase failed; when every
           conflict hunk, in any text file, only adds lines on both sides, both are
           kept, the PR is swept and pushed, and the next poll merges it. The conflicted files are
@@ -349,7 +351,7 @@ class Config:
     timeout_ceiling: float = 1.5
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
-    fast_check_s: float = 300
+    fast_check_s: float = 120
     map_id_pattern: str = ""  # a regex for the spec's requirement ids (the worker's file map)
     stale_min: int = 60
     orphan_pr_min: int = 10
@@ -446,7 +448,7 @@ class Config:
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
-            fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 300),
+            fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 120),
             map_id_pattern=e("POOL_MAP_ID_PATTERN", "").strip(),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
             orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
@@ -632,6 +634,9 @@ def failing_tests(out: str) -> list[str]:
     if len(tail) < 2:
         return []
     return [ln.strip() for ln in tail[1].splitlines() if ln.strip() and not ln.startswith("sweep ")][:5]
+
+
+FAST_TIMEOUT = "the fast check timed out after"
 
 
 def same_failure(first: str, second: str) -> bool:
@@ -2196,7 +2201,7 @@ class Session(threading.Thread):
             r = self.pool.run_owned(["bash", "-c", cfg.fast_check_cmd], cfg.fast_check_s, cwd=wt, env=env,
                                     stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
-            return False, f"the fast check timed out after {cfg.fast_check_s:.0f} s"
+            return False, f"{FAST_TIMEOUT} {cfg.fast_check_s:.0f} s"
         return r.returncode == 0, (r.stdout + r.stderr).strip()[-1500:]
 
     def merged_check(self, pr: int, n: int, head: str, branch: str, env: dict) -> str:
@@ -2220,7 +2225,17 @@ class Session(threading.Thread):
                 return "behind main with a conflict (the next poll sees it)"
             ok, why = self.fast_check(wt, env)
             self.note(f"merged-tree check on main {main[:12]}: {'ok' if ok else why[-400:]}")
-            if not ok:  # once more: a single flaky failure handed PRs #106 and #103 back
+            if not ok and why.startswith(FAST_TIMEOUT):
+                # Under the merge lock: a timeout and its retry held every merge for ten
+                # minutes (PR #108). Not retried now; held the first time on this head,
+                # handed back the second (a head that hangs the check).
+                with self.pool.lock:
+                    first = (pr, head) not in self.pool.fast_timeouts
+                    self.pool.fast_timeouts.add((pr, head))
+                if first:
+                    self.pool.event(f"PR #{pr}: the merged-tree check timed out; held, tried again on a later poll")
+                    return "held (the merged-tree check timed out)"
+            elif not ok:  # once more: a single flaky failure handed PRs #106 and #103 back
                 ok, again = self.fast_check(wt, env)
                 self.note(f"merged-tree check, second try: {'ok (flaky)' if ok else again[-400:]}")
                 if not ok and not same_failure(why, again):
@@ -2657,6 +2672,7 @@ class Pool:
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
         self.red_failing: tuple = ()  # the failing tests last reported on it
         self.red_held: set = set()  # (pr, red main) pairs the monitor was told about
+        self.fast_timeouts: set = set()  # (pr, head) whose merged-tree check timed out once
         self.flaky_known: tuple[float, dict[str, int]] = (0.0, {})  # (read at, test -> its open Flaky issue)
         self.red_since = ""  # the first red main of the current red spell
         self.red_seen: list[str] = []  # every test that failed during it
