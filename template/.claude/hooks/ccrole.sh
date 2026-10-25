@@ -29,6 +29,16 @@ export PYTHONDONTWRITEBYTECODE=1
 [ -f "$HERE/config.py" ] && eval "$(python3 "$HERE/config.py" env 2>/dev/null || true)"
 # This repository's scratch directory (config.py: one per repository, under /tmp).
 [ -n "${ISSUELOOPER_TMP:-}" ] && mkdir -p "$ISSUELOOPER_TMP"
+# Nothing in a session waits for a person at a terminal. A command that opens an editor
+# (`git rebase --continue`, `git merge`, `git commit` without -m) or asks for a username
+# never returns; agy moves it to the background and the session sits idle until its
+# timeout (19 of 60 merger sessions in one run). An editor is `true` (the default
+# message stands), a prompt fails at once, and output is never paged. An exported
+# value wins.
+export GIT_EDITOR="${GIT_EDITOR:-true}" GIT_SEQUENCE_EDITOR="${GIT_SEQUENCE_EDITOR:-true}" \
+  GIT_MERGE_AUTOEDIT="${GIT_MERGE_AUTOEDIT:-no}" GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}" \
+  GCM_INTERACTIVE="${GCM_INTERACTIVE:-never}" GH_PROMPT_DISABLED="${GH_PROMPT_DISABLED:-1}" \
+  PAGER="${PAGER:-cat}" GIT_PAGER="${GIT_PAGER:-cat}" GH_PAGER="${GH_PAGER:-cat}"
 
 ROLE_DIR="$HOME/.claude/cc-role"
 VALID="monitor merger tester reviewer aide worker"
