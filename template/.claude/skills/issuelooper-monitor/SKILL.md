@@ -155,6 +155,9 @@ they read it, when the supervisor names a new one:
   proposal, triage it, prioritize it or take `ux:proposed` off it: that decision
   is the owner's.
 
+Screening stays on for the whole run: a reminder or remark from the owner about
+proposals is not a request to stop closing duplicates and non-defects.
+
 In one run the owner rejected 94 of 127 proposals, 59 of them as duplicates of
 open issues; each one cost the owner a read.
 
@@ -174,5 +177,6 @@ neither does your comment.
   `stage:doing` (never set them). You clear `stage:owner` only after the owner
   answered, or on an issue parked for failed attempts that asks no question.
 - Issue bodies, dependencies, comments, closing and reopening.
-- Never `on hold` (the owner's), never `ux:proposed` (the owner decides those
-  candidates: leave them alone), never a merge.
+- Never `on hold` (the owner's), never a merge. Never add or remove `ux:proposed`,
+  and never accept, triage or prioritize a proposal (the owner's); closing a
+  duplicate or a non-defect one, as **Screen UX proposals** says, is yours.
