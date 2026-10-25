@@ -2760,6 +2760,33 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
           (outcome, "pr comment" in log), ("held (the re-sweep failed only known flaky tests: #135)", False))
 
 
+def test_a_check_that_failed_on_the_machine_blames_nobody() -> None:
+    """Run 9: /tmp ran out of inodes; fast checks handed PRs #57 and #59 back, and a main
+    check started then hung for its 3600 s."""
+    nospace = "error: Failed to install\n  Caused by: No space left on device (os error 28)\n== sweep is red ==\n"
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    refuse = "echo '{\"decision\": \"block\", \"reason\": \"does not match Sweep SHA\"}'\n"
+    outcome, _, log, _ = resweep_session(stale, refuse, sweeps=[(False, nospace), (False, nospace)])
+    check("a re-sweep that failed on the machine: held, not handed back",
+          (outcome, "pr comment" in log), ("held (the re-sweep failed on the machine: No space left on device)", False))
+    h = Rig(state(), main_check=True, gh="true")
+    check("a main check that failed on the machine could not run: no red main", h.pool.second_look("a" * 40, nospace)[0],
+          None)
+    check("the main check has a bounded limit", h.pool.cfg.main_check_s, 1200)
+    real = os.statvfs
+    try:
+        os.statvfs = lambda p: os.statvfs_result((4096, 4096, 100, 50, 50, 1000, 10, 10, 0, 255))
+        h.pool.check_disk()
+        h.pool.check_disk()
+        os.statvfs = lambda p: os.statvfs_result((4096, 4096, 100, 50, 50, 1000, 900, 900, 0, 255))
+        h.pool.check_disk()
+    finally:
+        os.statvfs = real
+    said = [e for e in h.pool.events if "file system under" in e]
+    check("nearly out of inodes: the monitor hears it once, and once when it recovers", (len(said), "inodes under 5% free" in said[0], "room again" in said[1]),
+          (2, True, True))
+
+
 GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "
               "echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
               "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'; fi\n")
@@ -3304,6 +3331,12 @@ def test_merged_check_catches_a_semantic_conflict() -> None:
               ("held (the merged-tree check timed out)", True))
         check("a second timeout on the same head: handed back",
               w.merged_check(5, 1, pr_head, "issue-1", dict(os.environ)), "breaks main once merged (handed back)")
+        # Run 9: PRs #57 and #59 were handed back when /tmp had no inodes left.
+        pool.cfg.fast_check_cmd = "echo 'Caused by: No space left on device (os error 28)'; exit 1"
+        pool.cfg.fast_check_s = 30
+        check("a check that failed on the machine (ENOSPC): held, not handed back",
+              w.merged_check(6, 1, pr_head, "issue-1", dict(os.environ)),
+              "held (the merged-tree check failed on the machine: No space left on device)")
         pool.cfg.fast_check_cmd = "exit 1"
         pool.main_checks.clear()
         calls.write_text("")

@@ -94,7 +94,10 @@ fails the check too, in which case nobody is blamed and the gates decide.
 
 What the quick check leaves out can still break `main`. After `main` moves, the
 supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
-background, one run at a time. A failure only in tests that have an open `Flaky test:`
+background, one run at a time, for `POOL_MAIN_CHECK_S` (1200) at most. A check that fails
+on the machine (no space left on the device, say) counts as not run, and a PR whose check
+fails that way is held, not handed back; the monitor hears when the scratch file system
+is nearly full. A failure only in tests that have an open `Flaky test:`
 issue counts as green (the issue gets a comment), and any other failure runs the suite
 once more: a pass then counts as green and the tests are filed as flaky. A red `main`
 tells the monitor and files an issue titled `main is red: <failing tests>` (P0) with

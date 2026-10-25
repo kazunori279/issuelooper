@@ -147,7 +147,9 @@ MAIN CHECK
 With POOL_MAIN_CHECK (on by default when SWEEP_COMMAND is set), each time origin/main
 moves the supervisor runs the full check suite on it in a worktree (sweep_locked.py
 --lane main: its own lock, not one of the SWEEP_SLOTS), in the background, one run at a time: a
-main that moved during a run is not checked, only the newest. A check that fails only
+main that moved during a run is not checked, only the newest. It gets POOL_MAIN_CHECK_S
+(1200); a failure of the machine itself (INFRA: no space left, and the like) counts as
+not run, here and for a PR's checks, which are then held. A check that fails only
 tests named in an open `Flaky test:` issue counts as green and comments there; any
 other failure is run once more, and a pass then counts as green and reports the tests
 as flaky. A PR whose re-sweep or merged-tree check fails only known flaky tests is held,
@@ -352,6 +354,7 @@ class Config:
     timeout_ceiling: float = 1.5
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
+    main_check_s: float = 1200  # the main check's time limit (run 9: 58-375 s, one hung for its 3600 s)
     fast_check_s: float = 120
     map_id_pattern: str = ""  # a regex for the spec's requirement ids (the worker's file map)
     stale_min: int = 60
@@ -449,6 +452,7 @@ class Config:
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
+            main_check_s=float(e("POOL_MAIN_CHECK_S", "") or 1200),
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 120),
             map_id_pattern=e("POOL_MAP_ID_PATTERN", "").strip(),
             stale_min=env_int("CLAIM_STALE_MIN", 60),
@@ -638,6 +642,10 @@ def failing_tests(out: str) -> list[str]:
 
 
 FAST_TIMEOUT = "the fast check timed out after"
+# The machine, not the code: a check that failed this way says nothing about the PR. In
+# run 9 /tmp ran out of inodes and PRs #57 and #59 were handed back for it.
+INFRA = re.compile(r"(?i)no space left on device|os error 28|\bENOSPC\b|disk quota exceeded|\bEDQUOT\b|"
+                   r"too many open files|\bEMFILE\b|cannot allocate memory|\bENOMEM\b|read-only file system")
 
 
 def same_failure(first: str, second: str) -> bool:
@@ -2170,6 +2178,15 @@ class Session(threading.Thread):
                         f"({', '.join(names) or 'no test named'}): flaky; tried again on a later poll")
         return f"held (the {what} failed twice, differently: flaky)"
 
+    def infra_hold(self, pr: int, what: str, out: str) -> str:
+        """'' unless the check failed on the machine (INFRA): then the PR is held."""
+        m = INFRA.search(out)
+        if not m:
+            return ""
+        self.pool.event(f"PR #{pr} not handed back: its {what} failed on the machine ({m.group(0)}); "
+                        "tried again on a later poll")
+        return f"held (the {what} failed on the machine: {m.group(0)})"
+
     def known_flaky_hold(self, pr: int, what: str, out: str) -> str:
         """'' unless every test that failed has an open `Flaky test:` issue: then the PR
         is held for a later try, not handed back (PR #107 was handed back for one)."""
@@ -2186,7 +2203,7 @@ class Session(threading.Thread):
         """Hand the PR back for its red sweep, with what failed. Handed back by the gates
         instead, the comment said "does not match Sweep SHA" or "missing the green line",
         and the worker had to find the failing tests itself (PRs #110, #126, #140)."""
-        held = self.known_flaky_hold(pr, "re-sweep", out)
+        held = self.infra_hold(pr, "re-sweep", out) or self.known_flaky_hold(pr, "re-sweep", out)
         if held:
             return held
         failing = failing_tests(out)
@@ -2290,7 +2307,8 @@ class Session(threading.Thread):
                 why = again if not ok else why
             if ok:
                 return ""
-            held = self.known_flaky_hold(pr, "merged-tree check", why)
+            held = (self.infra_hold(pr, "merged-tree check", why)
+                    or self.known_flaky_hold(pr, "merged-tree check", why))
             if held:
                 return held
             if not self.main_ok(main, env):
@@ -2386,6 +2404,9 @@ class Session(threading.Thread):
 
     def devcheck_hand_back(self, pr: int, n: int, head: str, earlier: str, out: str) -> str:
         """The replayed live check failed on this head: back to a worker, with what failed."""
+        held = self.infra_hold(pr, "live check replay", out)
+        if held:
+            return held
         self.hand_back(pr, n, (
             f"**Not merged: the live check fails on this head ({head[:8]}).** A rebase changed what the "
             f"branch does since the live check at {earlier[:8]}, so the supervisor replayed its scripts on "
@@ -2723,6 +2744,7 @@ class Pool:
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
         self.red_failing: tuple = ()  # the failing tests last reported on it
         self.red_held: set = set()  # (pr, red main) pairs the monitor was told about
+        self.disk_low = False  # the scratch root's file system was last seen nearly full
         self.fast_timeouts: set = set()  # (pr, head) whose merged-tree check timed out once
         self.flaky_known: tuple[float, dict[str, int]] = (0.0, {})  # (read at, test -> its open Flaky issue)
         self.red_since = ""  # the first red main of the current red spell
@@ -3144,7 +3166,8 @@ class Pool:
                 return None, f"could not add a worktree at {sha[:12]}"
             # In its own lane: it ran after every merge, and in a sweep slot it held one of
             # the sessions' slots for over half the run.
-            r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"], 3600, cwd=wt,
+            r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"],
+                               self.cfg.main_check_s, cwd=wt,
                                env=dict(os.environ), stdin=subprocess.DEVNULL)
             out = r.stdout + r.stderr
             if r.returncode == 0 and "green" in r.stdout:
@@ -3227,7 +3250,12 @@ class Pool:
         tests with an open `Flaky test:` issue, main counts as green and that issue gets
         a comment; otherwise the check runs once more, and a pass then makes the failures
         flaky. Tests the supervisor had filed as flaky turned main red again twice in run
-        8, holding merges and handing PR #107 back."""
+        8, holding merges and handing PR #107 back. A failure of the machine (no space
+        left, say) means the check could not run: None, and no `main is red` issue."""
+        if INFRA.search(out):
+            self.event(f"main {sha[:8]}: the check failed on the machine, not the code "
+                       f"({INFRA.search(out).group(0)}); main counts as unchecked")
+            return None, out
         failing = failing_tests(out)
         known = self.flaky_tests()
         if failing and all(t in known for t in failing):
@@ -3614,6 +3642,24 @@ class Pool:
                 "re-scope it or leave it"
             )
 
+    def check_disk(self) -> None:
+        """Tell the monitor once when the scratch root's file system has under 5% of its
+        space or inodes free, and once when it recovers. In run 9 /tmp ran out of inodes
+        with 44% of its space free, and checks failed for a quarter of an hour unnoticed."""
+        try:
+            root = config.scratch_root()
+            v = os.statvfs(root if root.exists() else root.parent)
+        except OSError:
+            return
+        low = [what for what, free, total in (("space", v.f_bavail, v.f_blocks), ("inodes", v.f_favail, v.f_files))
+               if total and free / total < 0.05]
+        if low and not self.disk_low:
+            self.event(f"the file system under {root} is nearly full ({' and '.join(low)} under 5% free): "
+                       "checks will fail there until it is cleared")
+        elif self.disk_low and not low:
+            self.event(f"the file system under {root} has room again")
+        self.disk_low = bool(low)
+
     def check_files(self) -> None:
         """Tell the monitor when a file the loop relies on goes missing from the shared
         checkout, and when it is back: POOL_REQUIRED_FILES, by default .env when live
@@ -3662,6 +3708,7 @@ class Pool:
             self.track_blocked(st, now)
             self.ask_decompose(st)
             self.check_files()
+            self.check_disk()
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)
         started = [u for u in started if self.start(u)]  # none once stopping
