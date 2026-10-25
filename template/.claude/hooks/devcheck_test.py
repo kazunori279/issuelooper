@@ -155,6 +155,22 @@ def test_change_key_ignores_where_the_change_sits() -> None:
           devcheck.change_key(a), devcheck.change_key(blank))
     indented = a.replace("+added", "+    added")
     check("indentation does", devcheck.change_key(a) == devcheck.change_key(indented), False)
+    # Cohort 52, PRs 98 and 101: the same own lines, aligned differently by git once the
+    # base moved (a replaced block shown as two hunks, or one hunk in another order).
+    head = ("diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1,4 +1,4 @@\n-def f():\n+def f(x):\n"
+            "-    return 1\n+    return x\n keep\n@@ -9,2 +9,3 @@\n ctx\n+log()\n" + a)
+    aligned = (a + "diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1,5 +1,6 @@\n-def f():\n-    return 1\n"
+               "+def f(x):\n+log()\n+    return x\n keep\n")
+    check("the same lines, aligned and ordered differently by git: the same key",
+          devcheck.change_key(head), devcheck.change_key(aligned))
+    moved_line = aligned.replace("+log()\n", "").replace("+    return x\n", "+    return x\n+log2()\n")
+    check("a line that really changed: another key", devcheck.change_key(head) == devcheck.change_key(moved_line), False)
+    swapped = aligned.replace("-    return 1\n", "").replace("+    return x\n", "+    return x\n-    return 1\n")
+    check("a removed line still counts as removed, wherever git shows it",
+          devcheck.change_key(head), devcheck.change_key(swapped))
+    flipped = aligned.replace("+log()\n", "-log()\n")
+    check("adding a line and removing it are different changes",
+          devcheck.change_key(head) == devcheck.change_key(flipped), False)
 
 
 def test_a_passing_check_writes_its_record() -> None:

@@ -107,19 +107,26 @@ def git(root: str, *args: str, stdin: str | None = None) -> str | None:
 
 
 def change_key(diff: str) -> str:
-    """A hash of what a diff changes: each file's name and its added and removed
-    lines, in order. Context lines, line numbers and blob ids are left out, so the
-    same change on a moved base keeps its key; so are blank lines and trailing
-    whitespace, which resolving a rebase conflict adds or drops between two blocks
-    (every Gate 7 hand-back in one run was a single added blank line)."""
-    keep = []
+    """A hash of what a diff changes: each file's name and its added and removed lines,
+    each as a sorted list, so the order git aligns them in does not count. Context
+    lines, line numbers and blob ids are left out, so the same change on a moved base
+    keeps its key; so are blank lines and trailing whitespace, which resolving a rebase
+    conflict adds or drops between two blocks (every Gate 7 hand-back in one run was a
+    single added blank line). In another run git aligned the same lines differently
+    once the base moved (PRs 98 and 101), and the in-order key handed both back."""
+    files: dict[str, tuple[list[str], list[str]]] = {}
+    cur = None
     for ln in diff.splitlines():
         if ln.startswith("diff --git "):
-            keep.append(ln)
-        elif ln.startswith(("+++", "---")):
+            cur = files.setdefault(ln, ([], []))
+        elif ln.startswith(("+++", "---")) or cur is None:
             continue
         elif ln.startswith(("+", "-")) and ln[1:].strip():
-            keep.append(ln.rstrip())
+            cur[ln[0] == "-"].append(ln.rstrip())
+    keep = []
+    for name in sorted(files):
+        added, removed = files[name]
+        keep += [name, *sorted(added), *sorted(removed)]
     return hashlib.sha256("\n".join(keep).encode()).hexdigest()[:20]
 
 
