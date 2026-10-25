@@ -1911,7 +1911,17 @@ def check_pr_merge(command: str) -> None:
 #
 # The sha is where devcheck.py ran. It is the head, or an earlier head whose
 # recorded change key equals the head's (a rebase that only moved the branch).
-DEVCHECK_LINE = re.compile(r"(?i)\bLive\s+check\b[*`:\s]*([0-9a-fA-F]{7,40})\b")
+# A `Live check:` field and its sha, in the forms devcheck.BODY_LINE rewrites.
+DEVCHECK_LINE = re.compile(r"(?im)^[ \t>*-]*(?:\*\*)?Live[ \t]+check(?:\*\*)?:[*`\s]*([0-9a-fA-F]{7,40})\b")
+
+
+def live_check_line(body: str) -> re.Match | None:
+    """The body's last `Live check:` sha, the newest when a stale one was left above it
+    (devcheck.py --update-pr leaves one; PR #75 had two and the first was read)."""
+    found = list(DEVCHECK_LINE.finditer(body))
+    return found[-1] if found else None
+
+
 DEVCHECK_WAIVER = re.compile(
     r"(?i)\bLive\s+check\b[*`:\s]*waived\s*[-–—:]\s*"
     r"(no\s+visible\s+change|docs\s+only|loop/process|owner\s+ruling)\b"
@@ -1986,7 +1996,7 @@ def devcheck_gate(
 
     if devcheck_waiver_ok(body, scope, target):
         return
-    m = DEVCHECK_LINE.search(body)
+    m = live_check_line(body)
     if not m:
         block(
             f"Gate 7 (live check): {target} has no `Live check:` line, and {scope[1]}.\n\n"
@@ -2367,7 +2377,7 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
     # Gate 7, as far as it can be told before the PR exists: the issue's labels and
     # the files the branch changes. The merge gate checks the record against the head.
     if devcheck_on():
-        m_live = DEVCHECK_LINE.search(body)
+        m_live = live_check_line(body)
         if m_live and not DEVCHECK_WAIVER.search(body):
             import devcheck
 

@@ -323,6 +323,20 @@ def test_update_pr_writes_the_line() -> None:
     state.write_text("<!-- worker -->\nFixes #4\n")
     run(repo, env_for(tmp, CLAIM_GH=str(gh)), "--script", OK_SCRIPT, "--update-pr", "4")
     check("or appends it", f"- **Live check:** {head} pass" in state.read_text(), True)
+    # PR #75: a worker's plain line stayed above the new bold one, and gate 7 read it.
+    state.write_text("Fixes #4\nLive check: 73c1601 pass\n- **Sweep SHA:** abc\n- **live check:** 1111111 pass\n")
+    run(repo, env_for(tmp, CLAIM_GH=str(gh)), "--script", OK_SCRIPT, "--update-pr", "4")
+    body = state.read_text()
+    check("a plain line and a bold one: one line left, the new one, in the first one's place",
+          (body.lower().count("live check"), "73c1601" in body, "1111111" in body,
+           body.splitlines()[1], "- **Sweep SHA:** abc" in body),
+          (1, False, False, f"- **Live check:** {head} pass (script 1)", True))
+    state.write_text("Fixes #4\nLive check passed on staging yesterday.\n**Live check**: 2222222 pass\n")
+    run(repo, env_for(tmp, CLAIM_GH=str(gh)), "--script", OK_SCRIPT, "--update-pr", "4")
+    body = state.read_text()
+    check("prose about a live check is not a field and stays; `**Live check**:` is one and is rewritten",
+          ("Live check passed on staging yesterday." in body, "2222222" in body,
+           f"- **Live check:** {head} pass (script 1)" in body), (True, False, True))
 
 
 def main() -> int:

@@ -62,7 +62,11 @@ sys.path.insert(0, str(HERE))
 import config  # noqa: E402
 
 SELF = ".claude/hooks/devcheck.py"
-BODY_LINE = re.compile(r"(?im)^([ \t>*-]*\*\*Live check:\*\*[ \t]*).*$")
+# Any `Live check:` field, bold or not (`Live check:`, `**Live check:**`, `**Live check**:`),
+# in any case: a worker's plain one was left in place beside a new bold one, and gate 7
+# read the stale sha (PR #75). The colon makes it a field: prose about a live check stays.
+# role_guard.DEVCHECK_LINE reads the same forms.
+BODY_LINE = re.compile(r"(?im)^[ \t>*-]*(?:\*\*)?Live[ \t]+check(?:\*\*)?:.*$\n?")
 _GIT_SCRUB = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -375,7 +379,12 @@ def update_pr(pr: str, sha: str, summary: str) -> int:
     line = f"- **Live check:** {sha} pass ({summary})"
     body = done.stdout
     if BODY_LINE.search(body):
-        body = BODY_LINE.sub(lambda m: line, body, count=1)
+        seen = []  # the first line becomes the new one, any other goes
+
+        def one(m: re.Match) -> str:
+            seen.append(m)
+            return "" if len(seen) > 1 else line + ("\n" if m.group(0).endswith("\n") else "")
+        body = BODY_LINE.sub(one, body)
     else:
         body = body.rstrip("\n") + f"\n{line}\n"
     config.scratch_root().mkdir(parents=True, exist_ok=True)

@@ -2195,6 +2195,8 @@ def test_devcheck_gate() -> None:
     write_devcheck_record(head)
     verdict, _ = merge({"body": body(f"- **Live check:** {head[:12]} pass\n"), "files": src})
     check("a passing record at the head merges", verdict, "allow")
+    verdict, _ = merge({"body": body(f"Live check: 73c1601 pass\n- **Live check:** {head} pass\n"), "files": src})
+    check("a stale plain line above the current one: the last line is read (PR #75)", verdict, "allow")
     write_devcheck_record(head, status="fail")
     verdict, reason = merge({"body": body(f"- **Live check:** {head} pass\n"), "files": src})
     check("a failed check does not", (verdict, "failed" in reason), ("refuse", True))
