@@ -208,6 +208,13 @@ def test_a_passing_check_writes_its_record() -> None:
         [s["name"] for s in record(env, new)["steps"]],
         ["smoke", "script 1"],
     )
+    first = pathlib.Path(record(env, head)["scripts"][0]).name
+    (repo / "src" / "app.txt").write_text((repo / "src" / "app.txt").read_text() + "and another\n")
+    git(repo, "commit", "-q", "-am", "and another")
+    run(repo, env, "--rerun", new[:12])
+    again = git(repo, "rev-parse", "HEAD")
+    check("a rerun of a rerun keeps the script's name (run 8: script-1-script-1-...)",
+          pathlib.Path(record(env, again)["scripts"][0]).name, first)
 
 
 def test_failures_are_recorded_and_exit_1() -> None:

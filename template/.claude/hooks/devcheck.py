@@ -270,7 +270,8 @@ def check(root: str, scripts: list[pathlib.Path], port: int) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     saved = []
     for i, s in enumerate(scripts, 1):
-        copy = out / f"script-{i}-{s.name}"
+        # A rerun copies copies: strip their prefix, or names nest (script-1-script-1-...).
+        copy = out / f"script-{i}-{re.sub(r'^(?:script-\d+-)+', '', s.name)}"
         shutil.copyfile(s, copy)
         saved.append(copy)
     env = dict(
