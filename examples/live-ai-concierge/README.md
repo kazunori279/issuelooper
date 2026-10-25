@@ -80,7 +80,7 @@ into their trees; without it, the `needs:live` issues cannot be verified.
 
 ```bash
 cd concierge
-herdr --session concierge
+herdr --session concierge     # your repository's name, as create.sh's last lines say
 ```
 
 In the herdr pane:
