@@ -191,8 +191,8 @@ def take_slot(lock: str, slots: int, deadline_s: float) -> tuple[int, int] | Non
 
 
 def stop_group(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
+    # The whole group, even when its leader is gone: `uv run` exiting first left the app
+    # server it started still running.
     try:
         os.killpg(proc.pid, signal.SIGTERM)
         proc.wait(timeout=10)

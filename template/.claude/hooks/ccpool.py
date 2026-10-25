@@ -1416,6 +1416,50 @@ def process_cwds() -> dict[int, str]:
     return parse_lsof(r.stdout)
 
 
+def kill_in(prefixes: tuple[str, ...]) -> list[dict]:
+    """Kill the processes whose working directory is at or under one of `prefixes`
+    (matched as `cwd + "/"`, so a worktree path with a trailing / matches itself and
+    nothing beside it): SIGTERM, then SIGKILL after 5 s. Matched by working directory
+    alone, never by name; the supervisor is never one of them. Returns what was killed."""
+    if not prefixes:
+        return []
+    spare = {1, os.getpid(), os.getppid()}
+    found = {pid: cwd for pid, cwd in process_cwds().items()
+             if pid not in spare and (cwd + "/").startswith(prefixes)}
+    procs = []
+    for pid, cwd in found.items():
+        try:
+            cmd = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            cmd = ""
+        procs.append({"pid": pid, "cwd": cwd, "cmd": cmd.strip()[:200]})
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 5
+    while time.time() < deadline and any(pid_alive(p) for p in found):
+        time.sleep(0.2)
+    for pid in found:
+        if pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    return procs
+
+
+def remove_worktree(root: str, wt: str, log=None) -> None:
+    """Remove one of the supervisor's own worktrees, after killing what still runs in
+    it. Its checks left app servers behind (a test fixture stopped `uv run` but not the
+    server under it): 109 at the end of run 9, 12.3 GB, in main-<sha>, mrg-<pr>-sweep
+    and mrg-<pr>-auto, which worker cleanup never looked at."""
+    procs = kill_in((wt.rstrip("/") + "/",))
+    if procs and log:
+        log("leftovers_killed", path=wt, processes=procs)
+    subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+
+
 def pid_alive(pid: int) -> bool:
     """Whether pid runs (a zombie, already dead and waiting for its parent, does not)."""
     try:
@@ -1833,35 +1877,11 @@ class Session(threading.Thread):
         test runs a session started with setsid or nohup leave its process group and
         outlive it (five were found hours after their sessions). Matched by working
         directory alone, never by name; the supervisor is never one of them."""
-        prefixes = tuple(self.scratch_prefixes())
-        if not prefixes:
+        procs = kill_in(tuple(self.scratch_prefixes()))
+        if not procs:
             return []
-        spare = {1, os.getpid(), os.getppid()}
-        found = {pid: cwd for pid, cwd in process_cwds().items() if pid not in spare and cwd.startswith(prefixes)}
-        if not found:
-            return []
-        procs = []
-        for pid, cwd in found.items():
-            try:
-                cmd = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-            except OSError:
-                cmd = ""
-            procs.append({"pid": pid, "cwd": cwd, "cmd": cmd.strip()[:200]})
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-        deadline = time.time() + 5
-        while time.time() < deadline and any(pid_alive(p) for p in found):
-            time.sleep(0.2)
-        for pid in found:
-            if pid_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
         self.pool.log("leftovers_killed", session=self.seq, role=self.unit.role, processes=procs)
-        return sorted(found)
+        return sorted(p["pid"] for p in procs)
 
     def kill(self):
         if self.proc and self.proc.poll() is None:
@@ -2219,7 +2239,7 @@ class Session(threading.Thread):
         root = str(repo_root())
         main = self.git(root, "rev-parse", "origin/main").stdout.strip()
         wt = scratch(f"fresh-{pr}")
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        remove_worktree(root, wt, self.pool.log)
         try:
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
                 return ""  # cannot tell; the gates decide
@@ -2266,20 +2286,20 @@ class Session(threading.Thread):
             self.pool.failed_try(n)
             return "breaks main once merged (handed back)"
         finally:
-            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+            remove_worktree(root, wt, self.pool.log)
 
     def main_ok(self, main: str, env: dict) -> bool:
         """fast_check on main itself, once per sha."""
         cache = self.pool.main_checks
         if main not in cache:
             root, wt = str(repo_root()), scratch(f"fresh-main-{main[:12]}")
-            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+            remove_worktree(root, wt, self.pool.log)
             try:
                 if self.git(root, "worktree", "add", "-q", "--detach", wt, main).returncode != 0:
                     return True
                 cache[main] = self.fast_check(wt, env)[0]
             finally:
-                subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+                remove_worktree(root, wt, self.pool.log)
         return cache[main]
 
     def red_main_hold(self, pr: int, head: str, branch: str) -> str:
@@ -2324,7 +2344,7 @@ class Session(threading.Thread):
         if not branch:
             return None, "no branch"
         root, wt = str(repo_root()), scratch(f"mrg-{pr}-devcheck")
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        remove_worktree(root, wt, self.pool.log)
         try:
             self.git(root, "fetch", "-q", "origin", branch)
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
@@ -2340,7 +2360,7 @@ class Session(threading.Thread):
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, str(exc)
         finally:
-            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+            remove_worktree(root, wt, self.pool.log)
 
     def devcheck_hand_back(self, pr: int, n: int, head: str, earlier: str, out: str) -> str:
         """The replayed live check failed on this head: back to a worker, with what failed."""
@@ -2373,7 +2393,7 @@ class Session(threading.Thread):
         if not branch:
             return False, ""
         root, wt = str(repo_root()), scratch(f"mrg-{pr}-sweep")
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        remove_worktree(root, wt, self.pool.log)
         try:
             self.git(root, "fetch", "-q", "origin", branch)
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
@@ -2386,7 +2406,7 @@ class Session(threading.Thread):
         except (OSError, subprocess.TimeoutExpired) as exc:
             return False, str(exc)
         finally:
-            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+            remove_worktree(root, wt, self.pool.log)
 
     def note_large_files(self, pr: int) -> None:
         """Measure the source files this PR touched on main; report the long ones. Source
@@ -2425,7 +2445,7 @@ class Session(threading.Thread):
             return "skipped (no branch)"
         root = str(repo_root())
         wt = scratch(f"mrg-{pr}-auto")
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+        remove_worktree(root, wt, self.pool.log)
         try:
             for attempt in range(3):  # other units fetch into the same .git (ref lock)
                 f = self.git(root, "fetch", "-q", "origin", "main", branch)
@@ -2473,7 +2493,7 @@ class Session(threading.Thread):
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
             return f"failed ({str(exc)[:160]})"
         finally:
-            subprocess.run(["git", "-C", root, "worktree", "remove", "--force", wt], capture_output=True)
+            remove_worktree(root, wt, self.pool.log)
             subprocess.run(["git", "-C", root, "branch", "-D", f"auto-rebase-{pr}"], capture_output=True)
 
     def additive_conflict(self, wt: str, path: str) -> bool:
@@ -3088,7 +3108,7 @@ class Pool:
 
         def git(*a):
             return subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, timeout=300)
-        git("worktree", "remove", "--force", wt)
+        remove_worktree(root, wt, self.log)
         try:
             for attempt in range(3):  # other units fetch into the same .git (ref lock)
                 if git("fetch", "-q", "origin", "main").returncode == 0:
@@ -3108,7 +3128,7 @@ class Pool:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, str(exc)
         finally:
-            git("worktree", "remove", "--force", wt)
+            remove_worktree(root, wt, self.log)
 
     def commits_since(self, old: str, new: str) -> list[str]:
         root = str(repo_root())
@@ -3743,6 +3763,12 @@ class Pool:
         finally:
             with self.lock:
                 self.owned.discard(proc)
+            # What it started and left in its process group goes with it (an app server
+            # a test fixture started and did not stop).
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
         return subprocess.CompletedProcess(args, proc.returncode, out or "", err or "")
 
 

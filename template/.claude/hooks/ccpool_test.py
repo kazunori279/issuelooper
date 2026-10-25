@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import socket
 import socketserver
 import subprocess
@@ -3157,6 +3158,41 @@ def git_repo(d: pathlib.Path):
     g("config", "user.name", "t")
     g("config", "user.email", "t@t")
     return work, g
+
+
+def test_the_supervisors_checks_leave_no_process_behind() -> None:
+    """Run 9: the main check, re-sweeps and auto-rebases left 109 app servers (12.3 GB):
+    a test fixture stopped `uv run`, not the server under it, and worker cleanup never
+    looked at the supervisor's own worktrees."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-reap-"))
+    try:
+        work, g = git_repo(d)
+        (work / "a").write_text("a\n")
+        g("add", "a")
+        g("commit", "-qm", "a")
+        wt, beside = d / "main-abc", d / "main-abc2"
+        g("worktree", "add", "-q", "--detach", str(wt))
+        beside.mkdir()
+        procs = [subprocess.Popen(["sleep", "60"], cwd=str(c), start_new_session=True) for c in (wt, wt / ".", beside)]
+        logged = []
+        ccpool.remove_worktree(str(work), str(wt), lambda kind, **kw: logged.append((kind, len(kw["processes"]))))
+        check("what runs in the worktree is killed before it is removed, a directory beside it is left alone",
+              (procs[0].wait(timeout=10) != 0, procs[1].wait(timeout=10) != 0, procs[2].poll(), wt.exists(), logged),
+              (True, True, None, False, [("leftovers_killed", 2)]))
+        procs[2].kill()
+        h = Rig(state())
+        pid_file = d / "pid"
+        r = h.pool.run_owned(["bash", "-c", f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}; echo started"], 30)
+        child = int(pid_file.read_text())
+        for _ in range(50):
+            if not ccpool.pid_alive(child) or open(f"/proc/{child}/stat").read().split()[2] == "Z":
+                break
+            time.sleep(0.1)
+        check("a check's own process group goes when it ends (the server a fixture left)",
+              (r.stdout.strip(), not ccpool.pid_alive(child) or open(f"/proc/{child}/stat").read().split()[2] == "Z"),
+              ("started", True))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_worker_prompt_carries_the_issue_and_a_file_map() -> None:

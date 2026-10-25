@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 SCRIPT = HERE / "devcheck.py"
@@ -254,6 +256,30 @@ def test_no_record_without_a_clean_commit() -> None:
         list((tmp / "records").glob("*.json")) if (tmp / "records").is_dir() else [],
         [],
     )
+
+
+def test_stop_group_reaps_after_its_leader_exits() -> None:
+    """`uv run` exiting first left the app server it had started still running."""
+    pid_file = pathlib.Path(tempfile.mkdtemp(prefix="devcheck-group-")) / "pid"
+    try:
+        proc = subprocess.Popen(["bash", "-c", f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}"],
+                                start_new_session=True)
+        proc.wait(timeout=10)
+        child = int(pid_file.read_text())
+        devcheck.stop_group(proc)
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+                state = pathlib.Path(f"/proc/{child}/stat").read_text().split()[2]
+            except (OSError, IndexError):
+                state = "gone"
+            if state in ("gone", "Z"):
+                break
+            time.sleep(0.1)
+        check("the server its leader left behind is stopped", state in ("gone", "Z"), True)
+        devcheck.stop_group(proc)  # nothing left: no error
+    finally:
+        shutil.rmtree(pid_file.parent, ignore_errors=True)
 
 
 def test_refusals() -> None:

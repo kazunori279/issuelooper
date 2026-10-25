@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import signal
 import socket
 import subprocess
 import time
@@ -28,7 +29,17 @@ def server_url(tmp_path_factory):
     # the key-less path (R-MAP-3). Set here, not removed: load_dotenv() keeps a value
     # that is already in the environment, even an empty one.
     env["GOOGLE_MAPS_API_KEY"] = ""
-    proc = subprocess.Popen(["uv", "run", "concierge", "--port", str(port)], cwd=REPO, env=env)
+    # In a session of its own, stopped as a group: `uv run` starts the server as its child,
+    # and stopping uv alone left the server running (109 of them after one six-hour run).
+    proc = subprocess.Popen(["uv", "run", "concierge", "--port", str(port)], cwd=REPO, env=env,
+                            start_new_session=True)
+
+    def stop(sig: int) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
     url = f"http://127.0.0.1:{port}"
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -38,11 +49,15 @@ def server_url(tmp_path_factory):
         except OSError:
             time.sleep(0.3)
     else:
-        proc.kill()
+        stop(signal.SIGKILL)
         raise RuntimeError("server did not start")
     yield url
-    proc.terminate()
-    proc.wait(timeout=10)
+    stop(signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        stop(signal.SIGKILL)
+        proc.wait(timeout=10)
 
 
 @pytest.fixture(scope="session")
