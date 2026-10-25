@@ -1544,12 +1544,13 @@ def test_main_check_reports_a_red_main() -> None:
     h.step()
     h.st = state(main="3" * 40)
     h.step()
-    check("one check at a time", swept, ["1", "2"])
+    check("one check at a time (a red one runs twice: a pass the second time would be a flake)",
+          swept, ["1", "1", "2"])
     gate.set()
     settle()
     h.step()
     settle()
-    check("then the newest main only, not the ones in between", swept, ["1", "2", "3"])
+    check("then the newest main only, not the ones in between", swept, ["1", "1", "2", "2", "3"])
     log = calls()
     check("still red on the same tests (2): no second issue and no comment",
           (log.count("issue create"), log.count("issue comment")), (1, 1))
@@ -2673,6 +2674,55 @@ def test_a_flaky_red_main_gets_an_issue() -> None:
           (["issue create --title Flaky test: tests/e2e/test_issue_14.py::test_weather_card --label type:bug "
             "--label P1 --label stage:triage"], True))
     check("red and green after a commit that touched it: no second one", log.count("Flaky test:"), 1)
+
+
+def test_known_flaky_tests_do_not_turn_main_red() -> None:
+    """Run 8: tests the supervisor had filed as flaky (#92, #135) turned main red again,
+    holding merges, and PR #107 was handed back for one."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-knownflaky-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_LOG)
+    gh.chmod(0o755)
+    (d / "gh.list").write_text(json.dumps([{"number": 92, "title": "Flaky test: tests/unit/test_a.py::test_x",
+                                            "body": "- `tests/unit/test_a.py::test_x`", "comments": []}]))
+    h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
+    flaky = "FAILED tests/unit/test_a.py::test_x - boom\n== sweep is red ==\n"
+    other = "FAILED tests/unit/test_b.py::test_y - boom\n== sweep is red ==\n"
+    runs = {"1": [(False, flaky)], "2": [(False, other), (True, "45 green")], "3": [(False, other), (False, other)]}
+    h.pool.sweep_main = lambda sha: runs[sha[0]].pop(0)
+    h.pool.commits_since = lambda old, new: []
+    h.pool.touched = lambda old, new, paths: []
+    for k in "123":
+        h.st = state(main=k * 40)
+        h.step()
+        for _ in range(100):
+            if not h.pool.main_check_running:
+                break
+            time.sleep(0.05)
+        if k == "1":
+            log = (d / "gh.log").read_text()
+            check("only a known flaky test failed: main green, a comment on its issue, no `main is red`",
+                  (h.pool.main_check_last["ok"], "issue comment 92" in log, "--title main is red" in log),
+                  (True, True, False))
+        if k == "2":
+            log = (d / "gh.log").read_text()
+            check("another test failed and passed on the second run: main green, the test reported as flaky",
+                  (h.pool.main_check_last["ok"], "--title main is red" in log,
+                   "passed when the check ran again" in log), (True, False, True))
+    check("failed twice: main red, as before",
+          (h.pool.main_check_last["ok"], "--title main is red" in (d / "gh.log").read_text()),
+          (False, True))
+    # A PR whose re-sweep fails only a known flaky test is held, not handed back.
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    refuse = "echo '{\"decision\": \"block\", \"reason\": \"does not match Sweep SHA\"}'\n"
+    real = ccpool.Pool.flaky_tests
+    ccpool.Pool.flaky_tests = lambda self, max_age=600: {"tests/unit/test_issue_50.py::test_cli_exits": 135}
+    try:
+        outcome, _, log, pool = resweep_session(stale, refuse, sweeps=[(False, RED_SWEEP), (False, RED_SWEEP)])
+    finally:
+        ccpool.Pool.flaky_tests = real
+    check("a re-sweep red only on a known flaky test: held, not handed back",
+          (outcome, "pr comment" in log), ("held (the re-sweep failed only known flaky tests: #135)", False))
 
 
 GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "

@@ -94,8 +94,11 @@ fails the check too, in which case nobody is blamed and the gates decide.
 
 What the quick check leaves out can still break `main`. After `main` moves, the
 supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
-background, one run at a time. A red `main` tells the monitor and files an issue
-titled `main is red: <failing tests>` (P0) with the failing tests, the commits since
+background, one run at a time. A failure only in tests that have an open `Flaky test:`
+issue counts as green (the issue gets a comment), and any other failure runs the suite
+once more: a pass then counts as green and the tests are filed as flaky. A red `main`
+tells the monitor and files an issue titled `main is red: <failing tests>` (P0) with
+the failing tests, the commits since
 the last green `main` and the end of the output; the next green `main` closes it.
 Until it is green, only a PR built on that red `main` merges (rebased onto it, so
 its own green sweep shows the result is not red; the fix itself is such a PR);

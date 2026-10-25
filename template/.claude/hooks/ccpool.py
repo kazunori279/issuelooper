@@ -144,7 +144,11 @@ MAIN CHECK
 With POOL_MAIN_CHECK (on by default when SWEEP_COMMAND is set), each time origin/main
 moves the supervisor runs the full check suite on it in a worktree (sweep_locked.py
 --lane main: its own lock, not one of the SWEEP_SLOTS), in the background, one run at a time: a
-main that moved during a run is not checked, only the newest. A red main tells the
+main that moved during a run is not checked, only the newest. A check that fails only
+tests named in an open `Flaky test:` issue counts as green and comments there; any
+other failure is run once more, and a pass then counts as green and reports the tests
+as flaky. A PR whose re-sweep or merged-tree check fails only known flaky tests is held,
+not handed back. A red main tells the
 monitor and files an issue `main is red: <first failing tests>` (type:bug, P0,
 stage:triage) with the failing tests, the commits since the last green main and the
 end of the output, or comments on the one already open; the next green main closes
@@ -2077,10 +2081,25 @@ class Session(threading.Thread):
                         f"({', '.join(names) or 'no test named'}): flaky; tried again on a later poll")
         return f"held (the {what} failed twice, differently: flaky)"
 
+    def known_flaky_hold(self, pr: int, what: str, out: str) -> str:
+        """'' unless every test that failed has an open `Flaky test:` issue: then the PR
+        is held for a later try, not handed back (PR #107 was handed back for one)."""
+        failing = failing_tests(out)
+        known = self.pool.flaky_tests()
+        if not failing or not all(t in known for t in failing):
+            return ""
+        issues = ", ".join(f"#{n}" for n in sorted({known[t] for t in failing}))
+        self.pool.event(f"PR #{pr} not handed back: its {what} failed only known flaky tests "
+                        f"({', '.join(failing[:2])}; {issues}); tried again on a later poll")
+        return f"held (the {what} failed only known flaky tests: {issues})"
+
     def sweep_hand_back(self, pr: int, n: int, head: str, out: str) -> str:
         """Hand the PR back for its red sweep, with what failed. Handed back by the gates
         instead, the comment said "does not match Sweep SHA" or "missing the green line",
         and the worker had to find the failing tests itself (PRs #110, #126, #140)."""
+        held = self.known_flaky_hold(pr, "re-sweep", out)
+        if held:
+            return held
         failing = failing_tests(out)
         self.hand_back(pr, n, (
             f"**Not merged: the sweep at this head ({head[:8]}) is red.** The supervisor ran the full "
@@ -2166,6 +2185,9 @@ class Session(threading.Thread):
                 why = again if not ok else why
             if ok:
                 return ""
+            held = self.known_flaky_hold(pr, "merged-tree check", why)
+            if held:
+                return held
             if not self.main_ok(main, env):
                 # Main fails too, so the check cannot blame this PR; holding every merge
                 # would also hold the fix.
@@ -2592,6 +2614,7 @@ class Pool:
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
         self.red_failing: tuple = ()  # the failing tests last reported on it
         self.red_held: set = set()  # (pr, red main) pairs the monitor was told about
+        self.flaky_known: tuple[float, dict[str, int]] = (0.0, {})  # (read at, test -> its open Flaky issue)
         self.red_since = ""  # the first red main of the current red spell
         self.red_seen: list[str] = []  # every test that failed during it
         self.own_deployed = ""
@@ -2983,6 +3006,8 @@ class Pool:
     def check_main(self, sha: str):
         try:
             ok, out = self.sweep_main(sha)
+            if ok is False:
+                ok, out = self.second_look(sha, out)
             self.main_checked(sha, ok, out)
         except Exception as exc:  # noqa: BLE001 - a failed check is not a failed supervisor
             self.log("main_check_error", sha=sha[:12], error=str(exc)[:300])
@@ -3067,6 +3092,51 @@ class Pool:
                            capture_output=True, text=True, timeout=60)
         return r.stdout.split() if r.returncode == 0 else None
 
+    def flaky_tests(self, max_age: float = 600) -> dict[str, int]:
+        """The tests named in open `Flaky test:` issues (body and comments), each with its
+        issue; read again after max_age seconds."""
+        at, known = self.flaky_known
+        if time.time() - at < max_age:
+            return known
+        r = self.gh("issue", "list", "--state", "open", "--search", "Flaky test in:title",
+                    "--json", "number,title,body,comments")
+        try:
+            rows = [i for i in json.loads(r.stdout or "[]") if str(i.get("title", "")).startswith("Flaky test")]
+        except (ValueError, TypeError):
+            return known  # keep what was known; read again next time
+        known = {}
+        for i in rows:
+            text = "\n".join([str(i.get("body") or "")] + [str(c.get("body") or "") for c in i.get("comments") or []])
+            for t in re.findall(r"`([^`\s]+::[^`]+)`", text):
+                known.setdefault(t, i["number"])
+        self.flaky_known = (time.time(), known)
+        return known
+
+    def second_look(self, sha: str, out: str) -> tuple[bool | None, str]:
+        """A red main check, looked at again before it holds merges. When it fails only
+        tests with an open `Flaky test:` issue, main counts as green and that issue gets
+        a comment; otherwise the check runs once more, and a pass then makes the failures
+        flaky. Tests the supervisor had filed as flaky turned main red again twice in run
+        8, holding merges and handing PR #107 back."""
+        failing = failing_tests(out)
+        known = self.flaky_tests()
+        if failing and all(t in known for t in failing):
+            for n in sorted({known[t] for t in failing}):
+                self.gh("issue", "comment", str(n), "--body", (
+                    f"<!-- merger -->\nThese known flaky tests failed again on main at {sha[:8]}:\n\n"
+                    + "\n".join(f"- `{t}`" for t in failing if known[t] == n)
+                    + "\n\nNothing else failed, so main counts as green for merges. Each such failure "
+                    "still costs a full check run: make them reliable."))
+            self.log("main_check_flaky", sha=sha[:12], tests=failing[:5])
+            self.event(f"main {sha[:8]} failed only known flaky tests ({', '.join(failing[:2])}); "
+                       "counted as green, and their issue has a comment")
+            return True, out
+        again, out2 = self.sweep_main(sha)
+        if again:
+            self.report_flaky(sha, sha, failing)
+            return True, out2
+        return (False, out2) if again is False else (False, out)
+
     def report_flaky(self, red: str, green: str, failing: list[str]):
         """main went red and green again with no commit touching the failing tests' files:
         those tests are flaky. File an issue for them (or comment on the open one), so
@@ -3077,8 +3147,10 @@ class Pool:
         if not files or self.touched(red, green, files) != []:
             return
         names = ", ".join(tests[:2]) + (f" and {len(tests) - 2} more" if len(tests) > 2 else "")
-        body = (f"<!-- merger -->\nmain went red at {red[:8]} on these tests and green again at {green[:8]} with no "
-                "commit touching their files in between, so they fail by chance:\n\n"
+        how = (f"These tests failed on main at {red[:8]} and passed when the check ran again" if red == green else
+               f"main went red at {red[:8]} on these tests and green again at {green[:8]} with no "
+               "commit touching their files in between")
+        body = (f"<!-- merger -->\n{how}, so they fail by chance:\n\n"
                 + "\n".join(f"- `{t}`" for t in tests[:20])
                 + "\n\nMake them reliable (a fixed wait, a shared port or file, an order dependence, a race with "
                 "a server starting). Each flake turns main red, and the merged-tree check and re-sweeps run "
@@ -3097,6 +3169,7 @@ class Pool:
             m = re.search(r"/issues/(\d+)", c.stdout)
             what = f"filed #{m.group(1)}" if m else "could not file an issue"
         self.log("flaky", tests=tests[:5], red=red[:12], green=green[:12])
+        self.flaky_known = (0.0, self.flaky_known[1])  # read the issues again next time
         self.event(f"flaky test(s) {names}: main went red and green again with no change to them; {what}")
 
     def report_red(self, sha: str, failing: list[str], out: str):
