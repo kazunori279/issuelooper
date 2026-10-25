@@ -57,6 +57,38 @@ def parse(lines) -> list[dict]:
     return out
 
 
+def _proto(b: bytes) -> dict[int, list]:
+    """One level of a protobuf message: field number -> its varints and byte strings."""
+    out: dict[int, list] = {}
+    i = 0
+
+    def varint() -> int:
+        nonlocal i
+        v = shift = 0
+        while True:
+            x = b[i]
+            i += 1
+            v |= (x & 0x7F) << shift
+            shift += 7
+            if not x & 0x80:
+                return v
+
+    while i < len(b):
+        key = varint()
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            out.setdefault(field, []).append(varint())
+        elif wire == 2:
+            n = varint()
+            out.setdefault(field, []).append(b[i:i + n])
+            i += n
+        elif wire in (1, 5):
+            i += 8 if wire == 1 else 4
+        else:
+            raise ValueError(f"wire type {wire}")
+    return out
+
+
 class Cli:
     name = ""
     prompt_flag = ""
@@ -198,18 +230,53 @@ class Agy(Cli):
         return str(init.get("model") or e.get("model") or "")
 
     def usage(self, events):
-        # agy reports tokens in each result and no price.
+        # agy reports tokens in each result and no price. A turn that ends without one
+        # (killed at a timeout, or a stream stuck behind a step) left 42 sessions in run 8
+        # at zero: then the conversation's own record has every model call, and failing
+        # that the stream's finished steps carry theirs (they add up to the result's).
         out = {"input": 0, "output": 0, "thinking": 0, "cache_read": 0, "turns": 0, "cost_usd": None}
-        for e in events:
-            r = e.get("result") if e.get("event") == "result" else None
-            if not isinstance(r, dict):
-                continue
+        inits = sum(1 for e in events if self.is_init(e))
+        results = [e["result"] for e in events if e.get("event") == "result" and isinstance(e.get("result"), dict)]
+        if len(results) < inits:
+            whole = self.recorded_usage(self.session_id(events))
+            if whole is None:
+                results = [s for e in events if e.get("event") == "step_update"
+                           for s in [e.get("step_update") or {}] if s.get("state") == "DONE" and s.get("usage")]
+            else:
+                return {**out, **whole, "turns": inits}
+        for r in results:
             u = r.get("usage") or {}
-            out["turns"] += 1
             out["input"] += int(u.get("input_tokens") or 0)
             out["output"] += int(u.get("output_tokens") or 0)
             out["thinking"] += int(u.get("thinking_tokens") or 0)
             out["cache_read"] += int(u.get("cache_read_tokens") or 0)
+        out["turns"] = max(inits, sum(1 for e in events if e.get("event") == "result"))
+        return out
+
+    def recorded_usage(self, conv: str | None) -> dict | None:
+        """Tokens over every model call of the conversation, from agy's own record: one
+        gen_metadata row per call, its usage at field 1.4 (2 input, 3 output, 5 cache read,
+        9 thinking: the numbers its stream reports). None when there is no record."""
+        if not conv:
+            return None
+        db = self.conversations() / f"{conv}.db"
+        if not db.exists():
+            return None
+        out = {"input": 0, "output": 0, "thinking": 0, "cache_read": 0}
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = c.execute("select data from gen_metadata").fetchall()
+            finally:
+                c.close()
+            for (data,) in rows:
+                for call in _proto(data).get(1, []):
+                    for u in _proto(call).get(4, []):
+                        f = _proto(u)
+                        for key, num in (("input", 2), ("output", 3), ("cache_read", 5), ("thinking", 9)):
+                            out[key] += sum(v for v in f.get(num, []) if isinstance(v, int))
+        except (sqlite3.Error, ValueError, IndexError, TypeError):
+            return None
         return out
 
     def last_tool(self, events):
@@ -438,18 +505,33 @@ class Claude(Cli):
         return {"type": "user", "message": {"role": "user", "content": text}}
 
     def usage(self, events):
-        # Claude Code puts its own cost estimate in each result (total_cost_usd).
+        # Claude Code puts its own cost estimate in each result (total_cost_usd). A turn
+        # killed before its result counts its assistant messages' usage, each message once
+        # (a message's events repeat it).
         out = {"input": 0, "output": 0, "thinking": 0, "cache_read": 0, "turns": 0, "cost_usd": None}
-        for e in events:
-            if e.get("type") != "result":
-                continue
-            u = e.get("usage") or {}
-            out["turns"] += 1
+
+        def add(u: dict) -> None:
             out["input"] += int(u.get("input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
             out["output"] += int(u.get("output_tokens") or 0)
             out["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+
+        pending: dict[str, dict] = {}  # message id -> usage, in the turn since the last result
+        for e in events:
+            if e.get("type") == "assistant":
+                m = e.get("message") or {}
+                if m.get("usage"):
+                    pending[str(m.get("id") or len(pending))] = m["usage"]
+            if e.get("type") != "result":
+                continue
+            pending.clear()
+            out["turns"] += 1
+            add(e.get("usage") or {})
             if e.get("total_cost_usd") is not None:
                 out["cost_usd"] = round((out["cost_usd"] or 0) + float(e["total_cost_usd"]), 6)
+        if pending:
+            out["turns"] += 1
+            for u in pending.values():
+                add(u)
         return out
 
     def read(self, e):

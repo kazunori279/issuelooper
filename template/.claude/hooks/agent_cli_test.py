@@ -537,6 +537,65 @@ def test_agy_finished_unseen() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _pb(fields: list[tuple[int, object]]) -> bytes:
+    """A protobuf message from (field, int or bytes) pairs."""
+    def varint(v: int) -> bytes:
+        out = b""
+        while True:
+            out += bytes([(v & 0x7F) | (0x80 if v > 0x7F else 0)])
+            v >>= 7
+            if not v:
+                return out
+    out = b""
+    for f, v in fields:
+        out += varint(f << 3 | (0 if isinstance(v, int) else 2))
+        out += varint(v) if isinstance(v, int) else varint(len(v)) + v
+    return out
+
+
+def test_usage_without_a_result() -> None:
+    # Issue #4: 42 sessions in run 8 (stuck streams, timeouts) logged zero tokens.
+    import sqlite3
+    agy, claude = agent_cli.get("agy"), agent_cli.get("claude")
+    root = pathlib.Path(tempfile.mkdtemp(prefix="agy-usage-"))
+    old = os.environ.get("AGY_CONVERSATIONS_DIR")
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(root)
+    try:
+        killed = [{"event": "init", "conversation_id": "u1"},
+                  {"event": "step_update", "step_update": {"step_index": 1, "state": "DONE", "step_type": "agent_response",
+                                                           "usage": {"input_tokens": 100, "output_tokens": 10,
+                                                                     "thinking_tokens": 5, "cache_read_tokens": 50}}},
+                  {"event": "step_update", "step_update": {"step_index": 2, "state": "ACTIVE", "step_type": "tool"}}]
+        check("agy: no result and no record: the stream's finished steps",
+              agy.usage(killed), {"input": 100, "output": 10, "thinking": 5, "cache_read": 50, "turns": 1,
+                                  "cost_usd": None})
+        c = sqlite3.connect(root / "u1.db")
+        c.execute("create table gen_metadata (idx integer primary key, data blob, size integer)")
+        for k, (i, o, cr, th) in enumerate(((100, 10, 50, 5), (300, 20, 150, 7))):
+            usage = _pb([(1, 999), (2, i), (3, o), (5, cr), (9, th), (10, 1)])
+            c.execute("insert into gen_metadata values (?, ?, 0)", (k, _pb([(1, _pb([(3, 999), (4, usage)]))])))
+        c.commit()
+        c.close()
+        check("agy: no result: every model call in agy's own record of the conversation",
+              agy.usage(killed), {"input": 400, "output": 30, "thinking": 12, "cache_read": 200, "turns": 1,
+                                  "cost_usd": None})
+        done = killed + [{"event": "result", "result": {"usage": {"input_tokens": 7, "output_tokens": 1}}}]
+        check("agy: with its result, the result counts, as before", (agy.usage(done)["input"], agy.usage(done)["turns"]),
+              (7, 1))
+    finally:
+        if old is None:
+            os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+        else:
+            os.environ["AGY_CONVERSATIONS_DIR"] = old
+        shutil.rmtree(root, ignore_errors=True)
+    msg = {"type": "assistant", "message": {"id": "m1", "usage": {"input_tokens": 40, "output_tokens": 4}}}
+    cut = [{"type": "system", "subtype": "init", "session_id": "s"},
+           {"type": "result", "usage": {"input_tokens": 10, "output_tokens": 1}, "total_cost_usd": 0.1},
+           msg, msg, {"type": "assistant", "message": {"id": "m2", "usage": {"input_tokens": 60, "output_tokens": 6}}}]
+    check("claude: a turn killed before its result counts its messages, each once",
+          claude.usage(cut), {"input": 110, "output": 11, "thinking": 0, "cache_read": 0, "turns": 2, "cost_usd": 0.1})
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
