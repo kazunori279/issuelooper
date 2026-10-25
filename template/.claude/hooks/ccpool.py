@@ -2208,6 +2208,12 @@ class Session(threading.Thread):
             if "shared checkout" in reason.lower():
                 self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
                 return "held (gate 0: the shared checkout is not clean)"
+            if "try again later" in reason.lower():
+                # The guard could not read GitHub or a file at the head: nothing about the
+                # PR. Handed back, PR #110 sent its issue to triage over one slow `gh pr view`.
+                self.pool.event(f"auto-merge of PR #{pr} held: the merge gates could not read what they "
+                                f"check ({reason.splitlines()[0][:200]}); tried again on a later poll")
+                return "held (the merge gates could not read GitHub)"
             self.hand_back(pr, n, "**Merge gates: refused.** Not merged.\n\n" + reason[:2500])
             gate = re.search(r"(?i)\bgate\s*(\d)", reason)
             self.pool.log("handback", pr=pr, issue=n, by=f"gate {gate.group(1)}" if gate else "gates",

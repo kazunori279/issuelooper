@@ -1995,6 +1995,11 @@ def test_auto_merge_paths() -> None:
         ("held (gate 0: the shared checkout is not clean)", []),
     )
     check("the monitor hears it", any("Gate 0" in e for e in pool.events), True)
+    outcome, log, _ = auto_session(json.dumps({"decision": "block", "reason": (
+        "PR #110 could not be read from GitHub (gh pr view failed, timed out or answered without a head), "
+        "so its merge gates cannot be checked. Not merged; try again later.")}))
+    check("GitHub could not be read (PR #110): held, not handed back",
+          (outcome, log), ("held (the merge gates could not read GitHub)", []))
     outcome, log, _ = auto_session(ALLOW, review_rc=1)
     check(
         "a review-gate reject stops before the merge gates",
