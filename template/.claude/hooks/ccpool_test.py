@@ -2458,6 +2458,9 @@ echo "https://github.com/o/r/issues/88"
     h4.pool.record_large({"src/big.py": 1200})
     check("rate limited once: waited out and filed", (h4.pool.book.split_filed, (limited / "n").read_text().strip(),
           any("issues/88" in e for e in h4.pool.events)), ({"src/big.py"}, "2", True))
+    waits = [json.loads(ln) for ln in (h4.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+             if '"gh_rate_wait"' in ln]
+    check("and the wait is logged, one line", [(w["command"], w["attempt"]) for w in waits], [("issue create --title", 1)])
     (limited / "n").unlink()
     (limited / "limit").write_text("9")
     h5 = Rig(state(), split_lines=900, gh=str(limited / "gh"), gh_rate_wait_s=0)

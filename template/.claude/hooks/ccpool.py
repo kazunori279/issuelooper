@@ -181,6 +181,7 @@ from __future__ import annotations
 import argparse
 import ast
 import collections
+import collections.abc
 import dataclasses
 import datetime as dt
 import glob
@@ -1325,7 +1326,8 @@ def repo_root() -> pathlib.Path:
 RATE_LIMITED = re.compile(r"(?i)secondary rate limit|abuse detection|submitted too quickly")
 
 
-def run_gh(cfg: "Config", args: tuple[str, ...], stdin: str | None = None) -> subprocess.CompletedProcess:
+def run_gh(cfg: "Config", args: tuple[str, ...], stdin: str | None = None,
+           log: collections.abc.Callable[..., None] | None = None) -> subprocess.CompletedProcess:
     """gh, retried after GitHub's secondary rate limit, which blocks content creation for
     a minute or more after a burst of writes. `gh issue create` has exited 0 on it with
     no URL, so the text counts on either stream."""
@@ -1334,7 +1336,10 @@ def run_gh(cfg: "Config", args: tuple[str, ...], stdin: str | None = None) -> su
                            cwd=repo_root())
         if attempt == 3 or not RATE_LIMITED.search(r.stderr + r.stdout):
             return r
-        time.sleep(cfg.gh_rate_wait_s * 2 ** attempt)
+        wait = cfg.gh_rate_wait_s * 2 ** attempt
+        if log:
+            log("gh_rate_wait", command=" ".join(args[:3]), wait_s=wait, attempt=attempt + 1)
+        time.sleep(wait)
     return r
 
 
@@ -1971,7 +1976,7 @@ class Session(threading.Thread):
 
     # --- units without an agent ---
     def gh(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-        return run_gh(self.pool.cfg, args, stdin)
+        return run_gh(self.pool.cfg, args, stdin, self.pool.log)
 
     def issue_thread(self, n: int) -> dict:
         """{"body": ..., "comments": [{"a": author, "b": body}, ...]} or {} if gh fails."""
@@ -3048,7 +3053,7 @@ class Pool:
 
     # --- main's own check ---
     def gh(self, *args: str) -> subprocess.CompletedProcess:
-        return run_gh(self.cfg, args)
+        return run_gh(self.cfg, args, log=self.log)
 
     def main_check_due(self, st: dict):
         """Start the full check of the newest origin/main, unless one is running. The
