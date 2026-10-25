@@ -395,6 +395,32 @@ def test_a_hold_spends_no_try() -> None:
            [e for e in h.pool.events if e.startswith("stuck:")]), (0, 0, []))
 
 
+def test_a_handed_back_head_is_not_merged_again() -> None:
+    """Run 9: PR #131 was handed back, and 2 s later a merge unit on the same head (main
+    had moved) ran from a poll that still showed stage:pr: a second comment, and its issue
+    counted as failed twice."""
+    h = Rig(state([iss(1, ["stage:pr"])], prs=[pr(11, 1)], main="1" * 40), gh="true")
+    started = h.step()
+    w = next(w for w in h.pool.sessions.values() if w.unit.key == started[0].key)
+    w.hand_back(11, 1, "**Not merged: it breaks main once merged.**")
+    h.finish(started[0].key, "breaks main once merged (handed back)")
+    h.st = state([iss(1, ["stage:pr"])], prs=[pr(11, 1)], main="2" * 40)
+    check("main moved, the poll still says stage:pr: the same head is not merged again", h.step(), [])
+    h.st = state([iss(1, ["stage:triage"])], prs=[pr(11, 1)], main="2" * 40)
+    started = h.step()
+    check("at stage:triage: a worker, as before", [(u.role, u.number) for u in started], [("worker", 1)])
+    h.finish(started[0].key, "ok")
+    h.st = state([iss(1, ["stage:pr"])], prs=[pr(11, 1)], main="3" * 40)
+    check("moved back to stage:pr without a push: tried again", [u.number for u in h.step()], [11])
+    h2 = Rig(state([iss(1, ["stage:pr"])], prs=[pr(11, 1)], main="1" * 40), gh="true")
+    started = h2.step()
+    w = next(w for w in h2.pool.sessions.values() if w.unit.key == started[0].key)
+    w.hand_back(11, 1, "x")
+    h2.finish(started[0].key, "breaks main once merged (handed back)")
+    h2.st = state([iss(1, ["stage:pr"])], prs=[pr(11, 1, head="c" * 40)], main="1" * 40)
+    check("a new head: merged as usual", [u.number for u in h2.step()], [11])
+
+
 def test_no_merger_while_its_worker_runs() -> None:
     h = Rig(state([iss(1, ["stage:triage"])]))
     h.step()

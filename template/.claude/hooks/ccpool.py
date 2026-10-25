@@ -696,6 +696,9 @@ class Book:
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
+        # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
+        # still shows stage:pr, and PR #131 was merged again 2 s later on the same head.
+        self.handed_back: dict[int, list] = {}
         self.paused: dict[str, float] = {}  # role -> until (crash breaker)
         self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
         self.quota_streak = 0  # pauses in a row without a session ending ok
@@ -838,6 +841,17 @@ def plan(
         if pr["draft"] or issue is None:
             continue
         labels = set(issue["labels"])
+        back = book.handed_back.get(pr["number"])
+        if back and back[0] != pr["head"]:
+            del book.handed_back[pr["number"]]  # a new head: new work
+            back = None
+        if back:
+            if "stage:pr" not in labels:
+                back[1] = True
+            elif not back[1]:
+                continue  # the state from before the hand-back
+            else:
+                del book.handed_back[pr["number"]]  # moved back to stage:pr: tried again
         if labels & (HOLDS | IGNORED) or "stage:pr" not in labels or f"wrk:{n}" in book.running:
             continue
         info = {
@@ -915,6 +929,8 @@ def plan(
         del book.unknown_since[k]
     for k in set(book.pr_heads) - seen_prs:
         del book.pr_heads[k]
+    for k in set(book.handed_back) - seen_prs:
+        del book.handed_back[k]
 
     # Never beside a running UX run: a slow run outlasts the gap, and the overlapping
     # runs test the same app and file the same findings.
@@ -2547,6 +2563,10 @@ class Session(threading.Thread):
         return True
 
     def hand_back(self, pr: int, n: int, text: str):
+        head = self.unit.info.get("head") or ""
+        if head:
+            with self.pool.lock:
+                self.pool.book.handed_back[pr] = [head, False]
         self.gh("pr", "comment", str(pr), "--body", f"<!-- merger -->\n{text}\n\n"
                 "Fix this on this branch, re-sweep, push and update the PR body; the supervisor "
                 "tries the merge again on the new head.")
