@@ -38,7 +38,11 @@ UNITS
           counted: a source file that conflicts in POOL_SPLIT_AFTER PRs within
           POOL_SPLIT_WINDOW_S, or grows past POOL_SPLIT_LINES on main, gets an
           issue to split it (at most POOL_SPLIT_PER_WINDOW per window,
-          POOL_SPLIT_MAX per run). reclaim: a stage:doing claim older than
+          POOL_SPLIT_MAX per run). A P0/P1 PR whose rebase was left to a merger
+          POOL_STARVE_AFTER (2) times on the same files is starving: merges of other
+          PRs that touch those files are held until it is no longer open or
+          POOL_STARVE_HOLD_S (3600) passes; of two starving PRs on one file, the
+          higher priority (then the one that conflicted first) waits for nobody. reclaim: a stage:doing claim older than
           CLAIM_STALE_MIN with no PR and no running worker goes back to the queue.
           requeue: an issue at stage:pr with no open PR for POOL_ORPHAN_PR_MIN
           (its PR was closed without a merge) goes back to stage:triage.
@@ -369,6 +373,8 @@ class Config:
     spec_gap_s: float = 2700
     unknown_s: float = 300
     split_after: int = 4
+    starve_after: int = 2  # conflicts left to a merger on the same files before a P0/P1 PR is starving
+    starve_hold_s: float = 3600  # how long merges that touch a starving PR's files wait for it at most
     split_window_s: float = 5400
     split_max: int = 8
     split_per_window: int = 1
@@ -466,6 +472,8 @@ class Config:
             spec_gap_s=gap_s("POOL_SPEC_GAP", 45),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
+            starve_after=env_int("POOL_STARVE_AFTER", 2),
+            starve_hold_s=float(e("POOL_STARVE_HOLD_S", "") or 3600),
             split_window_s=float(e("POOL_SPLIT_WINDOW_S", "5400")),
             split_max=env_int("POOL_SPLIT_MAX", 8),
             split_per_window=env_int("POOL_SPLIT_PER_WINDOW", 1),
@@ -701,6 +709,7 @@ class Book:
         self.clean: set[str] = set()  # keys whose session ended cleanly
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
         self.held_until: dict[str, float] = {}  # key -> when a unit that ended held is due again
+        self.hard_conflicts: dict[int, list] = {}  # PR -> [(time, files)] of rebases left to a merger
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
@@ -2180,7 +2189,7 @@ class Session(threading.Thread):
             return verdict
 
         branch = u.info.get("branch") or ""
-        held = self.red_main_hold(pr, head, branch)
+        held = self.red_main_hold(pr, head, branch) or self.starve_hold(pr, head, branch)
         if held:
             return held  # before the sweep: a held PR costs none
         swept = None  # this unit's re-sweep of the head: None (none yet), True or False
@@ -2433,6 +2442,19 @@ class Session(threading.Thread):
                 remove_worktree(root, wt, self.pool.log)
         return cache[main]
 
+    def starve_hold(self, pr: int, head: str, branch: str) -> str:
+        """Pool.starve_hold for the files this head changes since it forked off main."""
+        if not self.pool.starving:
+            return ""
+        self.behind_main(head, branch)  # fetches main and the branch
+        root = str(repo_root())
+        fork = self.git(root, "merge-base", "origin/main", head).stdout.strip()
+        files = set(self.git(root, "diff", "--name-only", fork, head).stdout.split()) if fork else set()
+        held = self.pool.starve_hold(pr, files)
+        if held:
+            self.note(held)
+        return held
+
     def red_main_hold(self, pr: int, head: str, branch: str) -> str:
         """'' unless main's latest full check is red and this head is not built on that main.
         In run 7 main was red for 25 minutes and four PRs merged meanwhile; one added a
@@ -2606,7 +2628,7 @@ class Session(threading.Thread):
                 bad = [f for f in conflicted if not self.additive_conflict(wt, f)]
                 if bad:
                     self.git(wt, "rebase", "--abort")
-                    self.pool.record_conflicts(pr, files_seen)
+                    self.pool.record_conflicts(pr, files_seen, hard=True)
                     self.note(f"left to a merger: conflicts in {', '.join(bad)}")
                     return "left to a merger (a hunk changes existing lines)"
                 for f in conflicted:
@@ -2820,6 +2842,7 @@ class Pool:
         self.red_failing: tuple = ()  # the failing tests last reported on it
         self.red_held: set = set()  # (pr, red main) pairs the monitor was told about
         self.disk_low = False  # the scratch root's file system was last seen nearly full
+        self.starving: dict[int, dict] = {}  # PR -> {"files", "since", "rank"}: see check_starving
         self.fast_timeouts: set = set()  # (pr, head) whose merged-tree check timed out once
         self.flaky_known: tuple[float, dict[str, int]] = (0.0, {})  # (read at, test -> its open Flaky issue)
         self.red_since = ""  # the first red main of the current red spell
@@ -2853,11 +2876,63 @@ class Pool:
             self.events.append(text)
         self.log("event", text=text)
 
-    def record_conflicts(self, pr: int, files) -> None:
+    def record_conflicts(self, pr: int, files, hard: bool = False) -> None:
+        """hard: the rebase was left to a merger (a hunk changes existing lines)."""
         now = self.clock()
         with self.lock:
             self.book.conflicts += [(now, f, pr) for f in files]
+            if hard:
+                self.book.hard_conflicts.setdefault(pr, []).append((now, frozenset(files)))
+                self.check_starving(pr, now)
         self.split_hot_files(now)
+
+    def check_starving(self, pr: int, now: float) -> None:
+        """A P0/P1 PR whose rebase was left to a merger POOL_STARVE_AFTER times on the same
+        files is starving: every merge that touches them moves main under it. In cohort
+        52, #143 ("near here", P1) waited 5 h 40 min through 3 merger sessions while 77
+        commits landed. Until it lands, is closed, or POOL_STARVE_HOLD_S passes, merges of
+        other PRs that touch those files wait (starve_hold)."""
+        if pr in self.starving or not self.cfg.starve_after:
+            return
+        counts = collections.Counter(f for _, files in self.book.hard_conflicts.get(pr, []) for f in files)
+        hot = {f for f, k in counts.items() if k >= self.cfg.starve_after}
+        st = self.prev or {}
+        p = next((x for x in st.get("prs", []) if x["number"] == pr), None)
+        issue = next((i for i in st.get("open", []) if p and i["number"] == pr_issue(p)), None)
+        prio = priority(issue["labels"]) if issue else 9
+        if not hot or prio > 1:
+            return
+        first = min(t for t, _ in self.book.hard_conflicts[pr])
+        self.starving[pr] = {"files": hot, "since": now, "rank": (prio, first, pr)}
+        self.log("starving", pr=pr, files=sorted(hot), priority=f"P{prio}")
+        self.event(f"PR #{pr} (P{prio}) conflicted {self.cfg.starve_after} times on {', '.join(sorted(hot)[:4])}: "
+                   "merges of other PRs that touch those files wait until it lands, is closed, or "
+                   f"{self.cfg.starve_hold_s / 60:.0f} minutes pass")
+
+    def track_starving(self, st: dict, now: float) -> None:
+        """End a starving PR's hold when it is no longer an open PR, or at the time limit."""
+        open_prs = {p["number"] for p in st.get("prs", [])}
+        for pr, s in list(self.starving.items()):
+            why = ("it is no longer open (merged or closed)" if pr not in open_prs else
+                   f"{self.cfg.starve_hold_s / 60:.0f} minutes passed" if now - s["since"] > self.cfg.starve_hold_s
+                   else "")
+            if why:
+                del self.starving[pr]
+                self.book.hard_conflicts.pop(pr, None)
+                self.log("starving_end", pr=pr, why=why)
+                self.event(f"merges that touch PR #{pr}'s files no longer wait for it: {why}")
+
+    def starve_hold(self, pr: int, files: set) -> str:
+        """'' unless the PR touches the files of a starving PR that is not itself and does
+        not rank below it (P0 before P1, then the one that started conflicting first):
+        two starving PRs on the same files never wait for each other."""
+        with self.lock:
+            mine = self.starving.get(pr)
+            for other, s in sorted(self.starving.items(), key=lambda kv: kv[1]["rank"]):
+                if other == pr or not files & s["files"] or (mine and mine["rank"] < s["rank"]):
+                    continue
+                return f"held (it touches {', '.join(sorted(files & s['files'])[:3])}, which starving PR #{other} needs)"
+        return ""
 
     def record_large(self, files: dict) -> None:
         """Source files on main over POOL_SPLIT_LINES lines (path -> lines), seen after a merge."""
@@ -3784,6 +3859,7 @@ class Pool:
             self.ask_decompose(st)
             self.check_files()
             self.check_disk()
+            self.track_starving(st, now)
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)
         started = [u for u in started if self.start(u)]  # none once stopping

@@ -2512,6 +2512,54 @@ echo "https://github.com/o/r/issues/88"
           (set(), [], True))
 
 
+def test_a_starving_pr_holds_merges_on_its_files() -> None:
+    """Cohort 52: #143 ("near here", P1) waited 5 h 40 min through 3 merger sessions while
+    77 commits landed, every merge touching its files."""
+    def st(*extra):
+        return state([iss(1, ["stage:pr", "P1"]), iss(2, ["stage:pr", "P2"]), iss(3, ["stage:pr", "P0"])][:2 + len(extra)],
+                     prs=[pr(11, 1), pr(12, 2)] + list(extra))
+    h = Rig(st(), starve_hold_s=3600)
+    h.step()
+    h.pool.record_conflicts(11, {"src/live.py", "src/near.py"}, hard=True)
+    check("one conflict left to a merger: not starving", h.pool.starving, {})
+    h.pool.record_conflicts(11, {"src/near.py"}, hard=True)
+    check("twice on the same file: starving, on that file", sorted(h.pool.starving[11]["files"]), ["src/near.py"])
+    check("the monitor hears it", sum("PR #11 (P1) conflicted 2 times on src/near.py" in e for e in h.pool.events), 1)
+    check("another PR's merge that touches the file waits; one that does not, and the starving PR itself, go",
+          (h.pool.starve_hold(12, {"src/near.py", "x"}).startswith("held (it touches src/near.py, which starving PR #11"),
+           h.pool.starve_hold(12, {"src/other.py"}), h.pool.starve_hold(11, {"src/near.py"})), (True, "", ""))
+    for _ in range(2):
+        h.pool.record_conflicts(12, {"src/near.py"}, hard=True)
+    check("a P2 PR does not starve others", 12 in h.pool.starving, False)
+    for _ in range(2):
+        h.pool.record_conflicts(11, {"src/live.py"}, hard=True)
+    h.st = st(pr(13, 3))
+    h.step()
+    h.now += 10
+    for _ in range(2):
+        h.pool.record_conflicts(13, {"src/near.py"}, hard=True)
+    check("two starving PRs on one file: the P0 waits for nobody, the P1 waits for it",
+          (h.pool.starve_hold(13, {"src/near.py"}), h.pool.starve_hold(11, {"src/near.py"}).endswith("starving PR #13 needs)")),
+          ("", True))
+    h.st = st()
+    h.step()
+    check("a starving PR no longer open ends its hold, and the monitor hears it",
+          (13 in h.pool.starving, any("PR #13's files no longer wait for it: it is no longer open" in e for e in h.pool.events)),
+          (False, True))
+    h.now += 3601
+    h.step()
+    check("the time limit ends a hold", (h.pool.starving, h.pool.starve_hold(12, {"src/near.py"})), ({}, ""))
+    real = ccpool.Session.starve_hold
+    ccpool.Session.starve_hold = lambda self, pr, head, branch: "held (it touches src/near.py, which starving PR #11 needs)"
+    try:
+        body = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "c" * 40 + "\n"
+        outcome, calls, log, _ = resweep_session(body, ALLOW_SH, record=True)
+    finally:
+        ccpool.Session.starve_hold = real
+    check("a merge unit on such a PR is held before any sweep or gate, not merged",
+          (outcome, calls, "pr merge" in log), ("held (it touches src/near.py, which starving PR #11 needs)", [], False))
+
+
 def test_ux_runs_never_run_out() -> None:
     h = Rig(state(), ux=True, ux_gap_s=60, family_max=3, ux_idle_gap_s=1e12)
     ran = 0
