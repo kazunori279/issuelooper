@@ -27,6 +27,9 @@ port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried;
 command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
 slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time (the main check below runs
                              # in a lane of its own, beside these)
+format = ""                  # SWEEP_FORMAT: the formatter (e.g. "uv run ruff format src tests") a worker's or
+                             # merger's sweep runs first on a clean checkout; when it changes files, the sweep
+                             # stops and names them, to commit and sweep again. The supervisor's sweeps never run it
 rerun = ""                   # SWEEP_RERUN: reruns only the failing tests, named by {tests} (pytest node ids),
                              # for the second try of a red main check, re-sweep or merged-tree check, as in
                              # "uv run pytest -q {tests}". Empty = that second try runs the whole check again

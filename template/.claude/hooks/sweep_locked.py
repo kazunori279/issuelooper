@@ -25,6 +25,13 @@ not swept again: it prints the record's `git:`, `sweep record:` and `green:` lin
 a sweep would, and --update-pr goes on from there (SWEEP_FORCE=1 sweeps anyway). In
 cohort 52, 3.9 h went to sweeping commits that were already green.
 
+With `[sweep] format` (SWEEP_FORMAT, e.g. `uv run ruff format src tests`), an agent's
+sweep of a clean checkout runs the formatter first. When it changes files, the sweep
+stops there (exit 1) and names them: commit them and sweep again. Lint-only red runs
+were 69 of 174 red sweeps in cohort 52. The supervisor's own sweeps (SWEEP_CALLER set:
+re-sweeps, auto-rebases, the main check) never format: what they check must stay as
+committed, and a format diff there is red, as before.
+
 With --update-pr N, a green sweep that wrote its record also rewrites PR #N's
 body: the `Sweep SHA:` line gets the swept head and the `green:` line is
 replaced (or appended). That is the step a rebase makes necessary (Gate 2
@@ -115,6 +122,23 @@ def green_record(root: str) -> tuple[str, pathlib.Path, dict] | None:
     return None
 
 
+def format_first(root: str) -> list[str]:
+    """Run [sweep] format in a clean checkout, for an agent's sweep: the files it changed
+    ([] when it changed none, or did not run)."""
+    cmd = os.environ.get("SWEEP_FORMAT", "").strip()
+    if not cmd or os.environ.get("SWEEP_CALLER", "").strip():
+        return []
+    status = subprocess.run(["git", "-C", root, "status", "--porcelain", "--", "."], capture_output=True, text=True)
+    if status.returncode != 0 or status.stdout.strip():
+        return []  # uncommitted work: the sweep writes no record anyway, and it is not ours to touch
+    try:
+        subprocess.run(["bash", "-c", cmd], cwd=root, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    after = subprocess.run(["git", "-C", root, "status", "--porcelain", "--", "."], capture_output=True, text=True)
+    return sorted(ln[3:] for ln in after.stdout.splitlines() if ln.strip())
+
+
 def reuse(head: str, path: pathlib.Path, rec: dict) -> str:
     """Print what a green sweep prints, from its record, and note the run in runs.jsonl."""
     areas = rec["areas"]
@@ -150,6 +174,19 @@ def main() -> int:
     if not os.path.isfile(os.path.join(root, RUNNER)):
         print(f"sweep_locked: {root} has no {RUNNER}; sweep NOT run", file=sys.stderr)
         return 2
+    changed = format_first(root)
+    if changed:
+        print(f"[sweep] format changed {len(changed)} file(s): {', '.join(changed[:10])}\n"
+              "Commit them (they are your change, formatted) and run the sweep again; sweep NOT run.")
+        try:
+            import sweep_run
+            now = sweep_run.datetime.now(sweep_run.timezone.utc).isoformat()
+            sweep_run.append_run({"run_id": f"format-{os.getpid()}", "caller": sweep_run.caller(),
+                                  "started_at": now, "finished_at": now, "seconds": 0, "exit": 1,
+                                  "outcome": "red-lint", "formatted": changed})
+        except Exception as exc:  # noqa: BLE001
+            print(f"note: run not recorded ({exc})", file=sys.stderr)
+        return 1
     found = None if os.environ.get("SWEEP_FORCE") == "1" else green_record(root)
     if found:
         out = reuse(*found)

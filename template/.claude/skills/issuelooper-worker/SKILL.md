@@ -167,7 +167,9 @@ python3 .claude/hooks/sweep_locked.py
 ```
 
 The sweep must print `git: <sha> (clean)`, the `green:` line and
-`sweep record: <path>`. Commit first and sweep after. Red: fix, commit, sweep
+`sweep record: <path>`. When the project names a formatter (`[sweep] format`), the
+sweep runs it first; if it changed files, it stops and names them: commit them
+(amend is fine) and sweep again. Commit first and sweep after. Red: fix, commit, sweep
 again. A wait of a few minutes for a sweep slot is normal; never delete a lock.
 Then the live check (step 4), at the same commit.
 

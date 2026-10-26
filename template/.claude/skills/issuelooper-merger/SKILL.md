@@ -57,6 +57,9 @@ python3 .claude/hooks/sweep_locked.py --update-pr $P     # rewrites Sweep SHA an
 gh pr view $P --json headRefOid -q .headRefOid            # must equal git rev-parse HEAD
 ```
 
+If the sweep says the project's formatter changed files, commit and push them, and
+run it again.
+
 When the body has a `- **Live check:** <sha>` line naming another sha than your
 new head, check it again before you stop, after the sweep:
 `python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr $P`. Gate 7

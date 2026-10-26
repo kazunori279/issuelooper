@@ -772,6 +772,36 @@ def test_a_commit_with_a_green_record_is_not_swept_again() -> None:
     check("a dirty tree: swept", go() and (tmp / "spans").exists(), True)
 
 
+def test_an_agent_sweep_formats_first() -> None:
+    """Cohort 52: 69 of 174 red sweeps were lint-only (ruff format), each an agent turn."""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
+    wt = make_worktree(tmp)
+    (wt / ".gitignore").write_text(".claude/\n")
+    (wt / "a.py").write_text("x=1\n")
+    for cmd in (["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]):
+        subprocess.run(["git", "-C", str(wt), *cmd], check=True, capture_output=True)
+    env = dict(sweep_env(tmp, tmp / "lock"), SWEEP_RECORD_DIR=str(tmp / "records"),
+               SWEEP_FORMAT="sed -i 's/x=1/x = 1/' a.py")
+    for k in ("SWEEP_CALLER", "SWEEP_COMMAND"):
+        env.pop(k, None)
+
+    def go(**extra):
+        (tmp / "spans").unlink(missing_ok=True)
+        return subprocess.run([sys.executable, str(SWEEP)], cwd=wt, env=dict(env, **extra), capture_output=True, text=True)
+    res = go(SWEEP_CALLER="resweep")
+    check("a supervisor sweep never formats: the tree stays as committed, and the suite runs",
+          ((wt / "a.py").read_text(), (tmp / "spans").exists()), ("x=1\n", True))
+    res = go()
+    check("an agent's sweep formats first; a change stops it, named, before the suite runs",
+          (res.returncode, (wt / "a.py").read_text(), (tmp / "spans").exists(), "changed 1 file(s): a.py" in res.stdout),
+          (1, "x = 1\n", False, True))
+    for cmd in (["commit", "-qam", "format"],):
+        subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@t", *cmd], check=True)
+    res = go()
+    check("committed, the formatter changes nothing and the suite runs", (res.returncode, (tmp / "spans").exists()),
+          (0, True))
+
+
 def test_ux_proposed_is_never_claimed() -> None:
     """A UX candidate waits for the owner; claim.py neither lists nor claims it."""
     before = len(FAILURES)
