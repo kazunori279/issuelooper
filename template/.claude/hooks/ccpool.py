@@ -4496,6 +4496,8 @@ class Pool:
                 r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.main_check_s, cwd=wt,
                                    env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
                 ok, out = r.returncode == 0, r.stdout + r.stderr
+                if r.returncode == 5 and "no tests ran" in out:
+                    ok = True  # pytest found nothing to run: tests/accept/ holds no test yet
             except (OSError, subprocess.TimeoutExpired) as exc:
                 ok, out = None, str(exc)
             failing = failing_tests(out) if ok is False else []

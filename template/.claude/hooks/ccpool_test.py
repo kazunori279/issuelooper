@@ -1131,6 +1131,9 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               ([x for x in created if "Regression" in x], any("flaky" in e for e in pool.events)), ([], True))
         created, pool = guard("exit 0")
         check("green: nothing filed", created, [])
+        created, pool = guard("echo 'no tests ran in 0.01s'; exit 5")
+        check("no test in tests/accept/ yet: green, nothing filed",
+              (created, any("flaky" in e for e in pool.events)), ([], False))
         pool.main_check_running = True
         pool.guard_sha = ""
         pool.guard_due({"main": sha})
