@@ -26,7 +26,9 @@ UNITS
           role_guard.py's merge gates run with CC_ROLE=merger, and the PR is
           squash-merged; a refusal hands the PR back to a worker (a head the gates
           would refuse for its sweep is swept here first, outside the merge lock; a
-          gate 7 refusal after a rebase replays the live check outside the lock). With POOL_FAST_CHECK_CMD set, a
+          gate 7 refusal after a rebase replays the live check outside the lock; a PR
+          held after a red re-sweep is not swept again for the same head and main, and
+          one failing only where an earlier red main failed is rebased, not handed back). With POOL_FAST_CHECK_CMD set, a
           PR whose head is behind main is first merged with main in a worktree and
           the command runs there, under the merge lock right before the merge: a
           failure hands the PR back, unless main alone fails it too. It gets POOL_FAST_CHECK_S
@@ -715,6 +717,8 @@ class Book:
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
         self.held_until: dict[str, float] = {}  # key -> when a unit that ended held is due again
         self.hard_conflicts: dict[int, list] = {}  # PR -> [(time, files)] of rebases left to a merger
+        self.swept_held: dict[int, tuple[str, str]] = {}  # PR -> (unit key, hold) after a red re-sweep
+        self.rebase_wanted: dict[int, str] = {}  # PR -> head the supervisor rebases onto main (auto rebase)
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
@@ -890,7 +894,21 @@ def plan(
                 continue  # GitHub computes mergeability lazily; read it again next poll
         else:
             book.unknown_since.pop(pr["number"], None)
-        if state == "MERGEABLE":
+        if book.rebase_wanted.get(pr["number"]) not in (None, pr["head"]):
+            del book.rebase_wanted[pr["number"]]  # a new head: the rebase happened, or work moved on
+        if state == "MERGEABLE" and book.rebase_wanted.get(pr["number"]) == pr["head"]:
+            units.append(
+                Unit(
+                    "auto",
+                    "rebase",
+                    f"rebase:{pr['number']}@{pr['head'][:12]}@{main[:12]}",
+                    f"mrg:{pr['number']}",
+                    pr["number"],
+                    (0, pr["number"]),
+                    info,
+                )
+            )
+        elif state == "MERGEABLE":
             units.append(
                 Unit(
                     "auto",
@@ -2207,10 +2225,16 @@ class Session(threading.Thread):
             # without a sweep, and re-sweeping it (5-10 minutes) under the lock held every
             # other merge, whose PRs then conflicted again and got mergers of their own.
             if swept is None and (want_sweep or (attempt == 0 and self.needs_sweep(pr, head))):
+                # The same head on the same main, held after a red re-sweep: sweeping it again
+                # says the same. PR #157 was re-swept 15 times at one head in cohort 52.
+                before = self.pool.book.swept_held.get(pr)
+                if before and before[0] == u.key:
+                    self.note(f"not re-swept: {before[1]} at this head and main already")
+                    return before[1]
                 swept, out = self.resweep(pr, branch, head, env)
                 held = "" if swept else self.red_like_main(pr, out)
                 if held:
-                    return held
+                    return self.swept_hold(pr, held)
                 if swept is False and "== sweep is red ==" in out:
                     # Once more before acting on it: single flaky failures handed PRs back.
                     # The failing tests alone first, when the project says how ([sweep] rerun):
@@ -2218,7 +2242,7 @@ class Session(threading.Thread):
                     # for the record Gate 2 reads.
                     rerun, _ = self.pool.rerun_at(head, failing_tests(out), fetch=branch or "main")
                     if rerun is False:
-                        return self.sweep_hand_back(pr, n, head, out)
+                        return self.swept_hold(pr, self.sweep_hand_back(pr, n, head, out))
                     if rerun:
                         self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
                     swept, again = self.resweep(pr, branch, head, env)
@@ -2227,9 +2251,9 @@ class Session(threading.Thread):
                         if rerun is None:
                             self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
                     elif not same_failure(out, again):
-                        return self.flaky_hold(pr, "re-sweep", out, again)
+                        return self.swept_hold(pr, self.flaky_hold(pr, "re-sweep", out, again))
                     else:
-                        return self.sweep_hand_back(pr, n, head, again)
+                        return self.swept_hold(pr, self.sweep_hand_back(pr, n, head, again))
             if recheck:
                 # Gate 7 refuses a head whose change moved since its live check, and a rebase
                 # that resolves a conflict moves it; each such refusal cost a worker session.
@@ -2314,13 +2338,32 @@ class Session(threading.Thread):
                         f"({', '.join(failing[:2])}; {issues}); tried again on a later poll")
         return f"held (the {what} failed only known flaky tests: {issues})"
 
+    def swept_hold(self, pr: int, outcome: str) -> str:
+        """Remember a hold that followed a red re-sweep, for this unit's key (head and
+        main), so it is not swept again until one of them moves. Not a failure of the
+        machine: that one may be gone by the next try."""
+        if outcome.startswith("held") and "on the machine" not in outcome:
+            with self.pool.lock:
+                self.pool.book.swept_held[pr] = (self.unit.key, outcome)
+        return outcome
+
     def sweep_hand_back(self, pr: int, n: int, head: str, out: str) -> str:
         """Hand the PR back for its red sweep, with what failed. Handed back by the gates
         instead, the comment said "does not match Sweep SHA" or "missing the green line",
-        and the worker had to find the failing tests itself (PRs #110, #126, #140)."""
+        and the worker had to find the failing tests itself (PRs #110, #126, #140). When
+        every failing test is one that failed on a red main and the head is behind main,
+        the failure is main's, inherited: the supervisor rebases the PR instead."""
         held = self.infra_hold(pr, "re-sweep", out) or self.known_flaky_hold(pr, "re-sweep", out)
         if held:
             return held
+        failing = failing_tests(out)
+        branch = self.unit.info.get("branch") or ""
+        if failing and all(t in self.pool.red_failed for t in failing) and self.behind_main(head, branch):
+            with self.pool.lock:
+                self.pool.book.rebase_wanted[pr] = head
+            self.pool.event(f"PR #{pr} not handed back: it fails only where main failed before "
+                            f"({', '.join(failing[:2])}), and main has moved on; the supervisor rebases it")
+            return "held (its failure is main's: asked for a rebase onto main)"
         failing = failing_tests(out)
         self.hand_back(pr, n, (
             f"**Not merged: the sweep at this head ({head[:8]}) is red.** The supervisor ran the full "
@@ -2867,6 +2910,7 @@ class Pool:
         self.starving: dict[int, dict] = {}  # PR -> {"files", "since", "rank"}: see check_starving
         self.fast_timeouts: set = set()  # (pr, head) whose merged-tree check timed out once
         self.flaky_known: tuple[float, dict[str, int]] = (0.0, {})  # (read at, test -> its open Flaky issue)
+        self.red_failed: dict[str, str] = {}  # test -> the red main it failed on (sweep_hand_back)
         self.own_deployed = ""
         self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
         self.undeployed_since = 0.0  # when main first moved past the last deploy started
@@ -3382,6 +3426,8 @@ class Pool:
                 self.gh("issue", "close", str(n))
                 self.event(f"main is green again at {sha[:8]}; closed #{n}")
             return
+        for t in failing:
+            self.red_failed[t] = sha
         self.report_red(sha, failing, out)
 
     def flaky_tests(self, max_age: float = 600) -> dict[str, int]:

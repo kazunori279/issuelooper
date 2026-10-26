@@ -2897,6 +2897,54 @@ def test_the_second_try_reruns_only_the_failing_tests() -> None:
           (outcome, len(calls), "pr comment 9" in log), ("sweep red at the head (handed back)", 1, True))
 
 
+def test_a_held_pr_is_not_reswept_at_the_same_head() -> None:
+    """Cohort 52: PR #157, built on a broken main, was re-swept 15 times at one head
+    (19:49-20:46), each time held instead of rebased."""
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    refuse = "echo '{\"decision\": \"block\", \"reason\": \"does not match Sweep SHA\"}'\n"
+    red = {"sha": "d" * 40, "ok": False, "failing": ["tests/e2e/test_issue_20.py::test_map"]}
+    outcome, calls, _, pool = resweep_session(stale, refuse, sweep_ok=False, main_check=red)
+    check("first try: re-swept, held as main's failure", (outcome.startswith("held (main dddddddd is red"), len(calls)),
+          (True, 1))
+    swept = []
+    real = ccpool.Session.resweep
+    ccpool.Session.resweep = lambda self, pr, branch, head, env: swept.append(head) or (False, "")
+    try:
+        u = ccpool.Unit("auto", "merge", "merge:9@x", "mrg:9", 9, (0, 9),
+                        {"issue": 2, "head": "c" * 40, "mergeable": "MERGEABLE", "branch": "issue-2"})
+        again = ccpool.Session(pool, u, 2)
+        again.dir.mkdir(parents=True)
+        out2 = again.work()
+        u2 = ccpool.Unit("auto", "merge", "merge:9@y", "mrg:9", 9, (0, 9), dict(u.info))
+        moved = ccpool.Session(pool, u2, 3)
+        moved.dir.mkdir(parents=True)
+        moved.work()
+    finally:
+        ccpool.Session.resweep = real
+    check("the same head on the same main: the same hold, not swept again", (out2, swept[:1]), (outcome, ["c" * 40]))
+    check("main moved (a new key): swept again", len(swept), 1)
+    # The failure is main's and main moved on: the supervisor rebases instead of handing back.
+    realb = ccpool.Session.behind_main
+    ccpool.Session.behind_main = lambda self, head, branch: True
+    try:
+        h = Rig(state())
+        h.pool.red_failed["tests/unit/test_issue_50.py::test_cli_exits"] = "e" * 40
+        w = ccpool.Session(h.pool, ccpool.Unit("auto", "merge", "merge:9@z", "mrg:9", 9, (0, 9),
+                                               {"issue": 2, "head": "c" * 40, "branch": "issue-2"}), 4)
+        out3 = w.sweep_hand_back(9, 2, "c" * 40, RED_SWEEP)
+    finally:
+        ccpool.Session.behind_main = realb
+    check("a failure seen on a red main, head behind main: a rebase, not a hand-back",
+          (out3, h.pool.book.rebase_wanted), ("held (its failure is main's: asked for a rebase onto main)", {9: "c" * 40}))
+    h2 = Rig(state([iss(2, ["stage:pr"])], prs=[pr(9, 2, head="c" * 40)]))
+    h2.pool.book.rebase_wanted[9] = "c" * 40
+    check("the next plan rebases the mergeable PR", [u.kind for u in h2.step()], ["rebase"])
+    h3 = Rig(state([iss(2, ["stage:pr"])], prs=[pr(9, 2, head="f" * 40)]))
+    h3.pool.book.rebase_wanted[9] = "c" * 40
+    check("a new head: merged as usual, the request dropped", ([u.kind for u in h3.step()], h3.pool.book.rebase_wanted),
+          (["merge"], {}))
+
+
 GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "
               "echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
               "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'; fi\n")

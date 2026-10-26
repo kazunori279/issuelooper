@@ -107,7 +107,9 @@ Until it is green, only a PR built on that red `main` merges (rebased onto it, s
 its own green sweep shows the result is not red; the fix itself is such a PR);
 others wait, without a hand-back (`POOL_RED_HOLD=0` lets them through). A PR whose
 re-sweep fails only where that red `main` fails is held for a later try rather than
-handed back. The merged-tree check and
+handed back; a held PR is not swept again until its head or `main` moves, and one that
+still fails only where an earlier red `main` failed, once `main` has moved on, is
+rebased by the supervisor instead of handed back. The merged-tree check and
 re-sweeps run once more before acting on a failure (only the failing tests, with
 `[sweep] rerun = "<command with {tests}>"`) (a PR that fails twice the same
 way is handed back with the failing tests; twice differently, it is held as flaky),
