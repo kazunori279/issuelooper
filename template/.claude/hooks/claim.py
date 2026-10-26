@@ -289,25 +289,50 @@ def pr_for(n: int, prs: list[dict]) -> dict | None:
     return None
 
 
+# Merged and on main, waiting only for the acceptance check: done, for its dependents
+# (ccpool.accepted). If the check fails it goes back to stage:triage and blocks again.
+ACCEPTED = {"stage:accept", "stage:live"}
+
+
+def native_blockers(n: int) -> list[int] | None:
+    """Issue n's open GitHub-dependency blockers that are not at ACCEPTED (None when
+    GitHub cannot be read)."""
+    try:
+        rows = paged(f"repos/{{owner}}/{{repo}}/issues/{n}/dependencies/blocked_by")
+    except (GhError, ValueError):
+        return None
+    return [int(r["number"]) for r in rows
+            if isinstance(r, dict) and r.get("state", "open") == "open" and not labels_of(r) & ACCEPTED]
+
+
 def blockers(issue: dict, open_numbers: set[int]) -> list[int]:
+    """The issue's open blockers: GitHub dependencies (read only when GitHub counts some)
+    and `Blocked by:` lines naming open_numbers, which the caller gives without the
+    ACCEPTED issues. -1 for a dependency that could not be read."""
     found: list[int] = []
     summary = issue.get("issue_dependencies_summary") or {}
     if summary.get("blocked_by"):
-        found.append(-1)  # GitHub says an open blocker exists; which one does not matter
+        native = native_blockers(issue["number"])
+        found += [-1] if native is None else native
     for m in BLOCKED_LINE.finditer(issue.get("body") or ""):
         found += [int(x) for x in NUM.findall(m.group(1)) if int(x) in open_numbers]
-    return found
+    return list(dict.fromkeys(found))
+
+
+def unaccepted(issues: list[dict]) -> set[int]:
+    """The open issue numbers that still block: all but those at ACCEPTED."""
+    return {i["number"] for i in issues if not labels_of(i) & ACCEPTED}
 
 
 def candidates(stale_min: int = STALE_MIN) -> list[dict]:
     """Claimable issues in pick order, each with the PR it already has, if any."""
     issues = [i for i in paged("repos/{owner}/{repo}/issues?state=open") if "pull_request" not in i]
-    open_numbers = {i["number"] for i in issues}
+    open_numbers = unaccepted(issues)
     prs = open_prs()
     out = []
     for issue in issues:
         names = labels_of(issue)
-        if names & (HOLDS | IGNORED) or blockers(issue, open_numbers):
+        if names & (HOLDS | IGNORED):
             continue
         n = issue["number"]
         pr = pr_for(n, prs)
@@ -317,6 +342,8 @@ def candidates(stale_min: int = STALE_MIN) -> list[dict]:
             if not is_stale(issue, stale_min):
                 continue
         else:
+            continue
+        if blockers(issue, open_numbers):  # last: a native dependency costs a read
             continue
         out.append({"issue": issue, "pr": pr})
     out.sort(key=lambda c: (priority(c["issue"]), c["issue"]["number"]))
@@ -462,7 +489,8 @@ def why_not(n: int, unseen: bool = False) -> str:
     names = labels_of(issue)
     if names & (HOLDS | IGNORED):
         return f"it is held ({', '.join(sorted(names & (HOLDS | IGNORED)))})"
-    open_numbers = {i["number"] for i in paged("repos/{owner}/{repo}/issues?state=open")}
+    issues = [i for i in paged("repos/{owner}/{repo}/issues?state=open") if "pull_request" not in i]
+    open_numbers = unaccepted(issues)
     found = blockers(issue, open_numbers)
     if found:
         named = [f"#{b}" for b in found if b > 0]

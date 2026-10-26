@@ -274,7 +274,7 @@ query($owner: String!, $name: String!, $ia: String, $pa: String, $first: Boolean
     open: issues(states: OPEN, first: 100, after: $ia) {
       pageInfo { hasNextPage endCursor }
       nodes { number title body updatedAt labels(first: 30) { nodes { name } } comments { totalCount }
-              issueDependenciesSummary { blockedBy } }
+              issueDependenciesSummary { blockedBy } blockedBy(first: 20) { nodes { number state } } }
     }
     closed: issues(states: CLOSED, first: 60, orderBy: {field: UPDATED_AT, direction: DESC}) @include(if: $first) {
       nodes { number title closedAt stateReason labels(first: 30) { nodes { name } } }
@@ -569,8 +569,12 @@ def normalize(data: dict) -> dict:
                 "updated": n.get("updatedAt", ""),
                 "labels": names(n),
                 "comments": (n.get("comments") or {}).get("totalCount", 0),
-                # open issues blocking this one through GitHub's own dependencies
+                # open issues blocking this one through GitHub's own dependencies: how many,
+                # and which (the first 20; their labels are in "open", so a blocker at
+                # stage:accept can count as done). None when the answer had no list.
                 "blocked_by": (n.get("issueDependenciesSummary") or {}).get("blockedBy", 0),
+                "blockers": [b["number"] for b in (n.get("blockedBy") or {}).get("nodes") or []
+                             if b.get("state") == "OPEN"] if "blockedBy" in n else None,
             }
             for n in r["open"]["nodes"]
         ],
@@ -667,7 +671,8 @@ def signature(st: dict) -> str:
     """ccwake_sig.py's idea, for the whole queue: a hash of what the units read."""
     items = [f"main@{st['main']}"]
     items += [
-        f"o{i['number']}@{i['updated']}:{','.join(i['labels'])}:{i.get('blocked_by', 0)}" for i in st["open"]
+        f"o{i['number']}@{i['updated']}:{','.join(i['labels'])}:{i.get('blocked_by', 0)}:{i.get('blockers')}"
+        for i in st["open"]
     ]
     items += [f"c{i['number']}:{','.join(i['labels'])}" for i in st["closed"]]
     items += [f"p{p['number']}@{p['head']}:{p['mergeable']}" for p in st["prs"]]
@@ -723,16 +728,34 @@ def same_failure(first: str, second: str) -> bool:
     return bool(a & b) if a and b else True
 
 
-def blocked(issue: dict, open_numbers: set[int]) -> bool:
-    """An open blocker, a GitHub dependency or a `Blocked by:` line. claim.py refuses
-    both too, but leaving the native ones to it started a unit per issue per poll that
-    it only refused."""
-    if issue.get("blocked_by"):
-        return True
-    for m in claimlib.BLOCKED_LINE.finditer(issue.get("body") or ""):
-        if any(int(x) in open_numbers for x in claimlib.NUM.findall(m.group(1))):
-            return True
-    return False
+def accepted(st: dict) -> set[int]:
+    """Open issues whose change is merged and on main, waiting only for their acceptance
+    check (stage:accept, or stage:live): done, for the issues they block. In cohort 55
+    three merged hub issues waited over an hour at stage:accept with 19 in that queue,
+    and the issues they blocked waited with them until the monitor cut the dependencies."""
+    return {i["number"] for i in st["open"] if set(i["labels"]) & set(ACCEPTING)}
+
+
+def native_blockers(issue: dict, done: set[int]) -> list:
+    """The issue's open GitHub-dependency blockers that are not done: their numbers, and
+    "?" for each one the answer did not list (none read, or beyond the first 20)."""
+    count, known = issue.get("blocked_by") or 0, issue.get("blockers")
+    if known is None:
+        return ["?"] * count
+    return [n for n in known if n not in done] + ["?"] * max(0, count - len(known))
+
+
+def line_blockers(issue: dict, open_numbers: set[int], done: set[int]) -> list[int]:
+    """The open issues a `Blocked by:` line names that are not done."""
+    return [int(x) for m in claimlib.BLOCKED_LINE.finditer(issue.get("body") or "")
+            for x in claimlib.NUM.findall(m.group(1)) if int(x) in open_numbers and int(x) not in done]
+
+
+def blocked(issue: dict, open_numbers: set[int], done: set[int] = frozenset()) -> bool:
+    """An open blocker, a GitHub dependency or a `Blocked by:` line, that is not done
+    (accepted). claim.py refuses both too, but leaving the native ones to it started a
+    unit per issue per poll that it only refused."""
+    return bool(native_blockers(issue, done) or line_blockers(issue, open_numbers, done))
 
 
 def priority(labels) -> int:
@@ -850,6 +873,7 @@ def plan(
     ux_sha is the commit a UX run would test (Pool.ux_target)."""
     units: list[Unit] = []
     open_numbers = {i["number"] for i in st["open"]}
+    done = accepted(st)
     pr_of: dict[int, dict] = {}
     for pr in st["prs"]:
         n = pr_issue(pr)
@@ -867,7 +891,7 @@ def plan(
             continue
         if labels & CLAIMABLE:
             memo = book.unclaimable.get(n)
-            if blocked(i, open_numbers) or (
+            if blocked(i, open_numbers, done) or (
                 memo and memo[:2] == (i["updated"], main) and now - memo[2] < cfg.unclaimable_retry_s
             ):
                 continue
@@ -4636,9 +4660,11 @@ class Pool:
         dependencies while workers took lower-ranked issues around it, and nobody
         looked at whether it still needed them."""
         b = self.book
+        done = accepted(st)  # a blocker at stage:accept is merged: nothing to review
+        native = {i["number"]: native_blockers(i, done) for i in st["open"]}
         waiting = {
             i["number"]: i for i in st["open"]
-            if i.get("blocked_by") and set(i["labels"]) & {"P0", "P1"} and set(i["labels"]) & CLAIMABLE
+            if native[i["number"]] and set(i["labels"]) & {"P0", "P1"} and set(i["labels"]) & CLAIMABLE
             and not set(i["labels"]) & (HOLDS | IGNORED)
         }
         for n in waiting:
@@ -4650,9 +4676,10 @@ class Pool:
             if n not in b.blocked_told and now - b.blocked[n] >= self.cfg.blocked_review_s:
                 b.blocked_told.add(n)
                 prio = next(p for p in ("P0", "P1") if p in i["labels"])
+                which = ", ".join(f"#{x}" for x in native[n] if x != "?")
                 self.event(
-                    f"#{n} ({prio}) has waited {(now - b.blocked[n]) / 60:.0f} min on {i['blocked_by']} open "
-                    f"blocker(s) (`gh api repos/{{owner}}/{{repo}}/issues/{n}/dependencies/blocked_by`): keep "
+                    f"#{n} ({prio}) has waited {(now - b.blocked[n]) / 60:.0f} min on {len(native[n])} open "
+                    f"blocker(s){' (' + which + ')' if which else ''} (`gh api repos/{{owner}}/{{repo}}/issues/{n}/dependencies/blocked_by`): keep "
                     f"each only if #{n} cannot work or would conflict without it, and remove the rest "
                     "(issuelooper-monitor skill, Dependencies)"
                 )

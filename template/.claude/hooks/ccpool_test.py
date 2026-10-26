@@ -1180,6 +1180,54 @@ def test_long_dependency_waits_are_pointed_out() -> None:
     check("an unblocked issue is forgotten", sorted(h.pool.book.blocked), [])
 
 
+def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
+    """Cohort 55: merged hub issues #15, #1 and #22 sat at stage:accept for over an hour
+    (19 in that queue), their dependents waited as if they were not merged, and after the
+    60-minute review the monitor cut 14 issues' dependencies."""
+    def starts(blocker_labels, **dep):
+        issues = [iss(20, ["stage:triage", "P1"], body=dep.pop("body", "")), *([iss(15, blocker_labels)] if
+                  blocker_labels is not None else [])]
+        issues[0].update(dep)
+        h = Rig(state(issues))
+        return [u.number for u in h.step() if u.role == "worker"]
+    line = {"body": "Needs the hub.\n\nBlocked by: #15"}
+    for labels, want, what in ((["stage:accept"], [20], "at stage:accept"), (["stage:live", "needs:live"], [20], "at stage:live"),
+                               (["stage:triage", "P1"], [15], "at stage:triage"), (None, [20], "closed")):
+        check(f"a `Blocked by:` line naming a blocker {what}", starts(labels, **dict(line)), want)
+    check("a native blocker at stage:accept", starts(["stage:accept"], blocked_by=1, blockers=[15]), [20])
+    check("a native blocker at stage:triage", starts(["stage:triage", "P1"], blocked_by=1, blockers=[15]), [15])
+    check("a native count without the list (an older answer): blocked",
+          starts(["stage:accept"], blocked_by=1), [])
+    check("more native blockers than the list holds (past the first 20): blocked",
+          starts(["stage:accept"], blocked_by=2, blockers=[15]), [])
+    data = {"data": {"repository": {
+        "open": {"nodes": [{"number": 20, "labels": {"nodes": []}, "issueDependenciesSummary": {"blockedBy": 1},
+                            "blockedBy": {"nodes": [{"number": 15, "state": "OPEN"}, {"number": 9, "state": "CLOSED"}]}},
+                           {"number": 21, "labels": {"nodes": []}}]},
+        "closed": {"nodes": []}, "pullRequests": {"nodes": []}, "main": {"target": {"oid": MAIN}}}}}
+    st = ccpool.normalize(data)
+    check("the answer's open native blockers are read; none listed reads as unknown",
+          [(i["number"], i["blocked_by"], i["blockers"]) for i in st["open"]], [(20, 1, [15]), (21, 0, None)])
+    check("the query asks for them", "blockedBy(first: 20) { nodes { number state } }" in ccpool.QUERY, True)
+    a = state([dict(iss(20, ["stage:triage"]), blocked_by=1, blockers=[15]), iss(15, ["stage:pr"])])
+    b = state([dict(iss(20, ["stage:triage"]), blocked_by=1, blockers=[15]), iss(15, ["stage:accept"])])
+    check("a blocker moving to stage:accept changes the poll's signature", ccpool.signature(a) != ccpool.signature(b),
+          True)
+    dep = dict(iss(16, ["stage:triage", "P0"]), blocked_by=2, blockers=[15, 22])
+    h = Rig(state([dep, iss(15, ["stage:accept"]), iss(22, ["stage:accept"])]), blocked_review_s=3600)
+    h.pool.track_accept = lambda st: None
+    h.step()
+    h.step(3600)
+    check("the 60-minute review does not fire when every blocker waits for acceptance",
+          ([e for e in h.pool.events if "open blocker" in e], h.pool.book.blocked), ([], {}))
+    h.st = state([dep, iss(15, ["stage:accept"]), iss(22, ["stage:triage", "P1"])])
+    h.step()
+    h.step(3600)
+    check("it fires for the one still open, counted and named",
+          [e.split(" (`gh")[0].split("min on ")[1] for e in h.pool.events if "open blocker" in e],
+          ["1 open blocker(s) (#22)"])
+
+
 def test_monitor_is_asked_to_split_an_issue_that_keeps_failing() -> None:
     """The monitor may split any issue, and in a 12-hour run split none; one took eleven
     worker sessions. Only the issue's own failures count: all seven requests in run 7

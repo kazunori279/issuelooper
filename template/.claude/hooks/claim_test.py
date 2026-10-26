@@ -87,6 +87,11 @@ with open(state_path + ".lock", "w") as lk:
                 s["comments"][n] = [c for c in cs if c["id"] != cid]
             s["writes"].append(["delete", cid])
             out, write = "", True
+        elif re.search(r"/issues/(\d+)/dependencies/blocked_by$", path):
+            i = s["issues"][re.search(r"/issues/(\d+)/dependencies", path).group(1)]
+            if "blockers" not in i:
+                sys.exit("fake gh: no dependency list for this issue")
+            out = [issue_view(s, s["issues"][str(b)]) for b in i["blockers"]]
         elif re.search(r"/issues/(\d+)/comments$", path):
             out = s["comments"].get(re.search(r"/issues/(\d+)/comments$", path).group(1), [])
             # a read that lags behind the writes: new comments not visible yet
@@ -317,6 +322,31 @@ def test_claim_named_issue() -> None:
         check(f"--issue {n} ({why}) exits 3", res.returncode, 3)
         check(f"--issue {n} ({why}) writes nothing", len(repo.load()["writes"]), before)
         check(f"--issue {n} ({why}) says why", said in res.stderr, True)
+
+
+def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
+    """Cohort 55: dependents of merged issues at stage:accept waited over an hour."""
+    def blocker(n, labels, state="open"):
+        return issue(n, labels, state=state)
+    repo = Repo([
+        blocker(15, ["stage:accept"]), blocker(22, ["stage:live", "needs:live"]), blocker(30, ["stage:triage", "P2"]),
+        blocker(31, ["stage:accept"], state="closed"),
+        issue(1, ["stage:triage", "P1"], body="Blocked by: #15, #22"),  # both merged, waiting for acceptance
+        issue(2, ["stage:triage", "P1"], body="Blocked by: #30"),  # a real open blocker
+        dict(issue(3, ["stage:triage", "P1"], blocked_by=2), blockers=[15, 31]),  # native: accepted, closed
+        dict(issue(4, ["stage:triage", "P1"], blocked_by=2), blockers=[15, 30]),  # native: one real
+        issue(5, ["stage:triage", "P1"], blocked_by=1),  # native, unreadable: blocked
+    ])
+    res = repo.run("candidates")
+    got = [line.split("\t")[1] for line in res.stdout.splitlines()]
+    check("blockers at stage:accept or stage:live (or closed) do not block; open ones and unreadable ones do",
+          [x for x in got if x in ("#1", "#2", "#3", "#4", "#5")], ["#1", "#3"])
+    res = repo.run("claim", "--loop", "7", "--issue", "4")
+    check("a refusal names the real native blocker only", (res.returncode, "blocked by #30" in res.stderr,
+                                                           "#15" in res.stderr), (3, True, False))
+    res = repo.run("claim", "--loop", "7", "--issue", "1")
+    check("an issue whose blockers wait for acceptance is claimed", (res.returncode, json.loads(res.stdout)["issue"]),
+          (0, 1))
 
 
 def test_strangers_change_nothing() -> None:

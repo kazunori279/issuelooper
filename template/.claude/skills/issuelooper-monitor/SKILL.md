@@ -99,7 +99,9 @@ time; answer them first. A message that needs nothing from you gets one line.
 ## Dependencies
 
 A dependency (`blocked_by`) keeps an issue out of every worker's reach until the
-other closes, so it is the most expensive label you set: one P1 fix waited 6.7
+other is merged (a blocker at `stage:accept` or `stage:live` counts as done: its code
+is on main; if its acceptance check fails it goes back to `stage:triage` and blocks
+again), so it is the most expensive label you set: one P1 fix waited 6.7
 hours on three of them while workers took lower-ranked issues around it. Add one
 only when the issue cannot work without the other (it builds on code that does
 not exist yet) or both would rewrite the same lines; not for "related", not for
