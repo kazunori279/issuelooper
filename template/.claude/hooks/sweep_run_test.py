@@ -14,9 +14,11 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 # Every temporary file this file and what it runs make goes under one directory,
 # removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
@@ -58,6 +60,8 @@ def make_repo(config_toml: str = "") -> pathlib.Path:
     hooks.mkdir(parents=True)
     for name in ("sweep_run.py", "config.py"):
         shutil.copy(HERE / name, hooks / name)
+    shutil.copytree(HERE / "pytest_plugins", hooks / "pytest_plugins",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     if config_toml:
         (repo / ".issuelooper").mkdir()
         (repo / ".issuelooper" / "config.toml").write_text(config_toml)
@@ -129,9 +133,9 @@ def test_green_two_suites_writes_record() -> None:
         True,
     )
     check(
-        "no temp files are left beside the record",
+        "no temp files are left beside the record (and the run's line)",
         sorted(p.name for p in records.iterdir()),
-        [f"{sha}.json"],
+        [f"{sha}.json", "runs.jsonl"],
     )
 
 
@@ -162,14 +166,14 @@ def test_no_pytest_summary_is_judged_by_exit_status() -> None:
     check("a failing command with no pytest summary is red", rc, 1)
     check("the red run names the exit status", "exited 2" in out, True)
     check("a red run prints no green line", " green: " in out, False)
-    check("a red run writes no record", list(records.iterdir()), [])
+    check("a red run writes no record", [p.name for p in records.iterdir()], ["runs.jsonl"])
 
 
 def test_red_runs() -> None:
     repo = make_repo()
     rc, out, records = sweep(repo, TWO_SUITES + "; exit 1")
     check("a nonzero exit is red even with passing summaries", rc, 1)
-    check("and writes no record", list(records.iterdir()), [])
+    check("and writes no record", [p.name for p in records.iterdir()], ["runs.jsonl"])
     check("and says so", "sweep record not written" in out, True)
 
     rc, out, _ = sweep(
@@ -179,13 +183,93 @@ def test_red_runs() -> None:
     check("the problem names the suite", "unit: 1 failed, 4 passed" in out, True)
 
 
+def runs(records: pathlib.Path) -> list[dict]:
+    path = records / "runs.jsonl"
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+RED_PYTEST = (
+    "echo 'uv run pytest -q tests/e2e'; "
+    "echo '___________ test_map[chromium] ___________'; echo '    def test_map(page):'; "
+    "echo '>       assert card.is_visible()'; echo 'E       AssertionError: no map card'; "
+    "echo 'E       assert False'; "
+    "echo 'FAILED tests/e2e/test_issue_20.py::test_map[chromium] - AssertionError: no map card'; "
+    "echo '== 1 failed, 4 passed in 12.50s =='; exit 1"
+)
+
+
+def test_every_run_is_recorded() -> None:
+    """Cohort 52: a red run left nothing, a green one only an overwritable <sha>.json, and
+    the main lane's output was lost; about 40 killed sweeps per cohort could not be found."""
+    repo = make_repo()
+    sha = git(repo, "rev-parse", "HEAD")
+    rc, _, records = sweep(repo, TWO_SUITES, SWEEP_CALLER="resweep", CC_ROLE="merger", POOL_WORKER="7",
+                           POOL_UNIT="merge:9@a@b", SWEEP_PR="9", SWEEP_LANE="main", SWEEP_WAIT_S="12.5")
+    [r] = runs(records)
+    check("a green run: one line with its sha, caller, lane, wait, steps and outcome",
+          (r["sha"], r["clean"], r["caller"], r["lane"], r["wait_s"], r["outcome"], r["exit"],
+           [(st["name"], st["status"], st["passed"], st["seconds"]) for st in r["steps"]]),
+          (sha, True, {"kind": "resweep", "role": "merger", "session": "7", "unit": "merge:9@a@b", "pr": "9"},
+           "main", 12.5, "green", 0, [("unit", "passed", 3, 0.1), ("e2e", "passed", 2, 1.2)]))
+    check("with its times and an id", bool(r["run_id"] and r["started_at"] and r["finished_at"]), True)
+    rc, _, records = sweep(repo, RED_PYTEST, CC_ROLE="worker")
+    [r] = runs(records)
+    check("a test failure: red-tests, each failing test with its first E line, the caller from CC_ROLE",
+          (rc, r["outcome"], r["failures"], r["caller"]["kind"]),
+          (1, "red-tests", [{"test": "tests/e2e/test_issue_20.py::test_map[chromium]",
+                             "error": "AssertionError: no map card"}], "worker"))
+    rc, _, records = sweep(repo, "echo 'uv run ruff format --check src'; echo 'Would reformat: src/a.py'; exit 1")
+    check("a failure before any test: red-lint", runs(records)[0]["outcome"], "red-lint")
+    (repo / "a.py").write_text("x = 1\n")
+    git(repo, "add", "a.py")
+    git(repo, "commit", "-qm", "a")
+    rc, _, records = sweep(repo, TWO_SUITES)
+    check("the files the commit changes since it left main (no origin/main here: none)",
+          runs(records)[0]["changed_files"], [])
+    # A sweep killed with SIGTERM (run_owned's timeout, `issuelooper stop`) is recorded too.
+    records = pathlib.Path(tempfile.mkdtemp(prefix="sweep-run-records-"))
+    env = {k: v for k, v in os.environ.items() if k not in ("SWEEP_COMMAND", "SHARED_REPO_PATH")}
+    env.update(SWEEP_RECORD_DIR=str(records), SWEEP_COMMAND="echo 'uv run pytest -q tests/unit'; sleep 30")
+    proc = subprocess.Popen([sys.executable, str(repo / ".claude" / "hooks" / "sweep_run.py")], cwd=repo, env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    time.sleep(2)  # the suite is running
+    os.killpg(proc.pid, signal.SIGTERM)
+    proc.wait(timeout=20)
+    r = runs(records)
+    check("a killed sweep: recorded as killed, with its time", (len(r), r and r[0]["outcome"], r and r[0]["exit"]),
+          (1, "killed", None))
+
+
+def test_junit_per_pytest_run() -> None:
+    """With SWEEP_JUNIT=1 each pytest run in the command writes its own XML; a suite
+    that is not pytest is unaffected."""
+    probe = subprocess.run(["uv", "run", "--offline", "--no-project", "--with", "pytest", "python", "-c",
+                            "import pytest"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        print("note: no pytest available offline; junit case skipped")
+        return
+    repo = make_repo()
+    (repo / "tests" / "unit").mkdir(parents=True)
+    (repo / "tests" / "unit" / "test_a.py").write_text("def test_a():\n    assert True\n")
+    (repo / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "tests")
+    py = "uv run --offline --no-project --with pytest pytest -q -p no:cacheprovider tests/unit"
+    rc, out, records = sweep(repo, f"{py} && {py}", SWEEP_JUNIT="1")
+    [r] = runs(records)
+    check("two pytest runs: two XML files, each with the test", (rc, len(r["junit"]),
+          all("test_a" in pathlib.Path(x).read_text() for x in r["junit"])), (0, 2, True))
+    rc, _, records = sweep(repo, "echo 'npm test'", SWEEP_JUNIT="1")
+    check("a suite that is not pytest: green, no XML", (rc, runs(records)[0]["junit"]), (0, []))
+
+
 def test_dirty_tree_writes_no_record() -> None:
     repo = make_repo()
     (repo / "scratch.txt").write_text("uncommitted\n")
     rc, out, records = sweep(repo, TWO_SUITES)
     check("a dirty tree still sweeps green", rc, 0)
     check("its provenance says dirty", "(dirty)" in out, True)
-    check("but writes no record", list(records.iterdir()), [])
+    check("but writes no record", [p.name for p in records.iterdir()], ["runs.jsonl"])
     check("and says why", "project tree dirty at start" in out, True)
     check("the green line is still printed", last_line(out), "5 green: unit 3 · e2e 2")
 
@@ -195,7 +279,7 @@ def test_tree_or_head_changing_is_red() -> None:
     rc, out, records = sweep(repo, TWO_SUITES + "; echo junk > left_behind.txt")
     check("a file left by the suite turns the run red", rc, 1)
     check("and names it", "left_behind.txt" in out, True)
-    check("no record", list(records.iterdir()), [])
+    check("no record", [p.name for p in records.iterdir()], ["runs.jsonl"])
 
     repo = make_repo()
     rc, out, _ = sweep(repo, TWO_SUITES + "; git commit -q --allow-empty -m moved")

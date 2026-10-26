@@ -311,6 +311,7 @@ Turn it off with `[dashboard] enabled = false`.
 | The queue | GitHub labels: `gh issue list --label stage:doing` (in progress), `stage:pr` (PR open), `stage:owner` (your decision) |
 | What one session did | `.issuelooper/run/pool/<seq>-<role>-<unit>/`: `prompt.txt`, `session.log` (readable), `session.jsonl` (raw) |
 | The supervisor's decisions | `.issuelooper/run/pool/pool.jsonl` and `state.json` |
+| Every sweep, green, red or killed | `$ISSUELOOPER_TMP/sweep/runs.jsonl`: one line per run (sha, caller, wait, steps, outcome, failing tests with their first `E` line, changed files; junit XML beside it with `[sweep] junit`) |
 
 ### Stop and restart
 

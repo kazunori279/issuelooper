@@ -126,7 +126,10 @@ def main() -> int:
             time.sleep(5)
     got = time.time()
     print(f"sweep lock taken after {got - start:.0f} s", flush=True)
-    proc = subprocess.Popen([sys.executable, RUNNER], cwd=root,
+    # For sweep_run.py's line in runs.jsonl.
+    env = dict(os.environ, SWEEP_LANE=args.lane or os.path.basename(name), SWEEP_WAIT_S=f"{got - start:.1f}",
+               SWEEP_PR=args.update_pr or os.environ.get("SWEEP_PR", ""))
+    proc = subprocess.Popen([sys.executable, RUNNER], cwd=root, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = []
     for line in proc.stdout:

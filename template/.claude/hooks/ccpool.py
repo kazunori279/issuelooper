@@ -2555,7 +2555,8 @@ class Session(threading.Thread):
             if self.git(root, "worktree", "add", "-q", "--detach", wt, head).returncode != 0:
                 return False, ""
             r = self.pool.run_owned(
-                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)], 2400, cwd=wt, env=env,
+                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)], 2400, cwd=wt,
+                env=dict(env, SWEEP_CALLER="resweep"),
             )
             self.note(f"resweep exit {r.returncode}: {(r.stdout + r.stderr).strip()[-400:]}")
             return r.returncode == 0 and "green" in r.stdout, r.stdout + r.stderr
@@ -2636,7 +2637,8 @@ class Session(threading.Thread):
                 r = self.git(wt, *diff3, "rebase", "--continue", env=gitenv)
             self.pool.record_conflicts(pr, files_seen)
             sweep = self.pool.run_owned(
-                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)], 2400, cwd=wt, env=env,
+                [sys.executable, str(HERE / "sweep_locked.py"), "--update-pr", str(pr)], 2400, cwd=wt,
+                env=dict(env, SWEEP_CALLER="auto-rebase"),
             )
             self.note(f"sweep exit {sweep.returncode}: {(sweep.stdout + sweep.stderr).strip()[-600:]}")
             if sweep.returncode != 0 or "green" not in sweep.stdout:
@@ -3318,7 +3320,7 @@ class Pool:
             # the sessions' slots for over half the run.
             r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"],
                                self.cfg.main_check_s, cwd=wt,
-                               env=dict(os.environ), stdin=subprocess.DEVNULL)
+                               env=dict(os.environ, SWEEP_CALLER="main-check"), stdin=subprocess.DEVNULL)
             out = r.stdout + r.stderr
             if r.returncode == 0 and "green" in r.stdout:
                 return True, out
@@ -3981,11 +3983,17 @@ class Pool:
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.communicate()
+            # SIGTERM first, so a sweep records itself as killed (runs.jsonl), then SIGKILL.
+            for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, None)):
+                try:
+                    os.killpg(proc.pid, sig)
+                except OSError:
+                    pass
+                try:
+                    proc.communicate(timeout=grace)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
             raise
         finally:
             with self.lock:

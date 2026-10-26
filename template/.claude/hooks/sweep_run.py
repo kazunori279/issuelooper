@@ -30,6 +30,23 @@ the tree as it found them, it also writes the provenance record that
      "started_at": ..., "finished_at": ...}
 
 and prints `sweep record: <path>`. A red run prints no green line and exits 1.
+
+Every run, green or red, also appends one JSON line to `runs.jsonl` in that directory,
+written from `finally` (SIGTERM included), so a killed sweep is recorded too:
+
+    {"run_id", "sha", "clean", "base": {"main", "merge_base"}, "caller": {"kind",
+     "role", "session", "unit", "pr"}, "lane", "wait_s", "started_at", "finished_at",
+     "seconds", "exit", "outcome": green | red-tests | red-lint | red-integrity | killed,
+     "steps": [{"name", "status", "passed", "failed", "seconds"}],
+     "failures": [{"test", "error"}], "changed_files", "junit": [<xml paths>]}
+
+The caller comes from the environment: SWEEP_CALLER (the kind: worker, merger,
+resweep, auto-rebase, main-check; else CC_ROLE), CC_ROLE, POOL_WORKER, POOL_UNIT and
+SWEEP_PR; sweep_locked.py passes SWEEP_LANE and SWEEP_WAIT_S. red-lint is a failed
+command with no failing test in a pytest summary (in practice the lint step). With
+SWEEP_JUNIT=1 (`[sweep] junit`, for a pytest suite) each pytest run in the command
+also writes `<run_id>-<n>.xml` beside runs.jsonl, through the plugin in
+pytest_plugins/ (PYTEST_ADDOPTS); other suites ignore it.
 """
 
 from __future__ import annotations
@@ -38,9 +55,11 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,6 +94,12 @@ _GIT_SCRUB = (
 PYTEST_CMD = re.compile(r"\bpytest\b.*?\btests/([\w-]+)(?=/|\s|$)")
 PYTEST_SUMMARY = re.compile(r"^=*\s*((?:\d+ \w+(?:, )?)+) in [\d.]+s\b.*$")
 COUNT = re.compile(r"(\d+) (\w+)")
+SECONDS = re.compile(r" in ([\d.]+)s\b")
+# pytest's short summary (`FAILED tests/x.py::t - AssertionError: ...`), a failure's
+# section header (`____ test_name ____`) and the first `E   ...` line under it.
+FAILED_LINE = re.compile(r"^(?:FAILED|ERROR) (\S+)(?: - (.*))?$")
+SECTION = re.compile(r"^_{3,} (\S.*?) _{3,}$")
+E_LINE = re.compile(r"^E\s+(.*)$")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -137,6 +162,99 @@ def parse_suites(output: str) -> tuple[dict[str, int], list[str]]:
     return counts, problems
 
 
+def steps_of(output: str) -> list[dict]:
+    """Each pytest run in the output as a step: its area name (as parse_suites names
+    it), passed and failed counts, seconds, and status."""
+    steps: list[dict] = []
+    area = None
+    for raw in output.splitlines():
+        line = ANSI.sub("", raw)
+        m = PYTEST_CMD.search(line)
+        if m and "passed" not in line:
+            area = m.group(1)
+            continue
+        s = PYTEST_SUMMARY.match(line.strip())
+        if not s:
+            continue
+        tally = {kind: int(n) for n, kind in COUNT.findall(s.group(1))}
+        failed = sum(v for k, v in tally.items() if k in ("failed", "error", "errors"))
+        sec = SECONDS.search(line)
+        steps.append({"name": area or "tests", "status": "failed" if failed else "passed",
+                      "passed": tally.get("passed", 0), "failed": failed,
+                      "seconds": float(sec.group(1)) if sec else None})
+        area = None
+    return steps
+
+
+def failures_of(output: str) -> list[dict]:
+    """Each failing test pytest names (`FAILED <node id>`), with the first `E` line of
+    its traceback (or the reason on its summary line)."""
+    first_e: dict[str, str] = {}
+    section = None
+    for raw in output.splitlines():
+        line = ANSI.sub("", raw).rstrip()
+        m = SECTION.match(line)
+        if m:
+            section = m.group(1)
+            continue
+        e = E_LINE.match(line)
+        if e and section and section not in first_e:
+            first_e[section] = e.group(1).strip()[:300]
+    out = []
+    for raw in output.splitlines():
+        m = FAILED_LINE.match(ANSI.sub("", raw).strip())
+        if not m or any(f["test"] == m.group(1) for f in out):
+            continue
+        name = m.group(1).split("::")[-1]
+        cls = "::".join(m.group(1).split("::")[1:])
+        error = first_e.get(name) or first_e.get(cls.replace("::", ".")) or (m.group(2) or "")
+        out.append({"test": m.group(1), "error": error[:300]})
+    return out
+
+
+def runs_path() -> Path:
+    return config.record_dirs("sweep")[0] / "runs.jsonl"
+
+
+def append_run(record: dict) -> None:
+    """One line per run, in a single write (O_APPEND keeps concurrent lines whole)."""
+    path = runs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = (json.dumps(record, ensure_ascii=False) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def caller() -> dict:
+    role = os.environ.get("CC_ROLE", "")
+    return {"kind": os.environ.get("SWEEP_CALLER", "") or role or "manual", "role": role,
+            "session": os.environ.get("POOL_WORKER", ""), "unit": os.environ.get("POOL_UNIT", ""),
+            "pr": os.environ.get("SWEEP_PR", "") or os.environ.get("MERGE_PR", "")}
+
+
+def base_of(head: str | None) -> tuple[dict, list[str]]:
+    """origin/main and the merge base of HEAD with it, and the files HEAD changes since."""
+    main = (_git(["rev-parse", "origin/main"]) or "").strip()
+    fork = (_git(["merge-base", "origin/main", "HEAD"]) or "").strip() if head and main else ""
+    files = (_git(["diff", "--name-only", fork, "HEAD"]) or "").split() if fork else []
+    return {"main": main, "merge_base": fork}, files
+
+
+def junit_env(env: dict[str, str], prefix: Path) -> dict[str, str]:
+    """PYTEST_ADDOPTS and PYTHONPATH for the plugin that gives each pytest run its own
+    junit XML (a single --junitxml would be overwritten by the next pytest run)."""
+    plugins = str(HERE / "pytest_plugins")
+    env = dict(env)
+    env["PYTEST_ADDOPTS"] = (env.get("PYTEST_ADDOPTS", "") + " -p sweep_junit").strip()
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (plugins, env.get("PYTHONPATH", "")) if p)
+    env["SWEEP_JUNIT_PREFIX"] = str(prefix)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"  # no __pycache__ beside the plugin: the tree must not change
+    return env
+
+
 def sweep_line(counts: dict[str, int], before: int | None) -> str:
     total = sum(counts.values())
     head = f"{total}" if before is None else f"{before} → {total}"
@@ -170,18 +288,19 @@ def write_sweep_record(
     return target
 
 
-def run_command(command: str) -> tuple[int, str]:
-    """Run the suite, echoing its output line by line, and return (status, output)."""
+def run_command(command: str, env: dict[str, str] | None = None, sink: list[str] | None = None) -> tuple[int, str]:
+    """Run the suite, echoing its output line by line, and return (status, output).
+    Lines also go to sink as they come, for the record of a run that is killed."""
     proc = subprocess.Popen(
         ["bash", "-c", command],
         cwd=ROOT,
-        env=_clean_env(),
+        env=env or _clean_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
     )
-    lines: list[str] = []
+    lines: list[str] = sink if sink is not None else []
     assert proc.stdout is not None
     for line in proc.stdout:
         print(line, end="", flush=True)
@@ -190,7 +309,45 @@ def run_command(command: str) -> tuple[int, str]:
 
 
 def main(argv=None) -> int:
+    """The sweep, with its line in runs.jsonl written however it ends."""
     config.apply()
+    run = {"started": time.time(), "outcome": "killed", "exit": None, "output": []}
+
+    def stopped(signum, _frame):
+        raise SystemExit(128 + signum)
+    old = signal.signal(signal.SIGTERM, stopped)
+    try:
+        return sweep(argv, run)
+    finally:
+        signal.signal(signal.SIGTERM, old)
+        try:
+            write_run(run)
+        except Exception as exc:  # noqa: BLE001 - the record never changes the verdict
+            print(f"note: run not recorded ({exc})", file=sys.stderr)
+
+
+def write_run(run: dict) -> None:
+    out = "".join(run["output"])
+    sha = run.get("sha")
+    base, files = base_of(sha)
+    steps = steps_of(out)
+    outcome = run["outcome"]
+    if outcome not in ("green", "killed", "red-integrity"):
+        outcome = "red-tests" if any(st["failed"] for st in steps) or failures_of(out) else "red-lint"
+    prefix = run.get("junit_prefix")
+    append_run({
+        "run_id": run.get("run_id") or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{os.getpid()}",
+        "sha": sha, "clean": run.get("clean"), "base": base, "caller": caller(),
+        "lane": os.environ.get("SWEEP_LANE", ""), "wait_s": float(os.environ.get("SWEEP_WAIT_S", "") or 0),
+        "started_at": datetime.fromtimestamp(run["started"], timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "seconds": round(time.time() - run["started"], 1), "exit": run["exit"], "outcome": outcome,
+        "steps": steps, "failures": failures_of(out), "changed_files": files,
+        "junit": sorted(str(p) for p in prefix.parent.glob(prefix.name + "-*.xml")) if prefix else [],
+    })
+
+
+def sweep(argv, run: dict) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
         "--before", type=int, help="the total the sweep line counts up from"
@@ -202,6 +359,13 @@ def main(argv=None) -> int:
     head_before = git_head()
     status_before = git_status()
     dirty_before = bool(status_before.strip()) if status_before is not None else False
+    run.update(sha=head_before, clean=not dirty_before,
+               run_id=f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{(head_before or 'nohead')[:8]}-{os.getpid()}")
+    env = _clean_env()
+    if os.environ.get("SWEEP_JUNIT", "").strip().lower() in ("1", "true", "yes", "on"):
+        run["junit_prefix"] = runs_path().parent / run["run_id"]
+        runs_path().parent.mkdir(parents=True, exist_ok=True)
+        env = junit_env(env, run["junit_prefix"])
 
     print(f"sys.executable: {sys.executable}")
     print(f"root:           {ROOT}")
@@ -212,7 +376,8 @@ def main(argv=None) -> int:
         print("git:            (not a git checkout)")
     print(flush=True)
 
-    returncode, output = run_command(command)
+    returncode, output = run_command(command, env, run["output"])
+    run["exit"], run["outcome"] = returncode, "red"
 
     counts, problems = parse_suites(output)
     if returncode != 0:
@@ -242,6 +407,8 @@ def main(argv=None) -> int:
                 + "\n".join(f"  {ln}" for ln in new)
             )
 
+    if integrity:
+        run["outcome"] = "red-integrity"
     if problems or integrity:
         print("\n== sweep is red ==")
         for p in problems + integrity:
@@ -260,6 +427,7 @@ def main(argv=None) -> int:
         path = write_sweep_record(head_before, command, counts, started_at, finished_at)
         print(f"\nsweep record: {path}")
 
+    run["outcome"] = "green"
     print(f"\n{sweep_line(counts, args.before)}")
     return 0
 
