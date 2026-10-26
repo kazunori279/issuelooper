@@ -27,6 +27,16 @@ worker runs it from its worktree, never from the shared checkout.
     {"sha", "key", "status": "pass"|"fail", "steps": [{"name", "command", "rc",
      "seconds", "log"}], "scripts": [<saved copies>], "out", "started_at", "finished_at"}
 
+A script declares the acceptance checklist rows it covers ([accept] in
+.issuelooper/config.toml; the ids config.checklist_text() lists) on lines of its own,
+and a row that cannot apply with its reason:
+
+    # accept-rows: viewport:320x640 lang:ja always:keyboard-tab-enter
+    # accept-skip: live:voice-and-typed no microphone in headless Chromium
+
+The record keeps them ("rows", "skips"), and merge Gate 7 refuses one that misses a row
+the branch's paths trigger.
+
 `key` hashes the lines the branch adds and removes since its fork point, so a
 rebase that only moved the branch keeps its pass; a rebase that changed what the
 branch does needs a new check (--rerun replays the recorded scripts).
@@ -74,6 +84,27 @@ _GIT_SCRUB = (
     "GIT_OBJECT_DIRECTORY",
     "GIT_COMMON_DIR",
 )
+
+
+ROWS_LINE = re.compile(r"(?im)^[ \t]*#[ \t]*accept-rows?:[ \t]*(.+)$")
+SKIP_LINE = re.compile(r"(?im)^[ \t]*#[ \t]*accept-skip:[ \t]*(\S+)[ \t]+(?:[-\u2013\u2014:][ \t]*)?(\S.*)$")
+
+
+def script_rows(scripts) -> tuple[list[str], dict[str, str]]:
+    """The checklist rows the scripts declare they cover, and the rows they skip with
+    a reason (a skip without one does not count)."""
+    rows: set[str] = set()
+    skips: dict[str, str] = {}
+    for s in scripts:
+        try:
+            text = pathlib.Path(s).read_text(errors="replace")
+        except OSError:
+            continue
+        for m in ROWS_LINE.finditer(text):
+            rows.update(x for x in re.split(r"[\s,]+", m.group(1).strip()) if x)
+        for m in SKIP_LINE.finditer(text):
+            skips[m.group(1).rstrip(":")] = m.group(2).strip()
+    return sorted(rows), skips
 
 
 def _env(name: str, default: str = "") -> str:
@@ -345,11 +376,16 @@ def check(root: str, scripts: list[pathlib.Path], port: int) -> dict:
     finally:
         stop_group(app)
 
+    rows, skips = script_rows(saved)
+    print(f"checklist: ran {' '.join(rows) or 'no row'}"
+          + (f"; skipped {'; '.join(f'{k} ({v})' for k, v in skips.items())}" if skips else ""), flush=True)
     rec = {
         "sha": head,
         "status": "pass" if steps and all(s["rc"] == 0 for s in steps) else "fail",
         "steps": steps,
         "scripts": [str(c) for c in saved],
+        "rows": rows,
+        "skips": skips,
         "out": str(out),
         "app_log": str(server_log),
         "started_at": started_at,
@@ -477,6 +513,9 @@ def main(argv: list[str] | None = None) -> int:
         os.close(fd)
 
     summary = ", ".join(s["name"] for s in rec["steps"]) or "no step ran"
+    if rec.get("skips"):
+        # Reviewers read why a checklist row did not apply in the PR body.
+        summary += "; skipped " + "; ".join(f"{k}: {v}" for k, v in rec["skips"].items())
     print(f"\ndevcheck: {rec['sha'] or '(no commit)'} {rec['status']} ({summary})")
     for p in rec["problems"]:
         print(f"devcheck record not written: {p}")

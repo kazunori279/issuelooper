@@ -2163,14 +2163,54 @@ def test_review_gate() -> None:
 
 
 def write_devcheck_record(sha: str, status: str = "pass", key: str | None = None,
-                          steps: list | None = None) -> None:
+                          steps: list | None = None, rows: list | None = None, skips: dict | None = None) -> None:
     """The record devcheck.py would have written at `sha`."""
     if steps is None:
         steps = [{"name": "smoke", "rc": 0, "log": "/tmp/smoke.log"},
                  {"name": "script 1", "rc": 0 if status == "pass" else 1, "log": "/tmp/script-1.log"}]
     TEST_DEVCHECK_RECORDS.mkdir(parents=True, exist_ok=True)
-    (TEST_DEVCHECK_RECORDS / f"{sha}.json").write_text(
-        json.dumps({"sha": sha, "status": status, "key": key, "steps": steps}))
+    rec = {"sha": sha, "status": status, "key": key, "steps": steps}
+    if rows is not None:
+        rec.update(rows=rows, skips=skips or {})
+    (TEST_DEVCHECK_RECORDS / f"{sha}.json").write_text(json.dumps(rec))
+
+
+CHECKLIST_ENV = {
+    "ACCEPT_CHECKLIST": json.dumps({"viewports": ["1280x800", "320x640"], "languages": ["en", "ja"],
+                                    "always": ["keyboard: Tab, Enter, Escape"],
+                                    "triggers": {"src/static/*": ["viewports", "languages"]}}),
+    "ACCEPT_PATHS": "src/",
+}
+
+
+def test_gate_7_holds_the_live_check_to_the_checklist() -> None:
+    """Cohort 52's QA reopens were partial implementations in a few rows: 320 px, Escape,
+    the second language. Gate 7 refuses a live check that skipped a row the change triggers."""
+    head = "6" * 40
+    on = {"POOL_DEVCHECK": "1", "DEVCHECK_PATHS": "src/", **CHECKLIST_ENV}
+    ui = [{"path": "src/static/js/sheet.js", "changeType": "MODIFIED"}]
+    body = (f"<!-- worker -->\nFixes #90\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
+            f"- **Fail-before:** waived - owner ruling\n- **Live check:** {head} pass\n")
+
+    def merge(files):
+        env, _ = with_fake_gh(prs={"95": {"headRefOid": head, "body": body, "files": files}})
+        return run("gh pr merge 95 --squash", role="merger", extra_env={**env, **on})
+
+    write_devcheck_record(head, rows=["viewport:1280x800", "lang:en", "always:keyboard-tab-enter"])
+    verdict, reason = merge(ui)
+    check("a UI change whose check skipped 320 px and Japanese is refused", verdict, "refuse")
+    check("the refusal names the missing rows and how to declare or skip them",
+          all(x in reason for x in ("viewport:320x640", "lang:ja", "# accept-rows:", "# accept-skip:")), True)
+    check("and not the rows it ran", "`lang:en`" in reason, False)
+    write_devcheck_record(head, rows=["viewport:1280x800", "viewport:320x640", "lang:en", "always:keyboard-tab-enter"],
+                          skips={"lang:ja": "the change has no text"})
+    check("every row run, or skipped with a reason: merged", merge(ui)[0], "allow")
+    write_devcheck_record(head, rows=["always:keyboard-tab-enter"])
+    check("a change to other product code needs only the always rows",
+          merge([{"path": "src/data.json", "changeType": "MODIFIED"}])[0], "allow")
+    write_devcheck_record(head)
+    check("a record from before the checklist (no rows) is not held to it", merge(ui)[0], "allow")
+    (TEST_DEVCHECK_RECORDS / f"{head}.json").unlink()
 
 
 def test_devcheck_gate() -> None:

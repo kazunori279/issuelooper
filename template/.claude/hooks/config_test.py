@@ -139,6 +139,46 @@ finally:
     os.environ.clear()
     os.environ.update(saved)
 
+# The acceptance checklist: one JSON variable (its rows hold commas), read back as rows.
+CHECKLIST = """
+[accept]
+paths = ["src/"]
+batch = 4
+viewports = ["1280x800", "320x640"]
+languages = ["en", "ja"]
+always = ["reload mid-task and after", "keyboard: Tab, Enter, Escape"]
+live = ["voice and typed interruption"]
+[accept.triggers]
+"src/static/*" = ["viewports", "languages"]
+"src/live.py" = ["live"]
+"""
+saved = dict(os.environ)
+try:
+    import tomllib
+    values, unknown = config.env_from(tomllib.loads(CHECKLIST))
+    check("accept keys", (values.get("ACCEPT_PATHS"), values.get("POOL_ACCEPT_BATCH"), unknown), ("src/", "4", []))
+    os.environ.update(ACCEPT_CHECKLIST=values["ACCEPT_CHECKLIST"], ACCEPT_PATHS="src/")
+    check("rows with ids, commas kept", [r[0] for r in config.checklist()["rows"]],
+          ["viewport:1280x800", "viewport:320x640", "lang:en", "lang:ja", "always:reload-mid-task",
+           "always:keyboard-tab-enter", "live:voice-and-typed"])
+    check("a UI file needs the viewports, the languages and the always rows",
+          [r[0] for r in config.required_rows(["src/static/js/app.js"])],
+          ["viewport:1280x800", "viewport:320x640", "lang:en", "lang:ja", "always:reload-mid-task",
+           "always:keyboard-tab-enter"])
+    check("the live module its live rows; other product code the always rows; docs none",
+          ([r[0] for r in config.required_rows(["src/live.py"]) if r[1] == "live"],
+           [r[1] for r in config.required_rows(["src/db.py"])], config.required_rows(["docs/a.md"])),
+          (["live:voice-and-typed"], ["always", "always"], []))
+    check("the prompt text lists ids and triggers",
+          ("always:keyboard-tab-enter" in config.checklist_text(), "src/live.py -> live" in config.checklist_text()),
+          (True, True))
+    os.environ.pop("ACCEPT_CHECKLIST")
+    check("no checklist: no rows, no text", (config.required_rows(["src/static/a.js"]), config.checklist_text()),
+          ([], ""))
+finally:
+    os.environ.clear()
+    os.environ.update(saved)
+
 if failures:
     print("\n".join(failures))
     sys.exit(1)

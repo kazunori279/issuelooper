@@ -1820,14 +1820,11 @@ def check_pr_merge(command: str) -> None:
 
         # Gate 7: a change a user can see was used in the real environment first.
         if devcheck_on():
-            scope = devcheck_scope(
-                pr_issues(data, body),
-                [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
-                 if isinstance(f, dict)],
-                repo,
-            )
+            changed = [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
+                       if isinstance(f, dict)]
+            scope = devcheck_scope(pr_issues(data, body), changed, repo)
             if scope:
-                devcheck_gate(body, scope, target, head_sha, base_sha)
+                devcheck_gate(body, scope, target, head_sha, base_sha, changed)
 
         # Gate 3: the fix must be pinned by a test case that was red before it.
         if FAIL_BEFORE_WAIVER.search(body):
@@ -2002,8 +1999,31 @@ def devcheck_waiver_ok(body: str, scope: tuple[str, str], target: str) -> bool:
     return True
 
 
+def checklist_gap(rec: dict, paths: list[str]) -> list[tuple[str, str]]:
+    """The checklist rows ([accept] in config.toml) the branch's paths need that the
+    record neither ran nor skipped with a reason. A record from before the checklist
+    (no "rows") is not held to it."""
+    if "rows" not in rec:
+        return []
+    done = set(rec.get("rows") or []) | set((rec.get("skips") or {}).keys())
+    return [(rid, text) for rid, _, text in config.required_rows(paths) if rid not in done]
+
+
+def refuse_checklist_gap(gap: list[tuple[str, str]], sha: str) -> None:
+    block(
+        f"Gate 7 (live check): the live check at `{sha[:12]}` skips checklist rows this change needs: "
+        + ", ".join(f"`{rid}` ({text})" for rid, text in gap[:12])
+        + ".\n\nThe paths it changes trigger them (`[accept]` in .issuelooper/config.toml). Most "
+        "partial implementations the acceptance check found were in these rows: the narrow phone, "
+        "the second language, Escape, a reload. Cover each in your script and declare it on a line "
+        "of its own, `# accept-rows: <ids>`; a row that cannot apply to this change gets "
+        "`# accept-skip: <id> <why>` (reviewers read the reason). Then run devcheck.py again "
+        "(`--update-pr <N>`)."
+    )
+
+
 def devcheck_gate(
-    body: str, scope: tuple[str, str], target: str, head_sha: str, base_sha: str
+    body: str, scope: tuple[str, str], target: str, head_sha: str, base_sha: str, paths: list[str] | None = None
 ) -> None:
     import devcheck
 
@@ -2049,6 +2069,9 @@ def devcheck_gate(
             "report it quotes) describes, step by step from a fresh start, and pass it "
             "with --script.\n\n" + DEVCHECK_HOW
         )
+    gap = checklist_gap(rec, paths or [])
+    if gap:
+        refuse_checklist_gap(gap, sha)
     rec_sha = str(rec.get("sha") or "").lower()
     if head_sha and rec_sha != head_sha.lower():
         # In the guard's working directory, as merge_base and the other gates' reads.
@@ -2400,6 +2423,9 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
                     f"Gate 7 (live check): the body names a live check at `{m_live.group(1)[:12]}`, "
                     "and there is no passing record of it.\n\n" + DEVCHECK_HOW
                 )
+            gap = checklist_gap(rec, pr_create_paths(command, cwd))
+            if gap:
+                refuse_checklist_gap(gap, m_live.group(1))
         elif not m_live:
             issues = [n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body)
             scope = devcheck_scope(issues, pr_create_paths(command, cwd), "")

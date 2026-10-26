@@ -66,6 +66,20 @@ port_base = 8700             # DEVCHECK_PORT_BASE
 paths = ["src/"]             # DEVCHECK_PATHS
 labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS
 
+[accept]
+# The acceptance checklist (ids: viewport:<size>, lang:<code>, always:/live:<first three
+# words>). Live-check scripts declare `# accept-rows: <ids>`, or `# accept-skip: <id> <why>`;
+# gate 7 refuses a record that misses a row the PR's paths trigger. Most of cohort 52's QA
+# reopens were in these rows: 320 px, Escape, half-translated Japanese, voice barge-in,
+# scripted but not live.
+viewports = ["1280x800", "390x844", "320x640"]
+languages = ["en", "ja"]
+always = ["reload mid-task and after", "keyboard: Tab, Enter, Escape", "every entry point named in the issue"]
+live = ["set a location, then 'near here'", "voice and typed interruption", "a Japanese turn"]
+[accept.triggers]
+"src/concierge/static/*" = ["viewports", "languages"]
+"src/concierge/main.py" = ["live"]
+
 [ux]
 enabled = true               # POOL_UX: a tester walks the deployed app as a user and files findings
 gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many minutes

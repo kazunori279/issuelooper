@@ -365,6 +365,32 @@ def test_update_pr_writes_the_line() -> None:
            f"- **Live check:** {head} pass (script 1)" in body), (True, False, True))
 
 
+def test_the_record_keeps_the_checklist_rows_a_script_declares() -> None:
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="devcheck-"))
+    repo = make_repo()
+    env = env_for(tmp)
+    rows = script(open(OK_SCRIPT).read() + "# accept-rows: viewport:320x640, lang:ja\n"
+                  "#accept-rows: always:keyboard-tab-enter\n"
+                  "# accept-skip: live:voice-and-typed: no microphone in headless Chromium\n"
+                  "# accept-skip: lang:en\n")
+    rc, out = run(repo, env, "--script", rows)
+    rec = record(env, git(repo, "rev-parse", "HEAD"))
+    check(f"rows and skips with a reason are recorded ({out[-300:]})",
+          (rc, rec["rows"], rec["skips"]),
+          (0, ["always:keyboard-tab-enter", "lang:ja", "viewport:320x640"],
+           {"live:voice-and-typed": "no microphone in headless Chromium"}))
+    check("and printed", "checklist: ran always:keyboard-tab-enter lang:ja viewport:320x640; skipped" in out, True)
+    (repo / "src" / "app.txt").write_text((repo / "src" / "app.txt").read_text() + "more\n")
+    git(repo, "commit", "-q", "-am", "more")
+    run(repo, env, "--rerun", rec["sha"][:12])
+    check("a rerun replays the saved scripts, so the same rows",
+          record(env, git(repo, "rev-parse", "HEAD"))["rows"], rec["rows"])
+    run(repo, env, "--script", OK_SCRIPT)
+    check("a script that declares nothing: none, but the key is there",
+          (record(env, git(repo, "rev-parse", "HEAD"))["rows"], record(env, git(repo, "rev-parse", "HEAD"))["skips"]),
+          ([], {}))
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

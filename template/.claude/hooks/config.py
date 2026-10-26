@@ -20,14 +20,19 @@ apply() and `env` export it. Fixed names such as /tmp/mrg-121-auto collided acro
 repositories and runs: a leftover from another loop failed one rebase eight times.
 
 The keys and the variables they set are in KEYS below; `[env]` passes any other
-variable through as written.
+variable through as written. The acceptance checklist (`[accept]` viewports, languages,
+always, live and triggers) is one JSON variable, $ACCEPT_CHECKLIST, since its rows
+contain commas; checklist() reads it back.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
+import json
 import os
 import pathlib
+import re
 import shlex
 import sys
 import tempfile
@@ -97,7 +102,15 @@ KEYS = {
     ("pool", "run_dir"): "ISSUELOOPER_RUN",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",
     ("guard", "protected_paths"): "GUARD_PROTECTED_PATHS",
+    ("accept", "enabled"): "POOL_ACCEPT",
+    ("accept", "paths"): "ACCEPT_PATHS",
+    ("accept", "batch"): "POOL_ACCEPT_BATCH",
+    ("accept", "guard"): "ACCEPT_GUARD",
 }
+# [accept] keys that make up the checklist, carried together in $ACCEPT_CHECKLIST.
+CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers")
+# Each row group and the prefix of its rows' ids.
+CHECKLIST_GROUPS = (("viewports", "viewport"), ("languages", "lang"), ("always", "always"), ("live", "live"))
 # [agents.<role>] cli / model -> CCROLE_<ROLE>_CLI / CCROLE_MODEL_<ROLE>.
 ROLE_KEYS = {"cli": "CCROLE_{ROLE}_CLI", "model": "CCROLE_MODEL_{ROLE}"}
 
@@ -165,6 +178,7 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
     """The variables the config sets, and the keys it did not recognize."""
     out: dict[str, str] = {}
     unknown: list[str] = []
+    checklist_raw: dict = {}
     for table, body in cfg.items():
         if table == "env":
             for name, v in (body or {}).items():
@@ -174,6 +188,9 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
             unknown.append(table)
             continue
         for key, v in body.items():
+            if table == "accept" and key in CHECKLIST_KEYS:
+                checklist_raw[key] = v
+                continue
             if table == "agents" and isinstance(v, dict):
                 if key not in ROLES:
                     unknown.append(f"agents.{key}")
@@ -189,7 +206,86 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
                 unknown.append(f"{table}.{key}")
             else:
                 out[name] = _text(v)
+    if checklist_raw:
+        out["ACCEPT_CHECKLIST"] = json.dumps(checklist_raw, ensure_ascii=False)
     return out, unknown
+
+
+def path_matches(path: str, pattern: str) -> bool:
+    """A repository path against a glob of [accept] (or a directory ending in /): `*`
+    also crosses `/`, so `src/static/*` covers `src/static/js/app.js`."""
+    pattern = pattern.strip()
+    if not pattern:
+        return False
+    if pattern.endswith("/"):
+        return path.startswith(pattern)
+    return fnmatch.fnmatchcase(path, pattern)
+
+
+def accept_paths() -> list[str]:
+    """[accept] paths: the product code whose changes get an acceptance check."""
+    return [p.strip() for p in os.environ.get("ACCEPT_PATHS", "").split(",") if p.strip()]
+
+
+def checklist() -> dict:
+    """The acceptance checklist the worker's live check and the tester share:
+    {"rows": [(id, group, text)], "triggers": [(glob, [groups])]}. A row's id is its
+    group's prefix and its value (`viewport:320x640`, `lang:ja`) or the first three
+    words of its text (`always:reload-mid-task-and`): what a script declares."""
+    try:
+        raw = json.loads(os.environ.get("ACCEPT_CHECKLIST") or "{}")
+    except ValueError:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for group, prefix in CHECKLIST_GROUPS:
+        items = raw.get(group) or []
+        for text in items if isinstance(items, list) else [items]:
+            text = str(text).strip()
+            if not text:
+                continue
+            slug = text if group in ("viewports", "languages") else "-".join(re.findall(r"[a-z0-9]+", text.lower())[:3])
+            rid, k = f"{prefix}:{slug}", 2
+            while rid in seen:
+                rid, k = f"{prefix}:{slug}-{k}", k + 1
+            seen.add(rid)
+            rows.append((rid, group, text))
+    trig = raw.get("triggers") or {}
+    triggers = [(str(g), [str(x) for x in (v if isinstance(v, list) else [v])])
+                for g, v in (trig.items() if isinstance(trig, dict) else [])]
+    return {"rows": rows, "triggers": triggers}
+
+
+def required_rows(paths) -> list[tuple[str, str, str]]:
+    """The checklist rows a change to these paths needs: the groups its paths trigger,
+    and the `always` rows once it touches a trigger or [accept] paths."""
+    cl, groups, product = checklist(), set(), accept_paths()
+    for p in paths:
+        hit = False
+        for glob, gs in cl["triggers"]:
+            if path_matches(p, glob):
+                groups.update(gs)
+                hit = True
+        if hit or any(path_matches(p, q) for q in product):
+            groups.add("always")
+    return [r for r in cl["rows"] if r[1] in groups]
+
+
+def checklist_text() -> str:
+    """The checklist as the worker's and the tester's prompts show it ('' without one)."""
+    cl = checklist()
+    if not cl["rows"]:
+        return ""
+    lines = [f"    {rid:<28} {text}" for rid, _, text in cl["rows"]]
+    text = "Checklist rows (id, then what to check):\n" + "\n".join(lines)
+    if cl["triggers"]:
+        text += ("\nA change to these paths needs these groups, and the always rows:\n"
+                 + "\n".join(f"    {g} -> {', '.join(gs)}" for g, gs in cl["triggers"]))
+    if accept_paths():
+        text += f"\nA change to {', '.join(accept_paths())} needs the always rows."
+    return text
 
 
 def apply(root: pathlib.Path | None = None) -> dict[str, str]:

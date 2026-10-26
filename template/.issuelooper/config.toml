@@ -51,6 +51,22 @@ main_check = true            # POOL_MAIN_CHECK: after main moves, run the whole 
                              # background (not on a main the merge train checked); a red main files a `main is red`
                              # issue (P0), closed when it is green again
 
+[accept]
+# The acceptance checklist the worker's live check (devcheck.py, merge gate 7) and the
+# tester share. Rows have ids (viewport:<size>, lang:<code>, always:<first three words>,
+# live:<first three words>); a live-check script declares the rows it covers with a line
+# `# accept-rows: <ids>` and skips one that cannot apply with `# accept-skip: <id> <why>`.
+# Gate 7 refuses a record that misses a row the PR's paths trigger. Empty = no checklist.
+viewports = []               # e.g. ["1280x800", "390x844", "320x640"]
+languages = []               # e.g. ["en", "ja"]
+always = []                  # e.g. ["reload mid-task and after", "keyboard: Tab, Enter, Escape"]
+live = []                    # rows for a change to the live mode, e.g. ["a Japanese turn"]
+# Path globs (`*` crosses /; a trailing / is a directory) and the row groups a change to
+# them needs; any of them, or [accept] paths below, also needs the `always` rows.
+[accept.triggers]
+# "src/static/*" = ["viewports", "languages"]
+# "src/live.py" = ["live"]
+
 [deploy]
 command = ""                 # POOL_DEPLOY_CMD: run from the shared checkout after main moves; empty = no deploys
 
