@@ -932,6 +932,71 @@ def test_acceptance_batches_the_merged_issues_in_the_build() -> None:
         restore()
 
 
+def test_acceptance_units_run_side_by_side_and_never_share_an_issue() -> None:
+    """c55: one unit at a time accepted 6-8 issues an hour against 10-15 merges, and the
+    queue reached 62. Run 10b: the next unit took issues the last one was settling."""
+    restore = with_env(ACCEPT_ENV)
+    try:
+        h = Rig(state([iss(n, ["stage:accept", "P1"]) for n in range(1, 10)]),
+                accept=True, accept_paths=["src/"], accept_batch=2, accept_units=3)
+        h.pool.track_accept = lambda st: None
+        h.pool.settle_accept = lambda *a: []
+        b = h.pool.book
+        b.accept_ready, b.accept_target = [1, 2, 3, 4, 5], "d" * 40
+        started = h.step()
+        check("an empty pool: as many units as full batches need, up to POOL_ACCEPT_UNITS, issues split evenly",
+              [[x["n"] for x in u.info["issues"]] for u in started], [[1, 2], [3, 4], [5]])
+        check("each its own family, so they run side by side", len({u.family for u in started}), 3)
+        check("every issue held by its unit", sorted(b.accept_held), [1, 2, 3, 4, 5])
+        b.accept_ready = [1, 2, 3, 4, 5, 6, 7]
+        check("all units busy: nothing more", h.step(), [])
+        h.finish(started[2].key)
+        again = h.step()
+        check("a freed slot beside running units takes a full batch only, and not a held issue",
+              [[x["n"] for x in u.info["issues"]] for u in again], [[5, 6]])
+        b.accept_ready = [1, 2, 3, 4, 5, 6]
+        w = next(w for w in h.pool.sessions.values() if w.unit.key == started[0].key)
+        with h.pool.lock:  # the unit has ended and its verdicts are being settled
+            b.running.pop(w.unit.family)
+            h.pool.sessions.pop(w.unit.family)
+            b.accept_settling.add(w.unit.key)
+        check("issues of a unit being settled are not handed out", [x["n"] for u in h.step() for x in u.info["issues"]],
+              [])
+        b.accept_settling.discard(w.unit.key)
+        check("a held issue whose unit is gone (a restart, a lost thread) is free again",
+              sorted(x["n"] for u in h.step() for x in u.info["issues"]), [1, 2])
+    finally:
+        restore()
+
+
+def test_a_long_acceptance_queue_goes_first_and_ages_win() -> None:
+    restore = with_env(ACCEPT_ENV)
+    try:
+        h = Rig(state([iss(n, ["stage:accept", "P2"]) for n in range(1, 8)]), accept=True, accept_paths=["src/"],
+                accept_batch=3, accept_units=1, ux=True, spec=True, ux_idle_gap_s=0, spec_gap_s=0)
+        h.pool.track_accept = lambda st: None
+        b = h.pool.book
+        b.accept_ready, b.accept_target = list(range(1, 8)), "d" * 40
+        started = h.step()
+        check("over two batches waiting: the acceptance unit ranks first; no idle UX run or spec check (the "
+              "regular UX run still has its turn)",
+              ([(u.kind, bool(u.info.get("idle"))) for u in started], started[0].rank),
+              ([("accept", False), ("ux", False)], (2, 0, -1)))
+        h2 = Rig(state([iss(1, ["stage:accept", "P2"])]), accept=True, accept_paths=["src/"], accept_batch=3,
+                 ux=True, spec=True, ux_idle_gap_s=0, spec_gap_s=0)
+        h2.pool.track_accept = lambda st: None
+        h2.pool.book.accept_ready, h2.pool.book.accept_target = [1], "d" * 40
+        check("a short queue leaves the idle runs alone", sorted(u.kind for u in h2.step()), ["accept", "spec", "ux"])
+    finally:
+        restore()
+    t = lambda m: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - m * 60))  # noqa: E731
+    st = state([iss(1, ["stage:accept", "P2"]), iss(2, ["stage:accept", "P1"]), iss(3, ["stage:accept", "P2"]),
+                iss(4, ["stage:accept", "P1"]), iss(9, ["stage:triage", "P0"], body="Blocked by: #1")])
+    entry = {1: t(5), 2: t(10), 3: t(180), 4: t(120)}
+    check("depended on first; then priority raised one level per hour waited, then the longest wait",
+          ccpool.accept_order(st, [1, 2, 3, 4], entry, NOW), [1, 3, 4, 2])
+
+
 def test_track_accept_finds_the_merges_in_the_build() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-accept-"))
     work, g = git_repo(d)

@@ -142,8 +142,13 @@ request changes it gets an acceptance check after the merge, and the post-merge 
 check becomes part of it. Such a PR says `Refs #N`, not `Fixes`; the merge gate (and
 `gh pr create`) refuse one that would close its issue. The merge moves the issue to
 `stage:accept`. Once the build the tester checks contains it (the deployed sha, or
-`main` when nothing deploys), one tester unit accepts up to `[accept] batch` (6) such
-issues on that build. The tester did not write any of them, and uses live mode for
+`main` when nothing deploys), tester units accept such issues on that build: up to
+`[accept] units` (2) side by side, each with up to `[accept] batch` (6). A second unit
+starts beside a running one only once a full batch waits, and an issue belongs to one
+unit from its start until its verdict is settled. Issues that other open issues depend
+on go first, then by priority, raised one level for each hour waited at
+`stage:accept`, so a long wait wins in the end. While more than two batches wait, the
+testers skip idle-time UX runs and spec checks. The tester did not write any of them, and uses live mode for
 `needs:live` issues and changes to the checklist's live paths. Per issue, its signed comment
 ends in `accept-verified: <what ran>` (the supervisor closes the issue) or
 `accept-blocked: <what is missing>` (the owner). Anything else is a failure. A fresh

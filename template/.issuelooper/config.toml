@@ -55,9 +55,11 @@ main_check = true            # POOL_MAIN_CHECK: after main moves, run the whole 
 enabled = true               # POOL_ACCEPT: with paths set, every product change gets an acceptance check
 paths = []                   # ACCEPT_PATHS: product code, e.g. ["src/"]. A PR that changes it says `Refs #N`;
                              # the merge moves its issue to stage:accept, and once the deployed build (or main,
-                             # when nothing deploys) has it, one tester unit accepts a batch of such issues on it,
+                             # when nothing deploys) has it, tester units accept batches of such issues on it,
                              # needs:live ones in live mode. Empty = off: only needs:live issues get a live check
 batch = 6                    # POOL_ACCEPT_BATCH: issues one acceptance unit checks at most
+units = 2                    # POOL_ACCEPT_UNITS: acceptance units side by side at most (tester sessions, counted
+                             # against max_sessions); a second starts only once a full batch waits
 guard = ""                   # ACCEPT_GUARD: runs tests/accept/ (e.g. "uv run pytest -q tests/accept") on each deploy,
                              # with no model; a failing test files `Regression of #N`. The scripts of verified issues
                              # become a chore issue for those tests. Empty = off

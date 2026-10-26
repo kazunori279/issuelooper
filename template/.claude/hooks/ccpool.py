@@ -83,9 +83,11 @@ UNITS
           acceptance check: a PR that changes those paths says `Refs #N`, and the merge
           moves its issue to stage:accept (stage:live from before counts the same).
           Once the build the tester checks (the deployed sha, or main when nothing
-          deploys) contains its merge, one tester unit accepts up to POOL_ACCEPT_BATCH
-          (6) such issues against the checklist, live mode for needs:live issues and
-          live paths. settle_accept: `accept-verified:` closes, `accept-blocked:` goes
+          deploys) contains its merge, tester units accept such issues against the
+          checklist, live mode for needs:live issues and live paths: up to
+          POOL_ACCEPT_UNITS (2) side by side, each with up to POOL_ACCEPT_BATCH (6), a
+          second one only once the queue holds a full batch, and an issue in one unit at a
+          time until its verdict is settled (accept_order says which go first). settle_accept: `accept-verified:` closes, `accept-blocked:` goes
           to the owner, a failure is checked once more by a fresh session before it
           counts, then hands back to stage:triage, and a second counted failure goes to
           the owner. With [accept] guard set, the scripts of verified issues become one
@@ -432,6 +434,7 @@ class Config:
     accept: bool = False
     accept_paths: list = dataclasses.field(default_factory=list)
     accept_batch: int = 6  # issues one acceptance unit checks at most
+    accept_units: int = 2  # acceptance units side by side at most (c55: one at a time fell an hour behind)
     accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
@@ -543,6 +546,7 @@ class Config:
             accept=env_flag("POOL_ACCEPT", True) and bool(config.accept_paths()),
             accept_paths=config.accept_paths(),
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
+            accept_units=env_int("POOL_ACCEPT_UNITS", 2),
             accept_guard=e("ACCEPT_GUARD", "").strip(),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
@@ -768,6 +772,26 @@ def age_s(stamp: str, now: float) -> float:
     return now - dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
 
 
+def accept_order(st: dict, issues: list[int], entry: dict[int, str], now: float) -> list[int]:
+    """The order acceptance takes issues in: first those another open issue depends on (a
+    GitHub dependency or a `Blocked by:` line; their dependents may start already, but
+    the close is what the owner sees), then by priority, raised one level for each hour
+    waited at stage:accept so a long wait wins in the end, then the longest wait. In c55
+    the queue went strictly by priority: all 17 issues accepted were P1, and 49 of the 50
+    left waiting were P2."""
+    depended: set[int] = set()
+    for i in st["open"]:
+        depended.update(i.get("blockers") or [])
+        for m in claimlib.BLOCKED_LINE.finditer(i.get("body") or ""):
+            depended.update(int(x) for x in claimlib.NUM.findall(m.group(1)))
+    prio = {i["number"]: priority(i["labels"]) for i in st["open"]}
+
+    def key(n: int):
+        waited = age_s(entry.get(n, ""), now)
+        return (n not in depended, prio.get(n, 9) - int(waited // 3600), -waited, n)
+    return sorted(issues, key=key)
+
+
 # --- planning (pure; ccpool_test.py drives it) ----------------------------------
 
 
@@ -806,6 +830,11 @@ class Book:
         self.accept_rounds: collections.Counter = collections.Counter()
         self.accept_ready: list[int] = []
         self.accept_target = ""
+        # issue -> the acceptance unit that holds it, from its start until its verdicts are
+        # settled; the units being settled. In run 10b the next unit started while the last
+        # one settled, and 12 of 16 units checked issues another had or was settling.
+        self.accept_held: dict[int, str] = {}
+        self.accept_settling: set[str] = set()
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
@@ -943,26 +972,43 @@ def plan(
             )
 
     open_by = {i["number"]: i for i in st["open"]}
+    accept_long = False  # the acceptance queue is over two batches: it goes before idle-time runs
     if cfg.accept and book.accept_ready and book.accept_target:
-        # One tester unit accepts a batch of merged issues on the build that has them:
-        # near one tester session per deploy. The rest wait for the next unit.
-        batch = []
+        # Tester units accept batches of merged issues on the build that has them, up to
+        # POOL_ACCEPT_UNITS side by side (one at a time fell behind 10-15 merges an hour in
+        # c55). An issue is in one unit at a time, from its start until its verdicts are
+        # settled (book.accept_held); a held issue whose unit is gone is free again.
+        alive = {u.key for u in book.running.values()} | book.accept_settling
+        for n in [n for n, k in book.accept_held.items() if k not in alive]:
+            del book.accept_held[n]
+        live_of, ready = {}, []
         for n in book.accept_ready:
             i = open_by.get(n)
-            if not i or set(i["labels"]) & (HOLDS | IGNORED) or not set(i["labels"]) & set(ACCEPTING):
+            if (not i or n in book.accept_held or set(i["labels"]) & (HOLDS | IGNORED)
+                    or not set(i["labels"]) & set(ACCEPTING)):
                 continue
             live = cfg.live and bool((book.accept_merged.get(n) or {}).get("live") or "needs:live" in i["labels"])
             if live and book.missing:
                 continue  # the live environment lacks a file only the owner has (check_files)
-            batch.append((priority(i["labels"]), n, live))
-        batch.sort()
-        issues = [{"n": n, "title": open_by[n]["title"], "live": live, "since": book.live_entry.get(n, ""),
-                   "pr": (book.accept_merged.get(n) or {}).get("pr")}
-                  for _, n, live in batch[: max(1, cfg.accept_batch)]]
-        if issues:
+            live_of[n] = live
+            ready.append(n)
+        size = max(1, cfg.accept_batch)
+        accept_long = len(book.accept_ready) > 2 * size
+        families = [f"tst:accept{k}" for k in range(max(1, cfg.accept_units)) if f"tst:accept{k}" not in book.running]
+        running = any(u.kind == "accept" for u in book.running.values())
+        # A unit beside a running one only for a full batch; the issues split evenly.
+        k = min(len(families), len(ready) // size if running else -(-len(ready) // size))
+        take = accept_order(st, ready, book.live_entry, now)[: k * size]
+        per = -(-len(take) // k) if k else 0
+        for j in range(k):
+            chunk = take[j * per:(j + 1) * per]
+            if not chunk:
+                break
+            issues = [{"n": n, "title": open_by[n]["title"], "live": live_of[n], "since": book.live_entry.get(n, ""),
+                       "pr": (book.accept_merged.get(n) or {}).get("pr")} for n in chunk]
             sha = book.accept_target
             key = f"accept:{sha[:12]}:" + ",".join(f"{x['n']}@{x['since']}#{book.accept_rounds[x['n']]}" for x in issues)
-            units.append(Unit("tester", "accept", key, "tst:accept", None, (2, 1, 0),
+            units.append(Unit("tester", "accept", key, families[j], None, (2, 0, -1) if accept_long else (2, 1, 0),
                               {"sha": sha, "deployed": bool(cfg.deploy_cmd), "issues": issues}))
     seen_prs = set()
     for pr in sorted(st["prs"], key=lambda p: p["number"]):
@@ -1115,7 +1161,9 @@ def plan(
     busy = any(r in ("worker", "merger") for r in book.role_counts()) or any(
         u.role in ("worker", "merger") and not book.why_not(u, cfg, now) for u in units
     )
-    if ux_sha and not busy:
+    if accept_long:
+        pass  # a long acceptance queue takes the testers before idle-time UX runs and spec checks
+    elif ux_sha and not busy:
         info = {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd)}
         if (cfg.ux and not ux_running and not any(u.kind == "ux" for u in units)
                 and now - book.last_ux_t >= cfg.ux_idle_gap_s):
@@ -3236,6 +3284,9 @@ class Pool:
                 b.last_spec_t = self.clock()
             if u.info.get("idle") or u.kind == "spec":
                 b.extra_runs += 1
+            if u.kind == "accept":
+                for x in u.info["issues"]:
+                    b.accept_held[x["n"]] = u.key
             w = Session(self, u, self.seq)
             self.sessions[u.family] = w
         self.log("start", session=self.seq, role=u.role, unit=u.key)
@@ -3265,6 +3316,8 @@ class Pool:
         with self.lock:
             b = self.book
             b.running.pop(u.family, None)
+            if u.kind == "accept":
+                b.accept_settling.add(u.key)  # its issues stay held until settled, below
             self.sessions.pop(u.family, None)
             self.ports.discard(w.port)
             if outcome == "ok":
@@ -3338,9 +3391,17 @@ class Pool:
             self.quota_seen(u.role)
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
             self.settle_live(u)
-        if u.role == "tester" and u.kind == "accept" and (outcome == "ok" or outcome.startswith(("timed out", "failed"))):
-            verified = self.settle_accept(u, w.started, outcome == "ok")  # one that timed out may have settled some
-            self.accept_chore(w.dir, verified)
+        if u.kind == "accept":
+            try:
+                if outcome == "ok" or outcome.startswith(("timed out", "failed")):
+                    verified = self.settle_accept(u, w.started, outcome == "ok")  # a timed-out one may have settled some
+                    self.accept_chore(w.dir, verified)
+            finally:
+                with self.lock:
+                    for x in u.info["issues"]:
+                        if self.book.accept_held.get(x["n"]) == u.key:
+                            del self.book.accept_held[x["n"]]
+                    self.book.accept_settling.discard(u.key)
         if u.kind == "ux":
             self.record_ux_score(w)
         extra = {}
@@ -4824,7 +4885,8 @@ class Pool:
             "feed_pending_since": self.pending_since,
             "main_check": self.main_check_last,
             "train": {"running": self.train_running, "queue": sorted(self.book.train)},
-            "accept": {"ready": self.book.accept_ready, "build": self.book.accept_target[:12]},
+            "accept": {"ready": self.book.accept_ready, "build": self.book.accept_target[:12],
+                       "held": sorted(self.book.accept_held)},
             "missing_files": self.book.missing,
             "ux_scores": self.ux_scores[-10:],
         }

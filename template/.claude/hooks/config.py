@@ -106,6 +106,7 @@ KEYS = {
     ("accept", "paths"): "ACCEPT_PATHS",
     ("accept", "batch"): "POOL_ACCEPT_BATCH",
     ("accept", "guard"): "ACCEPT_GUARD",
+    ("accept", "units"): "POOL_ACCEPT_UNITS",
 }
 # [accept] keys that make up the checklist, carried together in $ACCEPT_CHECKLIST.
 CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers")
