@@ -2862,6 +2862,41 @@ def test_a_check_that_failed_on_the_machine_blames_nobody() -> None:
           (2, True, True))
 
 
+def test_the_second_try_reruns_only_the_failing_tests() -> None:
+    """Cohort 52: a red main check's second full run cost 0.7 h a cohort, and every held
+    PR's second full re-sweep as long again; the failing tests alone say the same."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-rerun-"))
+    h = Rig(state(main="1" * 40), main_check=True, gh="true",
+            rerun_cmd=f"echo {{tests}} > {d}/ran; grep -q flaky {d}/ran")
+    check("no [sweep] rerun: the caller runs the whole check again", Rig(state()).pool.rerun_tests(str(d), ["a::b"]),
+          (None, ""))
+    check("no node id to name: the whole check again", h.pool.rerun_tests(str(d), ["`make verify` exited 2"]), (None, ""))
+    ok, _ = h.pool.rerun_tests(str(d), ["tests/e2e/test_a.py::test_flaky[chromium]"])
+    check("the command gets the failing tests, quoted", (ok, (d / "ran").read_text().strip()),
+          (True, "tests/e2e/test_a.py::test_flaky[chromium]"))
+    check("and fails when they fail", h.pool.rerun_tests(str(d), ["tests/e2e/test_a.py::test_real"])[0], False)
+    red = "FAILED tests/e2e/test_a.py::test_real - boom\n== sweep is red ==\n"
+    full = []
+    h.pool.sweep_main = lambda sha: full.append(sha) or (True, "green")
+    h.pool.rerun_at = lambda ref, tests, fetch="main": (False, "1 failed")
+    check("the failing tests fail again alone: main is red, with no second full run",
+          (h.pool.second_look("a" * 40, red)[0], full), (False, []))
+    h.pool.rerun_at = lambda ref, tests, fetch="main": (True, "1 passed")
+    check("they pass alone: flaky, main green, still no second full run",
+          (h.pool.second_look("b" * 40, red)[0], full, any("failed and passed at one commit" in e for e in h.pool.events)),
+          (True, [], True))
+    stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    refuse = "echo '{\"decision\": \"block\", \"reason\": \"does not match Sweep SHA\"}'\n"
+    real = ccpool.Pool.rerun_at
+    ccpool.Pool.rerun_at = lambda self, ref, tests, fetch="main": (False, "1 failed")
+    try:
+        outcome, calls, log, _ = resweep_session(stale, refuse, sweeps=[(False, RED_SWEEP)])
+    finally:
+        ccpool.Pool.rerun_at = real
+    check("a re-sweep whose failing tests fail again alone: handed back after one full sweep",
+          (outcome, len(calls), "pr comment 9" in log), ("sweep red at the head (handed back)", 1, True))
+
+
 GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "
               "echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
               "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'; fi\n")

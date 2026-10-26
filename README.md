@@ -108,7 +108,8 @@ its own green sweep shows the result is not red; the fix itself is such a PR);
 others wait, without a hand-back (`POOL_RED_HOLD=0` lets them through). A PR whose
 re-sweep fails only where that red `main` fails is held for a later try rather than
 handed back. The merged-tree check and
-re-sweeps run once more before acting on a failure (a PR that fails twice the same
+re-sweeps run once more before acting on a failure (only the failing tests, with
+`[sweep] rerun = "<command with {tests}>"`) (a PR that fails twice the same
 way is handed back with the failing tests; twice differently, it is held as flaky),
 and a test that fails and then passes at the same commit (main, a PR's head or a
 merged tree) is flaky: the supervisor files a `Flaky test:` issue for it (or comments

@@ -358,6 +358,7 @@ class Config:
     # timeout, a UX run 69 on 60. 0 = no ceiling.
     timeout_ceiling: float = 1.5
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
+    rerun_cmd: str = ""  # [sweep] rerun: reruns the named failing tests ({tests}); empty = the whole check again
     main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
     main_check_s: float = 1200  # the main check's time limit (run 9: 58-375 s, one hung for its 3600 s)
     fast_check_s: float = 120
@@ -458,6 +459,7 @@ class Config:
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
+            rerun_cmd=e("SWEEP_RERUN", "").strip(),
             main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
             main_check_s=float(e("POOL_MAIN_CHECK_S", "") or 1200),
             fast_check_s=float(e("POOL_FAST_CHECK_S", "") or 120),
@@ -2211,10 +2213,19 @@ class Session(threading.Thread):
                     return held
                 if swept is False and "== sweep is red ==" in out:
                     # Once more before acting on it: single flaky failures handed PRs back.
+                    # The failing tests alone first, when the project says how ([sweep] rerun):
+                    # failing again, they are the PR's; passing, the whole sweep runs again
+                    # for the record Gate 2 reads.
+                    rerun, _ = self.pool.rerun_at(head, failing_tests(out), fetch=branch or "main")
+                    if rerun is False:
+                        return self.sweep_hand_back(pr, n, head, out)
+                    if rerun:
+                        self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
                     swept, again = self.resweep(pr, branch, head, env)
                     if swept:
                         self.note(f"the re-sweep passed on a second try (flaky: {', '.join(failing_tests(out)[:3])})")
-                        self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
+                        if rerun is None:
+                            self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
                     elif not same_failure(out, again):
                         return self.flaky_hold(pr, "re-sweep", out, again)
                     else:
@@ -2404,7 +2415,9 @@ class Session(threading.Thread):
                     self.pool.event(f"PR #{pr}: the merged-tree check timed out; held, tried again on a later poll")
                     return "held (the merged-tree check timed out)"
             elif not ok:  # once more: a single flaky failure handed PRs #106 and #103 back
-                ok, again = self.fast_check(wt, env)
+                ok, again = self.pool.rerun_tests(wt, failing_tests(why), env)  # the failing tests alone
+                if ok is None:
+                    ok, again = self.fast_check(wt, env)
                 self.note(f"merged-tree check, second try: {'ok (flaky)' if ok else again[-400:]}")
                 if ok:
                     self.pool.report_flaky(f"PR #{pr}'s head {head[:8]} merged with main {main[:8]}",
@@ -3396,6 +3409,37 @@ class Pool:
         self.flaky_known = (time.time(), known)
         return known
 
+    def rerun_tests(self, wt: str, tests: list[str], env: dict | None = None) -> tuple[bool | None, str]:
+        """[sweep] rerun with just the failing tests, in a worktree that exists: (passed,
+        output), or (None, "") when there is no such command or no test to name, and the
+        caller runs the whole check again (in cohort 52 a red main check's second full run
+        took 0.7 h a cohort, and each held PR's second full re-sweep as long again)."""
+        tests = [t for t in tests if "::" in t]
+        if not self.cfg.rerun_cmd or not tests or "{tests}" not in self.cfg.rerun_cmd:
+            return None, ""
+        cmd = self.cfg.rerun_cmd.replace("{tests}", " ".join(shlex.quote(t) for t in tests))
+        try:
+            r = self.run_owned(["bash", "-c", cmd], 900, cwd=wt, env=env or dict(os.environ),
+                               stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        return r.returncode == 0, (r.stdout + r.stderr)[-6000:]
+
+    def rerun_at(self, ref: str, tests: list[str], fetch: str = "main") -> tuple[bool | None, str]:
+        """rerun_tests in a fresh worktree at ref (None: not run, or git could not)."""
+        if not self.cfg.rerun_cmd or not [t for t in tests if "::" in t]:
+            return None, ""
+        root, wt = str(repo_root()), scratch(f"fresh-rerun-{ref[:12]}")
+        remove_worktree(root, wt, self.log)
+        try:
+            subprocess.run(["git", "-C", root, "fetch", "-q", "origin", fetch], capture_output=True, timeout=300)
+            if subprocess.run(["git", "-C", root, "worktree", "add", "-q", "--detach", wt, ref],
+                              capture_output=True).returncode != 0:
+                return None, ""
+            return self.rerun_tests(wt, tests)
+        finally:
+            remove_worktree(root, wt, self.log)
+
     def second_look(self, sha: str, out: str) -> tuple[bool | None, str]:
         """A red main check, looked at again before it holds merges. When it fails only
         tests with an open `Flaky test:` issue, main counts as green and that issue gets
@@ -3420,7 +3464,11 @@ class Pool:
             self.event(f"main {sha[:8]} failed only known flaky tests ({', '.join(failing[:2])}); "
                        "counted as green, and their issue has a comment")
             return True, out
-        again, out2 = self.sweep_main(sha)
+        again, out2 = self.rerun_at(sha, failing)
+        if again is False:
+            return False, out  # the failing tests fail again: the full output tells the most
+        if again is None:
+            again, out2 = self.sweep_main(sha)
         if again:
             self.report_flaky(f"main at {sha[:8]}", failing)
             return True, out2

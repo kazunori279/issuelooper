@@ -53,6 +53,7 @@ KEYS = {
     ("sweep", "slots"): "SWEEP_SLOTS",
     ("sweep", "record_dir"): "SWEEP_RECORD_DIR",
     ("sweep", "junit"): "SWEEP_JUNIT",
+    ("sweep", "rerun"): "SWEEP_RERUN",
     ("sweep", "fast_command"): "POOL_FAST_CHECK_CMD",
     ("sweep", "main_check"): "POOL_MAIN_CHECK",
     ("deploy", "command"): "POOL_DEPLOY_CMD",

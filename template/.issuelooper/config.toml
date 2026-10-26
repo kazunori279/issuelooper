@@ -27,6 +27,9 @@ port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried;
 command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
 slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time (the main check below runs
                              # in a lane of its own, beside these)
+rerun = ""                   # SWEEP_RERUN: reruns only the failing tests, named by {tests} (pytest node ids),
+                             # for the second try of a red main check, re-sweep or merged-tree check, as in
+                             # "uv run pytest -q {tests}". Empty = that second try runs the whole check again
 junit = false                # SWEEP_JUNIT: a pytest suite: each pytest run in a sweep also writes a junit XML
                              # (per-test times and results) beside sweep/runs.jsonl, which records every run
 fast_command = ""            # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit
