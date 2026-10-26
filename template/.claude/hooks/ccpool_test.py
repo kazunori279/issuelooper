@@ -2945,6 +2945,36 @@ def test_a_held_pr_is_not_reswept_at_the_same_head() -> None:
           (["merge"], {}))
 
 
+def test_a_flaky_test_has_a_deadline() -> None:
+    """Cohort 52: test_issue_96 failed 29 runs (1 in 3 even alone) and nobody fixed it."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-flakydl-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_LOG)
+    gh.chmod(0o755)
+    mark = ccpool.FLAKY_MARK
+    (d / "gh.list").write_text(json.dumps([{
+        "number": 96, "title": "Flaky test: t", "createdAt": "2026-10-24T10:00:00Z", "labels": [{"name": "P2"}],
+        "body": mark + "\n- `tests/e2e/test_issue_96.py::test_resize`",
+        "comments": [{"createdAt": "2026-10-24T15:00:00Z", "body": mark + "\n- `tests/e2e/test_issue_21.py::test_order`"},
+                     {"createdAt": "2026-10-24T09:00:00Z", "body": "- `tests/e2e/test_old.py::test_x` (no mark)"}]}]))
+    h = Rig(state(), gh=str(gh), flaky_merges=10)
+    h.pool.merges_since = lambda at: {"2026-10-24T10:00:00Z": 12, "2026-10-24T15:00:00Z": 3}.get(at, 99)
+    h.pool.flaky_deadlines()
+    log = (d / "gh.log").read_text()
+    check("past 10 merges: one comment naming only that test, and the issue raised to P1",
+          ("tests/e2e/test_issue_96.py::test_resize` (12 merges)" in log, "test_issue_21" in log.split("issue comment")[-1],
+           "test_old" in log.split("issue comment")[-1], "issue edit 96 --add-label P1 --remove-label P2" in log),
+          (True, False, False, True))
+    rows = json.loads((d / "gh.list").read_text())
+    rows[0]["comments"].append({"createdAt": "2026-10-25T00:00:00Z",
+                                "body": ccpool.FLAKY_DEADLINE + "\n- `tests/e2e/test_issue_96.py::test_resize`"})
+    (d / "gh.list").write_text(json.dumps(rows))
+    (d / "gh.log").write_text("")
+    h.pool.flaky_known = (0.0, {})
+    h.pool.flaky_deadlines()
+    check("said once: no second comment", "issue comment" in (d / "gh.log").read_text(), False)
+
+
 GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "
               "echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
               "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'; fi\n")

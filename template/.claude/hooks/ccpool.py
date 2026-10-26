@@ -168,7 +168,9 @@ on by default): its green sweep shows the merge leaves main no worse, and the fi
 is such a PR, so the hold ends with it. A test that fails and then passes at the same
 commit (the main check's second run, a re-sweep's second try, the merged-tree check's) is
 flaky: an issue `Flaky test: <tests>` is filed with FLAKY_MARK (or the open one gets a
-comment), and only tests so marked count as known flaky.
+comment), and only tests so marked count as known flaky. One still flaky after
+POOL_FLAKY_MERGES (10) merges gets one comment (FLAKY_DEADLINE) asking to fix or delete
+it, and its issue goes to P1.
 
 MONITOR
 
@@ -336,6 +338,7 @@ class Config:
     deploy_grace_s: float = 300
     key_tries: int = 2
     family_max: int = 6
+    flaky_merges: int = 10  # merges a recorded flaky test has to be fixed or deleted in (0 = no deadline)
     hold_retry_s: float = 60  # a unit that ended held is due again after this, without spending a try
     crash_max: int = 3
     crash_pause_s: float = 120
@@ -443,6 +446,7 @@ class Config:
             key_tries=env_int("POOL_KEY_TRIES", 2),
             family_max=env_int("POOL_FAMILY_MAX", 6),
             hold_retry_s=float(e("POOL_HOLD_RETRY_S", "") or 60),
+            flaky_merges=env_int("POOL_FLAKY_MERGES", 10),
             crash_max=env_int("POOL_CRASH_MAX", 3),
             crash_pause_s=float(e("POOL_CRASH_PAUSE_S", "120")),
             quota_resumes=env_int("POOL_QUOTA_RESUMES", 8),
@@ -657,6 +661,8 @@ def failing_tests(out: str) -> list[str]:
 FAST_TIMEOUT = "the fast check timed out after"
 # In a `Flaky test:` issue's body or comment: these tests failed and passed at one commit.
 FLAKY_MARK = "<!-- flaky: failed and passed at one commit -->"
+# On the comment that says a recorded flaky test is past its deadline (once per test).
+FLAKY_DEADLINE = "<!-- flaky: past its deadline -->"
 # The machine, not the code: a check that failed this way says nothing about the PR. In
 # run 9 /tmp ran out of inodes and PRs #57 and #59 were handed back for it.
 INFRA = re.compile(r"(?i)no space left on device|os error 28|\bENOSPC\b|disk quota exceeded|\bEDQUOT\b|"
@@ -2910,6 +2916,7 @@ class Pool:
         self.starving: dict[int, dict] = {}  # PR -> {"files", "since", "rank"}: see check_starving
         self.fast_timeouts: set = set()  # (pr, head) whose merged-tree check timed out once
         self.flaky_known: tuple[float, dict[str, int]] = (0.0, {})  # (read at, test -> its open Flaky issue)
+        self.flaky_rows: list[dict] = []  # the open `Flaky test:` issues as last read (flaky_deadlines)
         self.red_failed: dict[str, str] = {}  # test -> the red main it failed on (sweep_hand_back)
         self.own_deployed = ""
         self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
@@ -3355,6 +3362,7 @@ class Pool:
             if ok is False:
                 ok, out = self.second_look(sha, out)
             self.main_checked(sha, ok, out)
+            self.flaky_deadlines()
         except Exception as exc:  # noqa: BLE001 - a failed check is not a failed supervisor
             self.log("main_check_error", sha=sha[:12], error=str(exc)[:300])
         finally:
@@ -3440,11 +3448,12 @@ class Pool:
         if time.time() - at < max_age:
             return known
         r = self.gh("issue", "list", "--state", "open", "--search", "Flaky test in:title",
-                    "--json", "number,title,body,comments")
+                    "--json", "number,title,body,comments,createdAt,labels")
         try:
             rows = [i for i in json.loads(r.stdout or "[]") if str(i.get("title", "")).startswith("Flaky test")]
         except (ValueError, TypeError):
             return known  # keep what was known; read again next time
+        self.flaky_rows = rows
         known = {}
         for i in rows:
             for text in [str(i.get("body") or "")] + [str(c.get("body") or "") for c in i.get("comments") or []]:
@@ -3485,6 +3494,58 @@ class Pool:
             return self.rerun_tests(wt, tests)
         finally:
             remove_worktree(root, wt, self.log)
+
+    def flaky_deadlines(self) -> None:
+        """A test recorded as flaky (FLAKY_MARK) must be fixed or deleted within
+        POOL_FLAKY_MERGES merges. Past that, its issue gets one comment saying so
+        (FLAKY_DEADLINE, which also keeps it from being said twice) and P1 if it had a
+        lower priority. In cohort 52 test_issue_96 failed 29 runs, and fails 1 in 3 even
+        alone, and nobody fixed it."""
+        if not self.cfg.flaky_merges:
+            return
+        self.flaky_tests()
+        for i in self.flaky_rows:
+            texts = [(i.get("createdAt") or "", str(i.get("body") or ""))] + [
+                (c.get("createdAt") or "", str(c.get("body") or "")) for c in i.get("comments") or []]
+            since: dict[str, str] = {}
+            noted: set[str] = set()
+            for at, text in texts:
+                names = re.findall(r"`([^`\s]+::[^`]+)`", text)
+                if FLAKY_DEADLINE in text:
+                    noted.update(names)
+                elif FLAKY_MARK in text:
+                    for t in names:
+                        since.setdefault(t, at)
+            due = []
+            for t, at in since.items():
+                if t in noted or not at:
+                    continue
+                merges = self.merges_since(at)
+                if merges >= self.cfg.flaky_merges:
+                    due.append((t, merges))
+            if not due:
+                continue
+            n = i["number"]
+            self.gh("issue", "comment", str(n), "--body", (
+                f"<!-- merger -->\n{FLAKY_DEADLINE}\nThese tests were recorded as flaky and are still flaky after "
+                f"{self.cfg.flaky_merges} or more merges:\n\n" + "\n".join(f"- `{t}` ({k} merges)" for t, k in due)
+                + "\n\nFix each one so it passes reliably, or delete it if another test already covers what it "
+                "checks. Every failure costs a sweep and a second try, and a known-flaky test no longer turns main red, "
+                "so it hides real failures too."))
+            labels = {str(x.get("name") if isinstance(x, dict) else x) for x in i.get("labels") or []}
+            if not labels & {"P0", "P1"}:
+                self.gh("issue", "edit", str(n), "--add-label", "P1",
+                        *[a for p in sorted(labels & {"P2", "P3"}) for a in ("--remove-label", p)])
+            self.log("flaky_deadline", issue=n, tests=[t for t, _ in due][:5])
+            self.event(f"flaky test(s) {', '.join(t for t, _ in due[:2])} past their deadline of "
+                       f"{self.cfg.flaky_merges} merges: #{n} says so, at P1")
+            self.flaky_known = (0.0, self.flaky_known[1])  # its comments changed
+
+    def merges_since(self, at: str) -> int:
+        """Commits on origin/main since an ISO time: the merges (each lands as one squash commit)."""
+        r = subprocess.run(["git", "-C", str(repo_root()), "rev-list", "--count", f"--since={at}", "origin/main"],
+                           capture_output=True, text=True, timeout=60)
+        return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
 
     def second_look(self, sha: str, out: str) -> tuple[bool | None, str]:
         """A red main check, looked at again before it holds merges. When it fails only

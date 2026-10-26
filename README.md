@@ -116,7 +116,8 @@ way is handed back with the failing tests; twice differently, it is held as flak
 and a test that fails and then passes at the same commit (main, a PR's head or a
 merged tree) is flaky: the supervisor files a `Flaky test:` issue for it (or comments
 on the open one). A later green commit proves nothing: that rule once labeled a main
-break as flaky. `[sweep] main_check = false`
+break as flaky. A flaky test still flaky after `POOL_FLAKY_MERGES` (10) merges gets one
+comment on its issue asking to fix or delete it, and the issue goes to P1. `[sweep] main_check = false`
 turns it off.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
