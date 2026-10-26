@@ -33,7 +33,10 @@ If live checks are on and any acceptance criterion can only be observed in the
 live environment (`.issuelooper/project.md`, *Live mode*), add `needs:live`
 (`gh issue edit $N --add-label needs:live`) and write `Refs #N` instead of
 `Fixes #N` in the PR. The merge gate refuses a PR that would close a
-`needs:live` issue.
+`needs:live` issue. With `[accept] paths` set (your prompt names them), every PR that
+changes them writes `Refs #N` too: the issue waits at `stage:accept` after the merge
+until a tester who did not write it checks it on the deployed build, through the same
+checklist as your live check.
 
 **Check a `needs:live` change in the live environment yourself, before the PR.**
 The tester's live check after the merge is the gate, but a change it sends back
@@ -87,7 +90,10 @@ approach. Read the way a careful engineer with a short budget does:
 Then write the test. When a test of the same flow already exists, extend or
 parametrize it (a new case, a new viewport or language); otherwise put it **in a
 new file of its own**, named `test_issue_$N.py` in the suite
-`.issuelooper/project.md` names for this kind of change. Never append to a shared
+`.issuelooper/project.md` names for this kind of change. With `[accept] guard` set,
+a behavior a user drives that is the issue's acceptance goes in
+`tests/accept/test_accept_$N.py` instead (Playwright, scripted mode): the supervisor
+runs `tests/accept/` against every deploy, so it guards the fix from then on. Never append to a shared
 catch-all test file: every worker appending to the same file is what makes pull
 requests conflict. A test drives the behavior; the review gate rejects these:
 lint or structure written as a test (`ruff format --check`, Makefile greps, line
@@ -152,7 +158,21 @@ from a fresh start, as above, and also the steps a user would take next around
 the change (set a value, then use what depends on it; switch the language, then
 ask again). Read the screenshots: a script that exits 0 says the steps ran, not
 that the result is right. Run it again after any new commit; put the sha under
-*Live check* in the PR body. A failure: read `app.log` and the step logs in the
+*Live check* in the PR body.
+
+The checklist (`[accept]`, in your prompt with its row ids): cover every row your
+change triggers (a UI file: each viewport and each language; the live module: the live
+rows; any product change: the always rows) and declare them in the script, each on a
+line of its own:
+
+```python
+# accept-rows: viewport:1280x800 viewport:320x640 lang:en lang:ja always:keyboard-tab-enter
+# accept-skip: live:voice-and-typed no microphone in headless Chromium
+```
+
+devcheck.py prints `checklist: ran ...`, and gate 7 refuses a check that misses a
+triggered row, naming it. Skip only a row that cannot apply to this change, with the
+reason; reviewers read it. A failure: read `app.log` and the step logs in the
 directory it names, fix, commit, check again. A change no user can see waives it
 (`- **Live check:** waived - no visible change`); an issue with one of the labels
 cannot be waived that way.
@@ -194,7 +214,7 @@ The PR body:
 
 ```
 <!-- worker -->
-Fixes #N                         <- Refs #N if the issue carries needs:live
+Fixes #N                         <- Refs #N if the issue carries needs:live, or the PR changes [accept] paths
 
 **Cause:** <file:line and one or two sentences>
 **Change:** <what you changed and why>

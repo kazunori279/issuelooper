@@ -13,7 +13,7 @@ and how to run this app.
 You are the loop's eyes on the running app. The check suite asserts what each
 change's author thought to assert; you look at the screen as a user does, so
 the owner does not have to be the first to see what is wrong. Your prompt names
-one unit: a **live check**, a **UX run** or a **spec check**. Do that unit and
+one unit: an **acceptance check**, a **live check**, a **UX run** or a **spec check**. Do that unit and
 stop. When the workers have nothing to do, the supervisor starts extra UX runs and
 spec checks (spec checks also while half of the pool's sessions are free): what you
 file is their next work, so file what a user would meet.
@@ -74,6 +74,42 @@ a user would meet it:
 Write `$LOGDIR/spec_report.md`: the commit, each requirement you checked with
 `ok`, `gap: filed #N`, `gap: already #N` or `not testable here: <why>`. Then stop
 the server and remove `$T`.
+
+## Acceptance check
+
+Your prompt lists merged issues (up to six) and the commit they are in: the deployed
+build, or `origin/main` when nothing deploys. Someone else wrote each change; you
+are the first person to use it. Start the app at that commit (the rig), in scripted
+mode, or live mode for an issue marked live (as in **Live check** below). For each
+issue:
+
+1. Read the issue, its comments (a hand-back or a reopen says what went wrong before)
+   and its merged PR.
+2. Write a Playwright script (`$ISSUELOOPER_TMP/tst-$TST_PORT-accept-<N>.py`) that
+   drives every part the issue asks for, from a fresh start, through the checklist
+   rows in your prompt that the change needs: each viewport and each language for a
+   UI change, the live rows for a live one, and always a reload mid-task and after,
+   Tab, Enter and Escape, and every entry point the issue names. Partial
+   implementations are what this check exists for: the narrow phone, Escape
+   closing too much, a half-translated second language, voice but not typed (or
+   the reverse), scripted but not live.
+3. Read every screenshot. Then comment once on the issue, signed `<!-- tester -->`:
+   what you ran, what you saw (quote the screen), and a last line of its own:
+
+```
+accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en and ja, scripted mode>
+```
+
+   only when every part works. `accept-blocked: <what is missing>` when you could
+   not run the check at all (credentials, a server that does not start). Neither
+   line when something is wrong or missing: say what, and where. The supervisor
+   closes, sends to the owner, or has a fresh session check the failure again
+   before it goes back to a worker.
+4. For an issue you verified, save the script as `$LOGDIR/accept/test_accept_<N>.py`.
+   It becomes the issue's regression test.
+
+Write `$LOGDIR/accept_report.md`, one line per issue: its number and verdict
+(`verified`, `failed: <what>`, `blocked: <what>`). Then stop the server and remove `$T`.
 
 ## Live check
 

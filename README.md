@@ -37,7 +37,7 @@ runtime, per role.
 | **Supervisor** | Program (`ccpool.py`) | Turns GitHub state into units of work, starts them, merges, deploys. |
 | **Worker** | Agent session, one per issue | One issue: a failing test, the fix, a green sweep, a pull request. |
 | **Merger** | Agent session, one per conflicting PR | Rebases, resolves so both sides survive, sweeps again, and rebases once more if `main` moved meanwhile; the supervisor then merges it. |
-| **Tester** | Agent session (optional) | Live checks against the real environment; UX runs that walk the deployed app and file what gets in a user's way; spec checks of the app against the spec, one requirement at a time. |
+| **Tester** | Agent session (optional) | Acceptance checks of merged product changes, a batch per deploy (or live checks of `needs:live` issues without them); UX runs that walk the deployed app and file what gets in a user's way; spec checks of the app against the spec, one requirement at a time. |
 | **Reviewer** | One model call, no tools | Reads the PR's diff and rejects invented data shown as real, code that special-cases tests, and anything your project's rules forbid. |
 | **Monitor** | One long-lived agent session | Triage, priorities, holds, dependencies, and the questions only the owner can answer (`stage:owner`). |
 
@@ -136,6 +136,38 @@ on the open one). A later green commit proves nothing: that rule once labeled a 
 break as flaky. A flaky test still flaky after `POOL_FLAKY_MERGES` (10) merges gets one
 comment on its issue asking to fix or delete it, and the issue goes to P1. `[sweep] main_check = false`
 turns it off.
+
+With `[accept] paths` set (the product code, such as `src/`), every issue whose pull
+request changes it gets an acceptance check after the merge, and the post-merge live
+check becomes part of it. Such a PR says `Refs #N`, not `Fixes`; the merge gate (and
+`gh pr create`) refuse one that would close its issue. The merge moves the issue to
+`stage:accept`. Once the build the tester checks contains it (the deployed sha, or
+`main` when nothing deploys), one tester unit accepts up to `[accept] batch` (6) such
+issues on that build. The tester did not write any of them, and uses live mode for
+`needs:live` issues and changes to the checklist's live paths. Per issue, its signed comment
+ends in `accept-verified: <what ran>` (the supervisor closes the issue) or
+`accept-blocked: <what is missing>` (the owner). Anything else is a failure. A fresh
+session checks a failure once more before it counts; a counted failure goes back to
+`stage:triage` with the report, and a second one to the owner. An issue at `stage:live`
+from before is accepted the same way. Docs, tests and chores close on merge as before,
+and with `paths` empty only `needs:live` issues get a live check, as before.
+
+The acceptance checklist (`[accept]` viewports, languages, always and live rows, and
+`[accept.triggers]` from path globs to row groups) is shared by the worker and the
+tester. Both see it in their prompts. A worker's live-check script declares the rows
+it covers (`# accept-rows: viewport:320x640 lang:ja`) or skips one that cannot apply,
+with a reason (`# accept-skip: <id> <why>`). devcheck.py records them, and gate 7
+refuses a record that misses a row the PR's paths trigger. In cohort 52, most QA
+reopens were in these rows: 320 px, Escape, the second language, voice barge-in, live
+versus scripted.
+
+With `[accept] guard` set (such as `uv run pytest -q tests/accept`), the scripts of
+the issues a tester verified become one chore issue. A worker turns them into
+`tests/accept/test_accept_<N>.py` through the usual gates. On each new build, the
+supervisor runs that command in the main lane, with no model. A failing test runs once
+more alone (a pass makes it flaky), then files `Regression of #N: <test>` (P1), once
+while that issue is open. Workers write a new issue's acceptance behavior as such a
+test, rather than as a new `tests/e2e/test_issue_<N>.py`.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next

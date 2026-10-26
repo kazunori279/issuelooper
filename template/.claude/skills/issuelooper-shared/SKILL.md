@@ -43,8 +43,9 @@ Finish your unit and stop; nothing waits on a timer.
   continues from it.
 - **Pull requests at `stage:pr`**: when GitHub says the PR is mergeable, the
   supervisor runs the review gate (`review_gate.py`) and the merge gates
-  (`role_guard.py`), squash-merges it, clears `stage:pr` (or sets `stage:live`
-  for a `needs:live` issue) and deploys `main` when the project has a deploy
+  (`role_guard.py`), squash-merges it, clears `stage:pr` (or sets `stage:accept`
+  when it changed `[accept] paths` or the issue is `needs:live`; `stage:live` for a
+  `needs:live` issue when the acceptance check is off) and deploys `main` when the project has a deploy
   command. When the PR conflicts with `main`, the supervisor first rebases it
   itself (when every conflict is two workers only adding lines at the same
   place); otherwise a merger session rebases and resolves it, and the supervisor merges
@@ -58,9 +59,14 @@ Finish your unit and stop; nothing waits on a timer.
   that check failing, hands the PR back: a comment on the PR with the reason,
   and the issue back at `stage:triage`, where a worker picks it up and updates
   the same PR.
-- **`stage:live` issues** (when live checks are on): a tester checks the merged
-  change against the live environment and posts a `live-verified:` line; the
-  supervisor then closes it (or hands it back, or sends it to the owner).
+- **`stage:accept` issues** (with `[accept] paths` set): once the deployed build has
+  the merge, one tester unit accepts a batch of them, each through the checklist and in
+  live mode where it needs live, and posts `accept-verified:` or `accept-blocked:`;
+  the supervisor closes the issue, sends it to the owner, or (after a failure checked
+  twice) hands it back. `stage:live` from before is treated the same.
+- **`stage:live` issues** (live checks on, the acceptance check off): a tester checks
+  the merged change against the live environment and posts a `live-verified:` line;
+  the supervisor then closes it (or hands it back, or sends it to the owner).
 - **The deployed app** (when UX runs are on): a tester walks it as a user would
   and files what gets in a user's way.
 - **An idle pool**: when no worker or merger has anything to do, the supervisor
@@ -109,7 +115,8 @@ supervisor's, through these checks, so write the PR to pass them the first time.
 | 4 | A PR does not auto-close a `needs:live` issue: it says `Refs #N`, not `Fixes #N`. |
 | 5 | The review gate passed this head (or the owner let this head through with `review-override: <sha>`; a review that fails, or a PR rejected again after its hand-backs, waits for the owner). A second model reads the diff for data that is made up and shown to the user as if real (when a source fails, finds nothing or leaves a field out), code that exists to pass tests or evaluators (special-casing sample or fixture inputs, test-mode branches, hidden duplicates for checks), and the project's own rules (`.issuelooper/review_rules.md`). Show an honest empty state or error instead of invented data. |
 | 6 | Nothing the project lists as the owner's (`guard.protected_paths`, such as the spec) changes. A test that needs other data brings its own copy under the tests; an owner's file that looks wrong is a comment on the issue. |
-| 7 | With `[devcheck]` on, a PR for an issue labelled as `devcheck.labels` lists, or one that changes `devcheck.paths`, says `- **Live check:** <sha> pass`, and a passing record of that check exists for the same change (the head, or an earlier head the branch only moved from). A change no user can see may waive it (`waived - no visible change`, `docs only`, `loop/process`, `owner ruling`); a labelled issue only by `owner ruling`. |
+| 4 | With `[accept] paths` set, a PR that changes them says `Refs #N`, not `Fixes`: the issue closes after the tester's acceptance check, not on the merge. |
+| 7 | With `[devcheck]` on, a PR for an issue labelled as `devcheck.labels` lists, or one that changes `devcheck.paths`, says `- **Live check:** <sha> pass`, and a passing record of that check exists for the same change (the head, or an earlier head the branch only moved from). A change no user can see may waive it (`waived - no visible change`, `docs only`, `loop/process`, `owner ruling`); a labelled issue only by `owner ruling`. The record covers every acceptance checklist row the PR's paths trigger (`[accept]`): its scripts declare `# accept-rows: <ids>`, or `# accept-skip: <id> <why>` for a row that cannot apply. |
 
 ## Labels
 
@@ -120,7 +127,8 @@ One label per axis. Two `stage:` labels on one issue is a bug.
 | `stage:triage`, `stage:ready` | claimable by a worker | monitor, worker (own claim), tester and aide (`stage:triage` when filing) | monitor, worker (own claim) |
 | `stage:doing` | a worker holds the claim | `claim.py` | `claim.py`, monitor |
 | `stage:pr` | its PR is open and green | worker (own claim) | supervisor, merger, monitor |
-| `stage:live` | merged; the live check is owed | supervisor, merger, monitor | supervisor, monitor |
+| `stage:accept` | merged; the acceptance check is owed (a product change, or `needs:live`) | supervisor, merger, monitor | supervisor, monitor |
+| `stage:live` | merged; the live check is owed (with the acceptance check on: the same as `stage:accept`) | supervisor, merger, monitor | supervisor, monitor |
 | `stage:owner` | waits for the owner's decision; only the owner answers it | anyone | anyone, once the owner answered |
 | `needs:live` | acceptance needs the live environment | monitor, worker, tester, aide | monitor before the merge; at `stage:live` or `stage:owner` only the owner |
 | `P0`, `P1`, `P2` | priority (P2 is the default; P0 is broken now) | monitor; tester and aide when filing | monitor |

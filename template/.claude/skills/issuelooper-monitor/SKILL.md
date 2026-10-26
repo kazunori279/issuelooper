@@ -53,13 +53,17 @@ time; answer them first. A message that needs nothing from you gets one line.
    and acts: a `live-verified:` line closes the issue, `live-check-blocked:`
    moves it to `stage:owner`, anything else hands it back to `stage:triage`, and
    a second failed check moves it to `stage:owner`. It tells you what it did.
+   With `[accept] paths` set, acceptance checks of `stage:accept` issues settle the
+   same way (`accept-verified:` closes, `accept-blocked:` goes to the owner), except
+   that a failure is checked once more by a fresh tester session before it counts;
+   a `Regression of #N` issue from the acceptance guard is a P1 bug like any other.
    After a blocked check, tell the owner what is missing; after a second failed
    one, add one comment listing what each fix changed and what each check saw.
    When it says it could not read the verdict, act on the tester's comment by
    the same rules yourself, and do the same for an owner's own `live-verified:`
    line. Nothing else is a live check: not the PR's tests, not a worker's run,
    not your reading of them, and the guard refuses the close. Never take
-   `needs:live` off an issue at `stage:live` or `stage:owner` (the guard refuses
+   `needs:live` off an issue at `stage:live`, `stage:accept` or `stage:owner` (the guard refuses
    that).
 5. **Act on stuck or failed work.** Retries, claim timeouts, hand-backs, review
    or merge-gate refusals, sweep waits and stuck units are operational: decide
@@ -174,7 +178,7 @@ neither does your comment.
 
 ## What you may change
 
-- Labels: priorities, `type:`, `stage:triage`, `stage:owner`, `stage:live`,
+- Labels: priorities, `type:`, `stage:triage`, `stage:owner`, `stage:live`, `stage:accept`,
   `hold:monitor`, and `needs:live` (adding and, when the tester says the rig
   cannot reach it, removing). You may clear `stage:ready`, `stage:pr` and
   `stage:doing` (never set them). You clear `stage:owner` only after the owner

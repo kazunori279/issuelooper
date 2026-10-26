@@ -49,6 +49,9 @@ Stop and hand back (step 7) when a conflict needs a decision about behavior: the
 two sides do different things to the same element and keeping both is not
 possible.
 
+A PR that changes `[accept] paths` says `Refs #N` (the issue closes after the
+tester's acceptance check, not on the merge); keep it so.
+
 ## 3. Sweep and push
 
 ```bash
