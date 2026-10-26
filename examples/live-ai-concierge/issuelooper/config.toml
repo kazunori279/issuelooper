@@ -30,6 +30,8 @@ command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a wo
 slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time (the main check below runs
                              # in a lane of its own, beside these). Not more: this suite drives a browser, and
                              # its e2e tests already flaked under the load of four sweeps and sixteen sessions
+affected = "make lint && uv run pytest -q -p no:cacheprovider tests/unit {tests}"
+                             # SWEEP_AFFECTED: lint, every unit test, and the tests the change touches
 format = "uv run ruff format src tests"   # SWEEP_FORMAT: run first by agents' sweeps (the lint step's scope)
 rerun = "uv run pytest -q -p no:cacheprovider {tests}"   # SWEEP_RERUN: the failing tests alone, for a second try
 junit = true                 # SWEEP_JUNIT: each pytest run in a sweep writes a junit XML beside sweep/runs.jsonl

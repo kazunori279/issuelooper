@@ -27,6 +27,13 @@ port = 8780                  # ISSUELOOPER_DASHBOARD_PORT: the first port tried;
 command = "make verify"      # SWEEP_COMMAND: the whole check suite, run in a worktree
 slots = 4                    # SWEEP_SLOTS: sweeps that may run at the same time (the main check below runs
                              # in a lane of its own, beside these)
+affected = ""                # SWEEP_AFFECTED: with the merge train on, a PR head's sweep runs this instead,
+                             # with {tests} the test files the change touches (changed tests, tests importing a
+                             # changed module, tests naming a changed JS/HTML/CSS file), e.g.
+                             # "make lint && uv run pytest -q tests/unit {tests}". Empty = always the full sweep
+affected_map = ""            # SWEEP_AFFECTED_MAP: optional file of "<glob>: <test file> ..." lines adding tests
+affected_full = ""           # SWEEP_AFFECTED_FULL: globs that force the full sweep (default: conftest.py,
+                             # pyproject.toml, lock files, Makefile, package.json, fixtures, .issuelooper/, .claude/)
 format = ""                  # SWEEP_FORMAT: the formatter (e.g. "uv run ruff format src tests") a worker's or
                              # merger's sweep runs first on a clean checkout; when it changes files, the sweep
                              # stops and names them, to commit and sweep again. The supervisor's sweeps never run it

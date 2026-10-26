@@ -802,6 +802,27 @@ def test_an_agent_sweep_formats_first() -> None:
           (0, True))
 
 
+def test_with_the_merge_train_a_pr_sweep_is_affected_only() -> None:
+    """The train checks the whole suite on the merged tree, so a PR head's own sweep runs
+    only the affected tests; the main check and the train's check run everything."""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
+    wt = make_worktree(tmp)
+    (wt / ".claude" / "hooks" / "sweep_run.py").write_text(
+        f"import sys\nopen({str(tmp / 'argv')!r}, 'w').write(' '.join(sys.argv[1:]))\nprint('1 green: tests 1')\n")
+    env = dict(sweep_env(tmp, tmp / "lock"), SWEEP_AFFECTED="echo {tests}", POOL_MERGE_TRAIN="1")
+    env.pop("SWEEP_CALLER", None)
+
+    def args(*flags, **extra):
+        subprocess.run([sys.executable, str(SWEEP), *flags], cwd=wt, env=dict(env, **extra), capture_output=True, text=True)
+        return (tmp / "argv").read_text()
+    check("train on: a worker's, a re-sweep's, an auto-rebase's sweep is affected",
+          (args(), args(SWEEP_CALLER="resweep"), args(SWEEP_CALLER="auto-rebase")), ("--affected",) * 3)
+    check("the main check and the train's own check are full",
+          (args(SWEEP_CALLER="main-check"), args(SWEEP_CALLER="merge-train")), ("", ""))
+    check("--full wins; train off: full; no affected command: full",
+          (args("--full"), args(POOL_MERGE_TRAIN="0"), args(SWEEP_AFFECTED="")), ("", "", ""))
+
+
 def test_ux_proposed_is_never_claimed() -> None:
     """A UX candidate waits for the owner; claim.py neither lists nor claims it."""
     before = len(FAILURES)

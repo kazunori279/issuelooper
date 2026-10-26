@@ -31,6 +31,17 @@ the tree as it found them, it also writes the provenance record that
 
 and prints `sweep record: <path>`. A red run prints no green line and exits 1.
 
+With --affected and `[sweep] affected = "<command with {tests}>"` (SWEEP_AFFECTED), it
+runs that command with only the tests the commit's change touches, from where it
+forked off origin/main: the test files it changes; Python test files that import a
+module it changes; test files that name a file it changes that is not Python (its name
+or stem: the JS, HTML or CSS an e2e test drives); and the tests that SWEEP_AFFECTED_MAP
+(a file of `<glob>: <test> <test> ...` lines) maps its files to. It runs the whole
+suite instead when that selection is empty, or the change touches the suite's own
+setup (SWEEP_AFFECTED_FULL globs, default conftest.py, pyproject.toml, lock files,
+Makefile, package.json, fixtures, .issuelooper/ and .claude/). The record and the run's
+line say which: "kind": "affected" or "full", and "tests" (the selection).
+
 Every run, green or red, also appends one JSON line to `runs.jsonl` in that directory,
 written from `finally` (SIGTERM included), so a killed sweep is recorded too:
 
@@ -262,7 +273,8 @@ def sweep_line(counts: dict[str, int], before: int | None) -> str:
 
 
 def write_sweep_record(
-    sha: str, command: str, counts: dict[str, int], started_at: str, finished_at: str
+    sha: str, command: str, counts: dict[str, int], started_at: str, finished_at: str,
+    kind: str = "full", tests: list[str] | None = None,
 ) -> Path:
     record_dir = config.record_dirs("sweep")[0]
     record_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +285,10 @@ def write_sweep_record(
         "total": sum(counts.values()),
         "started_at": started_at,
         "finished_at": finished_at,
+        "kind": kind,
     }
+    if kind == "affected":
+        record["tests"] = tests or []
     target = record_dir / f"{sha}.json"
     fd, tmp = tempfile.mkstemp(dir=record_dir, prefix="sweep_", suffix=".tmp")
     try:
@@ -286,6 +301,77 @@ def write_sweep_record(
             os.unlink(tmp)
         raise
     return target
+
+
+DEFAULT_FULL = ("conftest.py", "*/conftest.py", "pyproject.toml", "*.lock", "requirements*.txt", "Makefile",
+                "package.json", "package-lock.json", "setup.cfg", "tox.ini", "pytest.ini", "*/fixtures/*",
+                ".issuelooper/*", ".claude/*")
+TEST_FILE = re.compile(r"(?:^|/)(?:test_[\w-]+|[\w-]+_test)\.py$")
+
+
+def select_tests(changed: list[str], tracked: list[str], read=None, mapping: str = "",
+                 full_globs: tuple[str, ...] = DEFAULT_FULL) -> tuple[list[str], str]:
+    """The test files a change touches (see the module docstring), and why the whole suite
+    must run instead ('' when the selection stands)."""
+    import fnmatch
+    read = read or (lambda p: (ROOT / p).read_text(errors="replace"))
+    for f in changed:
+        if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch(os.path.basename(f), g) for g in full_globs):
+            return [], f"it changes {f}, part of the suite's setup"
+    tests = [t for t in tracked if TEST_FILE.search(t)]
+    picked = {f for f in changed if TEST_FILE.search(f) and f in tests}
+    texts: dict[str, str] = {}
+
+    def text(t: str) -> str:
+        if t not in texts:
+            try:
+                texts[t] = read(t)
+            except OSError:
+                texts[t] = ""
+        return texts[t]
+    for f in changed:
+        if TEST_FILE.search(f):
+            continue
+        if f.endswith(".py"):
+            parts = f[:-3].split("/")
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            mods = [".".join(parts[k:]) for k in range(len(parts)) if len(parts) - k >= 2] or [".".join(parts)]
+            pats = [re.compile(rf"^\s*(?:import|from)\s+{re.escape(m)}\b", re.M) for m in mods]
+            pats += [re.compile(rf"^\s*from\s+{re.escape(m.rsplit('.', 1)[0])}\s+import\s+[^\n]*\b{re.escape(m.rsplit('.', 1)[1])}\b", re.M)
+                     for m in mods if "." in m]
+            picked |= {t for t in tests if any(p.search(text(t)) for p in pats)}
+        else:
+            name = os.path.basename(f)
+            stem = name.rsplit(".", 1)[0]
+            pat = re.compile(rf"(?<![\w-]){re.escape(stem)}(?![\w-])" if len(stem) >= 3 else re.escape(name))
+            picked |= {t for t in tests if pat.search(text(t))}
+    for line in mapping.splitlines():
+        if ":" not in line or line.lstrip().startswith("#"):
+            continue
+        glob, targets = line.split(":", 1)
+        if any(fnmatch.fnmatch(f, glob.strip()) for f in changed):
+            picked |= {t for t in targets.split() if t in tracked}
+    if not picked:
+        return [], "no test is related to the change"
+    return sorted(picked), ""
+
+
+def affected_selection(head: str | None) -> tuple[list[str], str]:
+    """select_tests for HEAD's change since it forked off origin/main, read from git."""
+    _, changed = base_of(head)
+    if not changed:
+        return [], "nothing changed since origin/main (or git cannot say)"
+    tracked = (_git(["ls-files"]) or "").split()
+    mapping = ""
+    map_file = os.environ.get("SWEEP_AFFECTED_MAP", "").strip()
+    if map_file:
+        try:
+            mapping = (ROOT / map_file).read_text()
+        except OSError:
+            pass
+    full = tuple(g.strip() for g in os.environ.get("SWEEP_AFFECTED_FULL", "").split(",") if g.strip()) or DEFAULT_FULL
+    return select_tests(changed, tracked, mapping=mapping, full_globs=full)
 
 
 def run_command(command: str, env: dict[str, str] | None = None, sink: list[str] | None = None) -> tuple[int, str]:
@@ -342,6 +428,7 @@ def write_run(run: dict) -> None:
         "started_at": datetime.fromtimestamp(run["started"], timezone.utc).isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "seconds": round(time.time() - run["started"], 1), "exit": run["exit"], "outcome": outcome,
+        "kind": run.get("kind", "full"), "selected": run.get("selected", []),
         "steps": steps, "failures": failures_of(out), "changed_files": files,
         "junit": sorted(str(p) for p in prefix.parent.glob(prefix.name + "-*.xml")) if prefix else [],
     })
@@ -352,8 +439,11 @@ def sweep(argv, run: dict) -> int:
     parser.add_argument(
         "--before", type=int, help="the total the sweep line counts up from"
     )
+    parser.add_argument("--affected", action="store_true",
+                        help="only the tests the change touches, with $SWEEP_AFFECTED")
     args = parser.parse_args(argv)
     command = os.environ.get("SWEEP_COMMAND", "").strip() or DEFAULT_COMMAND
+    kind, selected, recorded = "full", [], command
 
     started_at = datetime.now(timezone.utc).isoformat()
     head_before = git_head()
@@ -367,6 +457,18 @@ def sweep(argv, run: dict) -> int:
         runs_path().parent.mkdir(parents=True, exist_ok=True)
         env = junit_env(env, run["junit_prefix"])
 
+    if args.affected:
+        template = os.environ.get("SWEEP_AFFECTED", "").strip()
+        selected, why = affected_selection(head_before) if "{tests}" in template else ([], "no [sweep] affected command")
+        if selected:
+            import shlex
+            kind, recorded = "affected", template
+            command = template.replace("{tests}", " ".join(shlex.quote(t) for t in selected))
+            print(f"affected:       {len(selected)} test file(s): {', '.join(selected[:8])}"
+                  + (" ..." if len(selected) > 8 else ""))
+        else:
+            print(f"affected:       the full sweep instead: {why}")
+    run.update(kind=kind, selected=selected)
     print(f"sys.executable: {sys.executable}")
     print(f"root:           {ROOT}")
     print(f"command:        {command}")
@@ -424,7 +526,7 @@ def sweep(argv, run: dict) -> int:
         print("\nsweep record not written: project tree dirty at start")
     else:
         finished_at = datetime.now(timezone.utc).isoformat()
-        path = write_sweep_record(head_before, command, counts, started_at, finished_at)
+        path = write_sweep_record(head_before, recorded, counts, started_at, finished_at, kind, selected)
         print(f"\nsweep record: {path}")
 
     run["outcome"] = "green"

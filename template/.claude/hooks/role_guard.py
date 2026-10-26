@@ -1301,6 +1301,12 @@ SWEEP_RUNNER = ".claude/hooks/sweep_run.py"
 SWEEP_HOW = "`python3 .claude/hooks/sweep_locked.py` in your worktree"
 
 
+def merge_train_on() -> bool:
+    """POOL_MERGE_TRAIN: the supervisor checks the whole suite on the merged tree of a batch
+    before it merges, so a PR head's affected sweep is enough for Gate 2."""
+    return os.environ.get("POOL_MERGE_TRAIN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_sweep_record(sha: str) -> dict | None:
     """The provenance record sweep_run.py writes for a full, green sweep started
     from a clean tree at `sha`. None when there is none, or when it cannot be
@@ -1762,6 +1768,13 @@ def check_pr_merge(command: str) -> None:
                         "Commit first, then run the full sweep at that commit "
                         f"({SWEEP_HOW}; its `git:` line must read `(clean)`, and it prints "
                         "`sweep record: <path>`), paste its `green:` line, and push."
+                    )
+                if record.get("kind") == "affected" and not merge_train_on():
+                    block(
+                        f"{target}'s sweep record for `{head_sha[:7]}` is from an affected sweep (only the "
+                        "tests the change touches). With the merge train off, nothing checks the whole suite "
+                        "before the merge, so Gate 2 needs a full sweep.\n\n"
+                        f"Run `python3 .claude/hooks/sweep_locked.py --full --update-pr <N>` at the head."
                     )
                 rec_areas = record.get("areas") or {}
                 stated_areas = {s: int(n) for s, n in pairs}

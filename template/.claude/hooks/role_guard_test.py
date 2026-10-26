@@ -2044,6 +2044,13 @@ def test_rebased_pr_merges_once_resweept() -> None:
                                       "body": body(new_head), "files": files}})
     verdict, reason = run("gh pr merge 61 --squash", role="merger", extra_env=env)
     check("a rebased PR re-swept at its new head merges", verdict, "allow")
+    rec = json.loads((TEST_SWEEP_RECORDS / f"{new_head}.json").read_text())
+    (TEST_SWEEP_RECORDS / f"{new_head}.json").write_text(json.dumps({**rec, "kind": "affected", "tests": ["t.py"]}))
+    verdict, reason = run("gh pr merge 61 --squash", role="merger", extra_env={**env, "POOL_MERGE_TRAIN": "0"})
+    check("an affected record with the merge train off: refused, a full sweep asked for",
+          (verdict, "--full" in reason), ("refuse", True))
+    verdict, _ = run("gh pr merge 61 --squash", role="merger", extra_env={**env, "POOL_MERGE_TRAIN": "1"})
+    check("with the train on (it checks the whole suite on the merged tree): it is enough", verdict, "allow")
     (TEST_SWEEP_RECORDS / f"{new_head}.json").unlink()
 
     # Gate 3 still binds after the rebase: if main already gained the same case

@@ -32,6 +32,13 @@ were 69 of 174 red sweeps in cohort 52. The supervisor's own sweeps (SWEEP_CALLE
 re-sweeps, auto-rebases, the main check) never format: what they check must stay as
 committed, and a format diff there is red, as before.
 
+With the merge train on (POOL_MERGE_TRAIN=1) and `[sweep] affected` set, a sweep of a
+PR head (a worker's, a merger's, the supervisor's re-sweep or auto-rebase) runs only
+the affected tests (sweep_run.py --affected): the train checks the whole suite on the
+merged tree before anything merges. The main check and the train's own check
+(SWEEP_CALLER main-check or merge-train) always run it all. --full and --affected
+choose explicitly.
+
 With --update-pr N, a green sweep that wrote its record also rewrites PR #N's
 body: the `Sweep SHA:` line gets the swept head and the `green:` line is
 replaced (or appended). That is the step a rebase makes necessary (Gate 2
@@ -100,9 +107,21 @@ def update_pr(pr: str, sha: str, green: str) -> int:
     return 0
 
 
-def green_record(root: str) -> tuple[str, pathlib.Path, dict] | None:
+def wants_affected(args) -> bool:
+    """Whether this sweep runs only the affected tests (see the docstring)."""
+    if args.full:
+        return False
+    if args.affected:
+        return True
+    return (os.environ.get("POOL_MERGE_TRAIN", "").strip() in ("1", "true", "yes", "on")
+            and "{tests}" in os.environ.get("SWEEP_AFFECTED", "")
+            and os.environ.get("SWEEP_CALLER", "").strip() not in ("main-check", "merge-train"))
+
+
+def green_record(root: str, affected: bool = False) -> tuple[str, pathlib.Path, dict] | None:
     """(HEAD, its record, the record) when the checkout is clean and HEAD has a green
-    sweep record for this sweep command; else None."""
+    sweep record for this sweep command (a full one; for an affected sweep, a full one
+    or an affected one from the same affected command); else None."""
     def git(*a):
         r = subprocess.run(["git", "-C", root, *a], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else None
@@ -111,13 +130,17 @@ def green_record(root: str) -> tuple[str, pathlib.Path, dict] | None:
     if len(head) != 40 or status is None or status.strip():
         return None
     command = os.environ.get("SWEEP_COMMAND", "").strip() or "make verify"
+    accept = {("full", command)}
+    if affected:
+        accept.add(("affected", os.environ.get("SWEEP_AFFECTED", "").strip()))
     for d in config.record_dirs("sweep"):
         path = d / f"{head}.json"
         try:
             rec = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        if rec.get("sha") == head and rec.get("command") == command and isinstance(rec.get("areas"), dict):
+        if (rec.get("sha") == head and (rec.get("kind") or "full", rec.get("command")) in accept
+                and isinstance(rec.get("areas"), dict)):
             return head, path, rec
     return None
 
@@ -161,6 +184,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--update-pr", metavar="N", help="after a green, recorded sweep, fix PR #N's body")
     ap.add_argument("--lane", metavar="NAME", help="take the lock LOCK.lane-NAME instead of a sweep slot")
+    ap.add_argument("--affected", action="store_true", help="only the tests the change touches")
+    ap.add_argument("--full", action="store_true", help="the whole suite, even with the merge train on")
     args = ap.parse_args()
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     root = top.stdout.strip() if top.returncode == 0 else os.getcwd()
@@ -187,7 +212,8 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"note: run not recorded ({exc})", file=sys.stderr)
         return 1
-    found = None if os.environ.get("SWEEP_FORCE") == "1" else green_record(root)
+    affected = wants_affected(args)
+    found = None if os.environ.get("SWEEP_FORCE") == "1" else green_record(root, affected)
     if found:
         out = reuse(*found)
         if not args.update_pr:
@@ -219,7 +245,7 @@ def main() -> int:
     # For sweep_run.py's line in runs.jsonl.
     env = dict(os.environ, SWEEP_LANE=args.lane or os.path.basename(name), SWEEP_WAIT_S=f"{got - start:.1f}",
                SWEEP_PR=args.update_pr or os.environ.get("SWEEP_PR", ""))
-    proc = subprocess.Popen([sys.executable, RUNNER], cwd=root, env=env,
+    proc = subprocess.Popen([sys.executable, RUNNER, *(["--affected"] if affected else [])], cwd=root, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = []
     for line in proc.stdout:

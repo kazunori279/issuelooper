@@ -263,6 +263,60 @@ def test_junit_per_pytest_run() -> None:
     check("a suite that is not pytest: green, no XML", (rc, runs(records)[0]["junit"]), (0, []))
 
 
+def test_affected_selection() -> None:
+    """Cohort 52: workers' and mergers' full sweeps were 26.5 of 43.6 h; the merged PRs
+    touched 2-3 % of the e2e files."""
+    tracked = ["src/concierge/live.py", "src/concierge/__init__.py", "src/concierge/static/js/feed.js",
+               "tests/unit/test_live.py", "tests/unit/test_other.py", "tests/e2e/test_issue_7.py",
+               "tests/e2e/test_feed_scroll.py", "tests/e2e/test_settings.py", "tests/e2e/conftest.py", "README.md"]
+    texts = {"tests/unit/test_live.py": "from concierge.live import Session\n",
+             "tests/unit/test_other.py": "from concierge import live, other\n",
+             "tests/e2e/test_issue_7.py": "def test_x(page): ...\n",
+             "tests/e2e/test_feed_scroll.py": "# the feed (feed.js) scrolls\n",
+             "tests/e2e/test_settings.py": "def test_settings(page): page.goto('/#settings-feedback')\n"}
+    read = lambda p: texts.get(p, "")
+    sel = sweep_run.select_tests
+    check("a changed module: the tests that import it, in either form",
+          sel(["src/concierge/live.py"], tracked, read), (["tests/unit/test_live.py", "tests/unit/test_other.py"], ""))
+    check("a changed JS file: the tests that name it or its stem, not a longer word containing it",
+          sel(["src/concierge/static/js/feed.js"], tracked, read), (["tests/e2e/test_feed_scroll.py"], ""))
+    check("a changed test file is selected itself", sel(["tests/e2e/test_issue_7.py"], tracked, read)[0],
+          ["tests/e2e/test_issue_7.py"])
+    check("the project's map adds its tests",
+          sel(["README.md"], tracked, read, mapping="# docs\nREADME.md: tests/e2e/test_settings.py\n")[0],
+          ["tests/e2e/test_settings.py"])
+    check("nothing related: the full sweep, with the reason", sel(["README.md"], tracked, read), ([], "no test is related to the change"))
+    check("the suite's own setup changed: the full sweep",
+          sel(["tests/e2e/conftest.py", "src/concierge/live.py"], tracked, read)[1].startswith("it changes tests/e2e/conftest.py"),
+          True)
+    check("a lock file or the Makefile too", (bool(sel(["uv.lock"], tracked, read)[1]), bool(sel(["Makefile"], tracked, read)[1])),
+          (True, True))
+    # The real thing: a branch off origin/main.
+    repo = make_repo()
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "__init__.py").write_text("")
+    (repo / "pkg" / "mod.py").write_text("X = 1\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_mod.py").write_text("from pkg.mod import X\n")
+    (repo / "tests" / "test_else.py").write_text("import os\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (repo / "pkg" / "mod.py").write_text("X = 2\n")
+    git(repo, "commit", "-qam", "change")
+    sha = git(repo, "rev-parse", "HEAD")
+    rc, out, records = sweep(repo, "echo full", "--affected", SWEEP_AFFECTED="echo 'ran {tests}'")
+    rec = json.loads((records / f"{sha}.json").read_text())
+    r = runs(records)[0]
+    check("--affected runs the affected command with the selection, and the record and run say so",
+          (rc, "ran tests/test_mod.py" in out, rec["kind"], rec["tests"], rec["command"], r["kind"], r["selected"]),
+          (0, True, "affected", ["tests/test_mod.py"], "echo 'ran {tests}'", "affected", ["tests/test_mod.py"]))
+    rc, out, records = sweep(repo, "echo full", "--affected")
+    check("no [sweep] affected: the full sweep, and the record says full",
+          (rc, "the full sweep instead: no [sweep] affected command" in out,
+           json.loads((records / f"{sha}.json").read_text())["kind"]), (0, True, "full"))
+
+
 def test_dirty_tree_writes_no_record() -> None:
     repo = make_repo()
     (repo / "scratch.txt").write_text("uncommitted\n")
