@@ -253,6 +253,7 @@ stage:ready|0e8a16|Claimable by a worker
 stage:doing|1d76db|A worker holds the claim
 stage:pr|5319e7|Its pull request is open and green
 stage:live|c5def5|Merged; the live check is owed
+stage:accept|c5def5|Merged; the acceptance check is owed
 stage:owner|d93f0b|Waits for the owner's decision
 needs:live|bfdadc|Acceptance needs the live environment
 P0|b60205|Broken now, or the minimum viable product needs it

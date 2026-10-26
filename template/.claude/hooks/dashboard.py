@@ -164,6 +164,7 @@ def queue(m: dict) -> str:
         ("doing", "stage:doing", "stage:doing"),
         ("PR open", "stage:pr", "stage:pr"),
         ("live check", "stage:live", "stage:live"),
+        ("acceptance", "stage:accept", "stage:accept"),
     ]
     pipe = "".join(
         f'<div class="stage">{label_link(m, lab, f"<b>{st.get(key, 0)}</b>") if lab else f"<b>{st.get(key, 0)}</b>"}'

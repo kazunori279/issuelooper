@@ -2266,6 +2266,33 @@ def test_devcheck_gate() -> None:
     check("nor a line with no record behind it", (verdict, "no record" in reason), ("refuse", True))
 
 
+def test_a_product_change_does_not_close_its_issue_on_merge() -> None:
+    """With the acceptance check on, a PR that changes [accept] paths says Refs #N: its
+    issue closes on the tester's accept-verified line, not on the merge."""
+    head = "5" * 40
+    body = (f"<!-- worker -->\nFixes #90\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
+            "- **Fail-before:** waived - owner ruling\n")
+
+    def merge(files, extra=None, text=body):
+        env, _ = with_fake_gh(prs={"95": {"headRefOid": head, "body": text, "files": files}}, linked={"95": ["90"]})
+        return run("gh pr merge 95 --squash", role="merger",
+                   extra_env={**env, "ACCEPT_PATHS": "src/", **(extra or {})})
+
+    verdict, reason = merge([{"path": "src/data.json", "changeType": "MODIFIED"}])
+    check("a product change that would close its issue is refused", (verdict, "Refs #90" in reason), ("refuse", True))
+    check("docs only: closes on merge as before", merge([{"path": "docs/a.md", "changeType": "MODIFIED"}])[0], "allow")
+    check("POOL_ACCEPT=0: as before", merge([{"path": "src/data.json", "changeType": "MODIFIED"}],
+                                            {"POOL_ACCEPT": "0"})[0], "allow")
+    env, _ = with_fake_gh(labels={"90": ["stage:accept", "P1"]},
+                          comments={"90": ["<!-- tester -->\nlooks fine"]})
+    verdict, reason = run("gh issue close 90", role="monitor", extra_env=env)
+    check("an issue at stage:accept does not close without the tester's accept-verified line",
+          (verdict, "accept-verified" in reason), ("refuse", True))
+    env, _ = with_fake_gh(labels={"90": ["stage:accept"]}, comments={"90": [
+        "<!-- tester -->\naccept-verified: script at 320 px"]})
+    check("with it, it may", run("gh issue close 90", role="monitor", extra_env=env)[0], "allow")
+
+
 def test_devcheck_survives_a_rebase_that_only_moves_the_branch() -> None:
     """Gate 7 accepts the check of an earlier head when the branch changes the same
     lines; a rebase that changed what it does needs a new check."""

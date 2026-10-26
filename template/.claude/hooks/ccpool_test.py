@@ -866,6 +866,223 @@ def test_live_checks_settle_themselves() -> None:
           ["issue edit 9 --remove-label stage:live", "issue close 9 --reason completed"])
 
 
+ACCEPT_ENV = {
+    "ACCEPT_PATHS": "src/",
+    "ACCEPT_CHECKLIST": json.dumps({"viewports": ["320x640"], "always": ["keyboard: Tab, Enter, Escape"],
+                                    "live": ["a Japanese turn"],
+                                    "triggers": {"src/static/*": ["viewports"], "src/live.py": ["live"]}}),
+}
+
+
+def with_env(env: dict):
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+
+    def restore():
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return restore
+
+
+def test_acceptance_batches_the_merged_issues_in_the_build() -> None:
+    """Cohort 52: the harness's QA tester reopened 22 % of D's closed issues; only the 31
+    stage:live issues had a check of issuelooper's own. One tester unit per build accepts
+    the merged issues it contains."""
+    restore = with_env(ACCEPT_ENV)
+    try:
+        issues = [iss(4, ["stage:accept", "P2"], title="sheet"), iss(5, ["stage:accept", "P0"], title="ja"),
+                  iss(6, ["stage:live", "needs:live", "P1"], title="near here"),
+                  iss(7, ["stage:accept", "hold:monitor"]), iss(8, ["stage:accept"])]
+        h = Rig(state(issues), accept=True, accept_paths=["src/"], accept_batch=3, live=True)
+        h.pool.track_accept = lambda st: None
+        h.pool.settle_accept = lambda *a: []  # settle_accept has its own case
+        b = h.pool.book
+        b.accept_ready, b.accept_target = [4, 5, 6, 7], "d" * 40
+        b.accept_merged = {4: {"pr": 14, "sha": "x", "live": False, "t": 0}, 6: {"pr": 16, "sha": "y", "live": False, "t": 0}}
+        started = h.step()
+        check("one tester unit for the batch, nothing per issue; no live unit for a stage:live issue",
+              [(u.role, u.kind) for u in started], [("tester", "accept")])
+        u = started[0]
+        check("P0 first, at most the batch size, holds and issues not yet in the build left out",
+              [x["n"] for x in u.info["issues"]], [5, 6, 4])
+        check("live mode for the needs:live issue; its PR named when known",
+              [(x["n"], x["live"], x["pr"]) for x in u.info["issues"]], [(5, False, None), (6, True, 16), (4, False, 14)])
+        prompt = ccpool.tester_prompt(u, 8021, "60m")
+        check("the prompt: the build, each issue, the verdict lines, the checklist, where the scripts go",
+              all(x in prompt for x in ("dddddddddddd", "#6 \"near here\", merged in PR #16, in live mode",
+                                        "accept-verified:", "accept-blocked:", "always:keyboard-tab-enter",
+                                        "test_accept_<N>.py", "accept_report.md")), True)
+        check("a second unit does not start beside it", h.step(), [])
+        h.finish(u.key)
+        b.accept_rounds[4] += 1  # #4 settled nothing: it goes in the next batch
+        again = h.step()
+        check("after it, the issues still waiting get a new unit", [x["n"] for x in again[0].info["issues"]], [5, 6, 4])
+        h2 = Rig(state([iss(6, ["stage:live", "needs:live"])]), live=True)
+        check("with the acceptance check off, stage:live gets its live check as before",
+              [u.kind for u in h2.step()], ["live"])
+        h3 = Rig(state(issues), accept=True, accept_paths=["src/"], live=True, required_files=[".env"])
+        h3.pool.track_accept = lambda st: None
+        h3.pool.book.accept_ready, h3.pool.book.accept_target = [6, 4], "d" * 40
+        check("while .env is missing, a live-mode issue waits and the rest go",
+              [x["n"] for x in h3.step()[0].info["issues"]], [4])
+    finally:
+        restore()
+
+
+def test_track_accept_finds_the_merges_in_the_build() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-accept-"))
+    work, g = git_repo(d)
+    restore = with_env({"SHARED_REPO_PATH": str(work), **ACCEPT_ENV})
+    try:
+        (work / "a").write_text("a\n")
+        g("add", "a")
+        g("commit", "-qm", "base")
+        base = g("rev-parse", "HEAD")
+        (work / "b").write_text("b\n")
+        g("add", "b")
+        g("commit", "-qm", "#5")
+        merged5 = g("rev-parse", "HEAD")
+        g("checkout", "-qb", "side", base)
+        (work / "c").write_text("c\n")
+        g("add", "c")
+        g("commit", "-qm", "#6, not on main")
+        merged6 = g("rev-parse", "HEAD")
+        g("checkout", "-q", "main")
+        g("push", "-q", "origin", "main")
+        h = Rig(state([iss(5, ["stage:accept"]), iss(6, ["stage:accept"]), iss(7, ["stage:triage"])], main=merged5),
+                accept=True, accept_paths=["src/"])
+        b = h.pool.book
+        b.accept_merged = {5: {"pr": 15, "sha": merged5, "live": False, "t": h.now},
+                           6: {"pr": 16, "sha": merged6, "live": False, "t": h.now}}
+        h.pool.track_accept(h.st)
+        check("nothing deploys: an issue whose merge is on main is ready, one whose merge is not waits",
+              (b.accept_ready, b.accept_target), ([5], merged5))
+        h.pool.cfg.deploy_cmd, h.pool.own_deployed = "deploy", base
+        h.pool.track_accept(h.st)
+        check("with deploys, only what the deployed build has", (b.accept_ready, b.accept_target), ([], base))
+        h.pool.own_deployed = merged5
+        h.pool.track_accept(h.st)
+        check("the next deploy has it", b.accept_ready, [5])
+        h.st = state([iss(6, ["stage:accept"])], main=merged5)
+        h.now += 601
+        h.pool.track_accept(h.st)
+        check("a settled issue is forgotten after a while", sorted(b.accept_merged), [6])
+    finally:
+        restore()
+
+
+ACCEPT_GH = r"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_GH_LOG"], "a") as f:
+    f.write(" ".join(a.replace("\n", "\\n") for a in sys.argv[1:]) + "\n")
+if sys.argv[1:3] == ["pr", "view"]:
+    print(os.environ.get("FAKE_GH_PR", "{}"))
+if sys.argv[1:3] == ["issue", "view"]:
+    view = os.environ.get("FAKE_GH_VIEW", "")
+    if not view:
+        sys.exit(1)
+    print(view)
+"""
+
+
+def test_a_product_change_waits_for_acceptance_after_its_merge() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-acceptmerge-"))
+    gh = d / "gh"
+    gh.write_text(ACCEPT_GH)
+    gh.chmod(0o755)
+    log = d / "gh.log"
+    restore = with_env({"FAKE_GH_LOG": str(log), **ACCEPT_ENV})
+    try:
+        def merge(files, accept=True, needs_live=False):
+            log.write_text("")
+            os.environ["FAKE_GH_PR"] = json.dumps({"files": [{"path": f} for f in files], "mergeCommit": {"oid": "m" * 40}})
+            pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept=accept, accept_paths=["src/"],
+                                             live=True), fetcher=state, spawn=False)
+            pool.after_merge(14, 4, "c" * 40, needs_live, "the gates passed")
+            return [x for x in log.read_text().splitlines() if not x.startswith("pr view")], pool.book
+        calls, book = merge(["src/static/js/sheet.js"])
+        check("a product change: its issue goes to stage:accept, with a comment saying so",
+              (calls[0], "stage:accept until a tester" in calls[1]),
+              ("issue edit 4 --remove-label stage:pr --add-label stage:accept", True))
+        check("its merge commit is kept for the build check", book.accept_merged[4]["sha"], "m" * 40)
+        calls, book = merge(["src/live.py"])
+        check("a change to the live module is accepted in live mode", book.accept_merged[4]["live"], True)
+        calls, book = merge(["docs/notes.md", "tests/unit/test_a.py"])
+        check("docs and tests only: off stage:pr, nothing owed", (calls[0], book.accept_merged),
+              ("issue edit 4 --remove-label stage:pr", {}))
+        calls, book = merge(["docs/notes.md"], needs_live=True)
+        check("a needs:live issue is an acceptance issue (live mode)", (calls[0], book.accept_merged[4]["live"]),
+              ("issue edit 4 --remove-label stage:pr --add-label stage:accept", True))
+        calls, book = merge(["src/a.js"], accept=False, needs_live=True)
+        check("the acceptance check off: stage:live for needs:live, as before",
+              calls[0], "issue edit 4 --remove-label stage:pr --add-label stage:live")
+    finally:
+        restore()
+        os.environ.pop("FAKE_GH_PR", None)
+
+
+def test_acceptance_verdicts_settle_themselves() -> None:
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-acceptsettle-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_ISSUE)
+    gh.chmod(0o755)
+    loop = {"login": "loop-bot"}
+    since = "2026-10-23T12:00:00Z"
+    started = ccpool.claimlib.parse_time("2026-10-23T12:10:00Z").timestamp()
+    unit = ccpool.Unit("tester", "accept", "accept:x", "tst:accept", None, (2, 1, 0),
+                       {"sha": "d" * 40, "issues": [{"n": 9, "title": "sheet", "live": False, "since": since}]})
+
+    def settle(comments, labels=("stage:accept",), finished=True):
+        log = d / "gh.log"
+        log.write_text("")
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept=True, accept_paths=["src/"]),
+                           fetcher=state, spawn=False)
+        os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="loop-bot", FAKE_GH_VIEW=json.dumps(
+            {"state": "OPEN", "labels": [{"name": x} for x in labels], "comments": comments}))
+        try:
+            verified = pool.settle_accept(unit, started, finished)
+        finally:
+            for k in ("FAKE_GH_LOG", "ISSUELOOPER_LOGIN", "FAKE_GH_VIEW"):
+                os.environ.pop(k, None)
+        return [ln for ln in log.read_text().splitlines() if not ln.startswith("issue view")], pool, verified
+
+    def tester(body, at="2026-10-23T12:30:00Z"):
+        return {"author": loop, "body": "<!-- tester -->\n" + body, "createdAt": at, "url": "https://x/c/1"}
+
+    def mark(m, at="2026-10-23T12:20:00Z"):
+        return {"author": loop, "body": f"<!-- merger -->\n{m}\nx", "createdAt": at}
+
+    calls, pool, verified = settle([tester("Escape closes only the dialog at 320 px.\naccept-verified: script, 3 viewports")])
+    check("accept-verified closes it", ([c.split(" --comment")[0] for c in calls], verified),
+          (["issue edit 9 --remove-label stage:accept", "issue close 9 --reason completed"], [9]))
+    calls, _, _ = settle([tester("live-verified: the app in live mode")], labels=("stage:live", "needs:live"))
+    check("a stage:live issue from before, with a live-verified line, closes the same way",
+          [c.split(" --comment")[0] for c in calls], ["issue edit 9 --remove-label stage:live", "issue close 9 --reason completed"])
+    calls, _, _ = settle([tester("accept-blocked: no .env")])
+    check("accept-blocked goes to the owner", calls[0], "issue edit 9 --remove-label stage:accept --add-label stage:owner")
+    calls, pool, _ = settle([tester("Escape still closes the whole sheet.")])
+    check("a first failure is not counted: a fresh session checks it again",
+          (len(calls), ccpool.ACCEPT_RETRY in calls[0], pool.book.accept_rounds[9]), (1, True, 1))
+    calls, pool, _ = settle([mark(ccpool.ACCEPT_RETRY), tester("Still the whole sheet.")])
+    check("failing again, it counts: back to stage:triage with the report",
+          (calls[0], ccpool.ACCEPT_HANDBACK in calls[1], pool.book.failed_tries[9]),
+          ("issue edit 9 --remove-label stage:accept --add-label stage:triage", True, 1))
+    calls, _, _ = settle([mark(ccpool.ACCEPT_HANDBACK, at="2026-10-22T10:00:00Z"), mark(ccpool.ACCEPT_RETRY),
+                          tester("Still wrong.")])
+    check("a second counted failure goes to the owner", calls[0],
+          "issue edit 9 --remove-label stage:accept --add-label stage:owner")
+    calls, _, _ = settle([mark(ccpool.ACCEPT_RETRY, at="2026-10-22T10:00:00Z"), tester("Wrong.")])
+    check("a retry from an earlier entry into stage:accept does not count", ccpool.ACCEPT_RETRY in calls[0], True)
+    calls, pool, _ = settle([tester("accept-verified: x", at="2026-10-23T12:05:00Z")])
+    check("a verdict from before this unit started is not this unit's: the issue goes in the next batch",
+          (calls, pool.book.accept_rounds[9]), ([], 1))
+    calls, pool, _ = settle([], finished=False)
+    check("a unit that timed out leaves an issue without a verdict for its retry", pool.book.accept_rounds[9], 0)
+
+
 def test_long_dependency_waits_are_pointed_out() -> None:
     """One P1 fix waited 6.7 hours on three dependencies and nobody looked at them again."""
     blocked = dict(iss(238, ["stage:triage", "P1"]), blocked_by=3)
@@ -3090,6 +3307,17 @@ def test_scratch_paths_are_the_repositorys() -> None:
         check(f"the {role} skill's scratch paths are under $ISSUELOOPER_TMP",
               ("/tmp/wrk-" in skill or "/tmp/mrg-" in skill or "/tmp/tst-" in skill, "$ISSUELOOPER_TMP/" in skill),
               (False, True))
+
+
+def test_worker_prompt_says_refs_and_the_checklist() -> None:
+    claim = {"issue": 5, "token": "t", "from": "stage:triage", "title": "x"}
+    text = ccpool.worker_prompt(claim, "1", "45m", "u", devcheck=True, accept="src/",
+                                checklist="Checklist rows (id, then what to check):\n    lang:ja   ja")
+    check("a product change writes Refs, and the live check declares its rows",
+          ("changes src/ writes `Refs #5`" in " ".join(text.split()), "# accept-rows: <ids>" in text,
+           "lang:ja" in text), (True, True, True))
+    plain = ccpool.worker_prompt(claim, "1", "45m", "u")
+    check("without them, neither", ("Refs #5" in plain, "accept-rows" in plain), (False, False))
 
 
 def test_worker_prompt_points_to_the_project() -> None:

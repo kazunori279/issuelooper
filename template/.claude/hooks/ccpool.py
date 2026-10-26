@@ -79,6 +79,16 @@ UNITS
           `live-verified:` line closes the issue, `live-check-blocked:` moves it to
           stage:owner, anything else hands it back to stage:triage, and a second
           failed check moves it to stage:owner.
+          With POOL_ACCEPT ([accept] paths set) the live check folds into the
+          acceptance check: a PR that changes those paths says `Refs #N`, and the merge
+          moves its issue to stage:accept (stage:live from before counts the same).
+          Once the build the tester checks (the deployed sha, or main when nothing
+          deploys) contains its merge, one tester unit accepts up to POOL_ACCEPT_BATCH
+          (6) such issues against the checklist, live mode for needs:live issues and
+          live paths. settle_accept: `accept-verified:` closes, `accept-blocked:` goes
+          to the owner, a failure is checked once more by a fresh session before it
+          counts, then hands back to stage:triage, and a second counted failure goes to
+          the owner.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
 monitor's; no unit is started for them, and none for an issue with an open blocker
@@ -231,6 +241,14 @@ LINK = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|refs?)\s+#(\d
 LIVE_VERIFIED = re.compile(r"(?im)^[ \t>*-]*live-verified:[ \t]*\S")
 LIVE_BLOCKED = re.compile(r"(?im)^[ \t>*`-]*live-check-blocked:")
 LIVE_HANDBACK = "<!-- live-handback -->"
+# The acceptance check (POOL_ACCEPT): stage:live, a needs:live issue after its merge from
+# before the check covered every product change, is accepted the same way (in live mode).
+ACCEPT_STAGE = "stage:accept"
+ACCEPTING = (ACCEPT_STAGE, "stage:live")
+ACCEPT_VERIFIED = re.compile(r"(?im)^[ \t>*-]*(?:accept|live)-verified:[ \t]*\S")
+ACCEPT_BLOCKED = re.compile(r"(?im)^[ \t>*`-]*(?:accept-blocked|live-check-blocked):")
+ACCEPT_RETRY = "<!-- accept-retry -->"
+ACCEPT_HANDBACK = "<!-- accept-handback -->"
 def bare_login(login: str) -> str:
     """A login as both GitHub APIs agree on it: REST names a GitHub App's bot
     `<slug>[bot]` and GraphQL (`gh issue view --json`) plain `<slug>`. Comparing them
@@ -405,6 +423,11 @@ class Config:
     # main's check. Off: each PR merges on its own after the merged-tree check.
     merge_train: bool = False
     train_size: int = 4  # PRs in one train at most
+    # The acceptance check: issues whose PR changed accept_paths (and needs:live issues)
+    # wait at stage:accept after the merge for a tester's check (settle_accept).
+    accept: bool = False
+    accept_paths: list = dataclasses.field(default_factory=list)
+    accept_batch: int = 6  # issues one acceptance unit checks at most
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
@@ -512,6 +535,9 @@ class Config:
             red_hold=env_flag("POOL_RED_HOLD", True),
             merge_train=env_flag("POOL_MERGE_TRAIN", True) and bool(e("SWEEP_COMMAND", "").strip()),
             train_size=env_int("POOL_TRAIN_SIZE", 4),
+            accept=env_flag("POOL_ACCEPT", True) and bool(config.accept_paths()),
+            accept_paths=config.accept_paths(),
+            accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -567,7 +593,7 @@ def normalize(data: dict) -> dict:
     }
 
 
-STAGES = ("stage:triage", "stage:ready", "stage:doing", "stage:pr", "stage:live", "stage:owner")
+STAGES = ("stage:triage", "stage:ready", "stage:doing", "stage:pr", "stage:accept", "stage:live", "stage:owner")
 
 
 def queue_snapshot(st: dict) -> dict:
@@ -742,6 +768,15 @@ class Book:
         self.rebase_wanted: dict[int, str] = {}  # PR -> head the supervisor rebases onto main (auto rebase)
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
         self.train: dict[int, dict] = {}  # PR -> its place in the merge train's queue (Pool.enqueue)
+        # Acceptance (Pool.track_accept): issue -> {"pr", "sha" (its merge), "live", "t"};
+        # issue -> the build its merge was found in; issue -> checks that settled nothing
+        # (part of the unit's key, so the next batch checks it again); the issues the next
+        # unit may take, and that build.
+        self.accept_merged: dict[int, dict] = {}
+        self.accept_in: dict[int, str] = {}
+        self.accept_rounds: collections.Counter = collections.Counter()
+        self.accept_ready: list[int] = []
+        self.accept_target = ""
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
@@ -862,7 +897,7 @@ def plan(
             units.append(
                 Unit("auto", "requeue", f"requeue:{n}@{i['updated']}", f"rcl:{n}", n, (1, n), {})
             )
-        elif "stage:live" in labels and cfg.live and not book.missing:
+        elif "stage:live" in labels and cfg.live and not cfg.accept and not book.missing:
             # (While a file the live environment needs is missing, a tester could only
             # report that it cannot run the check; the monitor hears it once instead.)
             # Keyed on this entry into stage:live (Pool.track_live), so a hand-back,
@@ -878,6 +913,27 @@ def plan(
             )
 
     open_by = {i["number"]: i for i in st["open"]}
+    if cfg.accept and book.accept_ready and book.accept_target:
+        # One tester unit accepts a batch of merged issues on the build that has them:
+        # near one tester session per deploy. The rest wait for the next unit.
+        batch = []
+        for n in book.accept_ready:
+            i = open_by.get(n)
+            if not i or set(i["labels"]) & (HOLDS | IGNORED) or not set(i["labels"]) & set(ACCEPTING):
+                continue
+            live = cfg.live and bool((book.accept_merged.get(n) or {}).get("live") or "needs:live" in i["labels"])
+            if live and book.missing:
+                continue  # the live environment lacks a file only the owner has (check_files)
+            batch.append((priority(i["labels"]), n, live))
+        batch.sort()
+        issues = [{"n": n, "title": open_by[n]["title"], "live": live, "since": book.live_entry.get(n, ""),
+                   "pr": (book.accept_merged.get(n) or {}).get("pr")}
+                  for _, n, live in batch[: max(1, cfg.accept_batch)]]
+        if issues:
+            sha = book.accept_target
+            key = f"accept:{sha[:12]}:" + ",".join(f"{x['n']}@{x['since']}#{book.accept_rounds[x['n']]}" for x in issues)
+            units.append(Unit("tester", "accept", key, "tst:accept", None, (2, 1, 0),
+                              {"sha": sha, "deployed": bool(cfg.deploy_cmd), "issues": issues}))
     seen_prs = set()
     for pr in sorted(st["prs"], key=lambda p: p["number"]):
         seen_prs.add(pr["number"])
@@ -1056,7 +1112,7 @@ def plan(
         why = book.why_not(u, cfg, now)
         if not why:
             due.append(u)
-        elif u.kind != "ux" and (why in ("tries", "family") or (why == "done" and u.kind != "live")):
+        elif u.kind != "ux" and (why in ("tries", "family") or (why == "done" and u.kind not in ("live", "accept"))):
             stuck.append(u)
     return due, stuck
 
@@ -1159,9 +1215,20 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
 
 
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
-                  wrap_min: int = 35, issue: str = "", files: str = "", devcheck: bool = False) -> str:
+                  wrap_min: int = 35, issue: str = "", files: str = "", devcheck: bool = False,
+                  accept: str = "", checklist: str = "") -> str:
     n, token = c["issue"], c["token"]
     live_text = ", labelled needs:live: write Refs #%s, not Fixes" % n if live and c.get("needs_live") else ""
+    accept_text = (
+        f"\nA pull request that changes {accept} writes `Refs #{n}`, not `Fixes`: after the merge #{n}\n"
+        "waits at stage:accept until a tester who did not write it checks it on the deployed build.\n"
+        if accept else "")
+    if devcheck and checklist:
+        accept_text += (
+            "\nYour live check (devcheck.py) covers the acceptance checklist rows your change triggers.\n"
+            "Declare them in the script, `# accept-rows: <ids>`, and a row that cannot apply as\n"
+            "`# accept-skip: <id> <why>`; merge gate 7 refuses a check that misses one.\n"
+            + "\n".join("    " + ln for ln in checklist.splitlines()) + "\n")
     devcheck_text = (" and, for a change a user can see, a passing live check\n"
                      "   (devcheck.py) of it") if devcheck else ""
     pr = c.get("pr") or {}
@@ -1204,7 +1271,7 @@ Work on #{n} only; do not claim or touch any other issue. Read the issue and its
 comments first: an issue that was closed and reopened says there why it came back.
 {pr_text}
 Your paths: worktree {scratch(f"wrk-{k}-{n}-wt")} on branch {branch}, scratch files {scratch(f"wrk-{k}-{n}-")}*.
-{PROJECT} says how to set up a worktree, run the app and where tests go. Put your tests
+{accept_text}{PROJECT} says how to set up a worktree, run the app and where tests go. Put your tests
 in new files named for the issue (such as test_issue_{n}.py in the right test directory);
 never append to a shared test file (that is what makes pull requests conflict).
 
@@ -1315,6 +1382,29 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
             + rules
         )
     sha = u.info["sha"]
+    if u.kind == "accept":
+        rows = "\n".join(
+            f"  #{x['n']} \"{x['title']}\"" + (f", merged in PR #{x['pr']}" if x.get("pr") else "")
+            + (", in live mode" if x.get("live") else "")
+            for x in u.info["issues"])
+        cl = config.checklist_text()
+        return (
+            "Use the issuelooper-tester skill (section Acceptance check) and do exactly one unit of work, "
+            "then stop.\n\n"
+            f"Your unit: these merged issues, accepted at commit {sha[:12]} ("
+            + ("the deployed build" if u.info.get("deployed") else "origin/main; this repository does not deploy")
+            + f"), started from that commit on your port as {PROJECT} says:\n{rows}\n\n"
+            "Someone else wrote each change. For each issue, read it, its comments and its merged PR, then drive "
+            "what it asked for on screen with a script, in scripted mode or in live mode where marked, through "
+            "the checklist rows its change needs. Then comment once on that issue, signed `<!-- tester -->`: "
+            "what you ran and what you saw (quote the screen), ending with a line of its own, "
+            "`accept-verified: <what ran>` when every part works, or `accept-blocked: <what is missing>` when "
+            "you could not run the check at all; neither when something is wrong or missing (say what)."
+            + (f"\n\n{cl}" if cl else "")
+            + "\n\nSave the script of each issue you verify as $LOGDIR/accept/test_accept_<N>.py, and write "
+            "$LOGDIR/accept_report.md, one line per issue: its number and verdict."
+            + rules
+        )
     where = (
         f"the deployed app now runs {sha[:12]}" if u.info.get("deployed")
         else f"origin/main is at {sha[:12]} (this repository does not deploy)"
@@ -1442,6 +1532,12 @@ def is_test(path: str) -> bool:
     return (path.startswith(("tests/", "test/")) or "/tests/" in path or "/test/" in path
             or name.startswith("test_") or ".test." in name or ".spec." in name
             or name.rsplit(".", 1)[0].endswith("_test"))
+
+
+def touches_live(paths) -> bool:
+    """Whether a change triggers the checklist's live rows ([accept.triggers])."""
+    return any("live" in groups and any(config.path_matches(p, glob) for p in paths)
+               for glob, groups in config.checklist()["triggers"])
 
 
 def is_source(path: str) -> bool:
@@ -1995,6 +2091,8 @@ class Session(threading.Thread):
             return (self.dir / "ux_report.md").exists()
         if u.kind == "spec":
             return (self.dir / "spec_report.md").exists()
+        if u.kind == "accept":
+            return (self.dir / "accept_report.md").exists()
         n = u.info.get("issue") if u.role == "merger" else u.number
         try:
             out = subprocess.run(
@@ -2118,7 +2216,8 @@ class Session(threading.Thread):
                 files = ""
             prompt = worker_prompt(claim, str(self.seq), cfg.timeouts["worker"], pool, wip,
                                    cfg.live, int(cfg.wrap_s() // 60) or 35,
-                                   issue_text(thread) if thread else "", files, cfg.devcheck)
+                                   issue_text(thread) if thread else "", files, cfg.devcheck,
+                                   ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text())
         elif u.role == "merger":
             env.update(MERGE_PR=str(u.number))
             prompt = merger_prompt(u, cfg.timeouts["merger"])
@@ -3202,6 +3301,8 @@ class Pool:
             self.quota_seen(u.role)
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
             self.settle_live(u)
+        if u.role == "tester" and u.kind == "accept" and (outcome == "ok" or outcome.startswith(("timed out", "failed"))):
+            self.settle_accept(u, w.started, outcome == "ok")  # a session that timed out may have settled some
         if u.kind == "ux":
             self.record_ux_score(w)
         extra = {}
@@ -3713,25 +3814,49 @@ class Pool:
         self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
 
     def after_merge(self, pr: int, n: int, head: str, needs_live: bool, why: str) -> None:
-        """A merged PR's issue: off stage:pr (to stage:live when it needs a live check),
+        """A merged PR's issue: off stage:pr, to stage:accept when it changed [accept] paths
+        or needs a live check (POOL_ACCEPT), else to stage:live when it needs a live check;
         a comment saying why it merged, and the long files it left on main."""
+        merged = self.merged_pr(pr)
+        files = merged["files"]
+        accept = self.cfg.accept and (needs_live or any(config.path_matches(f, g) for f in files
+                                                         for g in self.cfg.accept_paths))
+        stage = ACCEPT_STAGE if accept else "stage:live" if needs_live else ""
         args = ["issue", "edit", str(n), "--remove-label", "stage:pr"]
-        if needs_live:
-            args += ["--add-label", "stage:live"]
+        if stage:
+            args += ["--add-label", stage]
         self.gh(*args)
+        if accept:
+            with self.lock:
+                self.book.accept_merged[n] = {"pr": pr, "sha": merged["sha"], "t": self.clock(),
+                                              "live": needs_live or touches_live(files)}
         self.gh(
             "issue", "comment", str(n), "--body",
             (f"<!-- merger -->\nMerged PR #{pr} (head {head[:8]}): {why}, so the supervisor landed it. "
-             + ("It stays open at stage:live for the tester's live check." if needs_live
+             + ("It stays open at stage:accept until a tester who did not write it checks it on the deployed "
+                "build." if accept
+                else "It stays open at stage:live for the tester's live check." if needs_live
                 else "The supervisor deploys main next." if self.cfg.deploy_cmd else "")).strip(),
         )
-        self.note_large_files(pr)
+        self.note_large_files(pr, files)
         self.log("merged", pr=pr, issue=n, head=head[:12])
 
-    def note_large_files(self, pr: int) -> None:
+    def merged_pr(self, pr: int) -> dict:
+        """A PR's changed files and merge commit ({"files": [...], "sha": ""} when unread)."""
+        r = self.gh("pr", "view", str(pr), "--json", "files,mergeCommit")
+        try:
+            data = json.loads(r.stdout or "{}")
+        except ValueError:
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        return {"files": [str(f.get("path") or "") for f in data.get("files") or [] if isinstance(f, dict)],
+                "sha": str((data.get("mergeCommit") or {}).get("oid") or "")}
+
+    def note_large_files(self, pr: int, files: list[str] | None = None) -> None:
         """Measure the source files this PR touched on main; report the long ones. Source
         files are those under REVIEW_PATHS (the production paths, default src/)."""
-        files = self.gh("pr", "view", str(pr), "--json", "files", "-q", ".files[].path").stdout.split()
+        if files is None:
+            files = self.merged_pr(pr)["files"]
         self.git("fetch", "-q", "origin", "main")
         large = {}
         for f in files:
@@ -4161,6 +4286,138 @@ class Pool:
                 self.events = lines + self.events
             self.log("feed_error", error=str(exc))
 
+    def track_accept(self, st: dict) -> None:
+        """Which issues waiting for acceptance (stage:accept, or stage:live from before)
+        are in the build the tester checks: the deployed sha, or main when nothing
+        deploys. An issue's merge commit comes from after_merge, or once from GitHub (a
+        restarted supervisor; a failed read is tried again after ten minutes)."""
+        b = self.book
+        if not self.cfg.accept:
+            b.accept_ready = []
+            return
+        target = self.own_deployed if self.cfg.deploy_cmd else st.get("main", "")
+        now = self.clock()
+        waiting = [i["number"] for i in st["open"] if set(i["labels"]) & set(ACCEPTING)]
+        ready, fetched = [], False
+        for n in waiting if target else []:
+            if b.accept_in.get(n) == target:
+                ready.append(n)
+                continue
+            m = b.accept_merged.get(n)
+            if not m or (not m["sha"] and now - m["t"] > 600):
+                m = b.accept_merged[n] = self.accept_merge_info(n)
+            if not m["sha"]:
+                continue
+            r = self.git("merge-base", "--is-ancestor", m["sha"], target)
+            if r.returncode not in (0, 1) and not fetched:
+                fetched = True
+                self.git("fetch", "-q", "origin", "main")
+                r = self.git("merge-base", "--is-ancestor", m["sha"], target)
+            if r.returncode == 0:
+                b.accept_in[n] = target
+                ready.append(n)
+        for n in set(b.accept_merged) - set(waiting):
+            if now - b.accept_merged[n]["t"] > 600:  # after_merge's entry precedes the label's poll
+                b.accept_merged.pop(n, None)
+                b.accept_in.pop(n, None)
+                b.accept_rounds.pop(n, None)
+        b.accept_ready, b.accept_target = ready, target
+
+    def accept_merge_info(self, n: int) -> dict:
+        """Issue n's merged PR from GitHub: {"pr", "sha", "live", "t"} ("sha" empty when unread)."""
+        r = self.gh("pr", "list", "--state", "merged", "--head", f"issue-{n}", "--json", "number,mergeCommit,files",
+                    "-L", "1")
+        try:
+            p = (json.loads(r.stdout or "[]") or [{}])[0]
+        except (ValueError, IndexError, TypeError):
+            p = {}
+        files = [str(f.get("path") or "") for f in p.get("files") or [] if isinstance(f, dict)]
+        return {"pr": p.get("number"), "sha": str((p.get("mergeCommit") or {}).get("oid") or ""),
+                "live": touches_live(files), "t": self.clock()}
+
+    def settle_accept(self, u: Unit, started: float, finished: bool) -> list[int]:
+        """Act on the acceptance tester's verdict on each issue of its batch, as settle_live
+        does: `accept-verified:` (or `live-verified:`) closes it, `accept-blocked:` sends it
+        to the owner. A failure is checked once more by a fresh session before it counts:
+        the harness's QA tester retried each failure, and a false failure costs a worker
+        session. A counted failure goes back to stage:triage with the report; a second goes
+        to the owner. An issue with no verdict is in the next batch. Returns the verified."""
+        try:
+            login = bare_login(claimlib.loop_login())
+        except claimlib.GhError:
+            which = ", ".join("#" + str(x["n"]) for x in u.info["issues"])
+            self.event(f"acceptance check of {which} finished: read the tester's comments and settle each issue "
+                       "(close, owner, or hand back)")
+            return []
+        start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+        verified = []
+        for x in u.info.get("issues") or []:
+            n, entry = x["n"], x.get("since") or ""
+            try:
+                r = self.gh("issue", "view", str(n), "--json", "state,labels,comments")
+                data = json.loads(r.stdout) if r.returncode == 0 else None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                data = None
+            if not isinstance(data, dict):
+                self.event(f"acceptance check of #{n} finished: read the tester's comment and settle it")
+                continue
+            labels = {y.get("name") for y in data.get("labels") or []}
+            stage = next((s for s in ACCEPTING if s in labels), "")
+            if data.get("state") != "OPEN" or not stage:
+                continue  # somebody already settled it
+            comments = [c for c in data.get("comments") or []
+                        if bare_login(str((c.get("author") or {}).get("login") or "")) == login]
+            verdicts = [c for c in comments if str(c.get("body", "")).lstrip().startswith("<!-- tester -->")
+                        and str(c.get("createdAt", "")) >= max(entry, start)]
+            if not verdicts:
+                if finished:
+                    with self.lock:
+                        self.book.accept_rounds[n] += 1
+                    self.event(f"#{n}: the acceptance tester left no verdict on it; it goes in the next batch")
+                continue
+            body, url = str(verdicts[-1].get("body", "")), verdicts[-1].get("url", "")
+            if ACCEPT_BLOCKED.search(body):
+                self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:owner")
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\nThe tester could not run the acceptance check ({url}): it needs what that "
+                        "comment names, which only the owner can provide. Waiting at stage:owner.")
+                self.event(f"#{n}: the acceptance check could not run (accept-blocked); moved to stage:owner. "
+                           "Tell the owner what is missing.")
+                how = "blocked"
+            elif ACCEPT_VERIFIED.search(body):
+                self.gh("issue", "edit", str(n), "--remove-label", stage)
+                self.gh("issue", "close", str(n), "--reason", "completed", "--comment",
+                        f"<!-- merger -->\nClosed: the tester's acceptance check passed ({url}).")
+                verified.append(n)
+                how = "verified"
+            elif not any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
+                         for c in comments):
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\n{ACCEPT_RETRY}\nThe acceptance check did not show the behavior ({url}). "
+                        "A fresh tester session checks it once more before it counts.")
+                with self.lock:
+                    self.book.accept_rounds[n] += 1
+                how = "retry"
+            elif sum(ACCEPT_HANDBACK in str(c.get("body", "")) or LIVE_HANDBACK in str(c.get("body", ""))
+                     for c in comments) >= 1:
+                self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:owner")
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\n{ACCEPT_HANDBACK}\nThe acceptance check failed again ({url}), after a second "
+                        "fix. Whether the acceptance holds as written is the owner's call. Waiting at stage:owner.")
+                self.event(f"#{n}: its acceptance check failed after a second fix; moved to stage:owner. Add one "
+                           "comment listing what each fix changed and what each check saw.")
+                how = "owner"
+            else:
+                self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:triage")
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\n{ACCEPT_HANDBACK}\nBack to stage:triage: two acceptance checks after the "
+                        f"merge did not show the behavior ({url}). The next worker starts from what that comment saw.")
+                self.event(f"#{n}: the acceptance check failed twice; handed back to stage:triage.")
+                self.failed_try(n)
+                how = "handback"
+            self.log("accept_settled", issue=n, verdict=how)
+        return verified
+
     def settle_live(self, u: Unit) -> None:
         """Act on the tester's verdict on a stage:live issue: close it on a `live-verified:`
         line, send it to the owner on `live-check-blocked:`, hand it back to stage:triage
@@ -4352,7 +4609,7 @@ class Pool:
         for i in st["open"]:
             n = i["number"]
             open_now.add(n)
-            if "stage:live" in i["labels"]:
+            if set(i["labels"]) & set(ACCEPTING):
                 entry.setdefault(n, i["updated"])
             elif n in entry and i["updated"] > entry[n]:
                 del entry[n]
@@ -4365,6 +4622,7 @@ class Pool:
         st = self.fetcher()
         self.last_fetch = now
         good, _ = self.deployments()
+        self.track_accept(st)  # git and gh reads: outside the lock
         with self.lock:
             self.track_live(st)
             self.track_holds(st, now)
@@ -4411,6 +4669,7 @@ class Pool:
             "feed_pending_since": self.pending_since,
             "main_check": self.main_check_last,
             "train": {"running": self.train_running, "queue": sorted(self.book.train)},
+            "accept": {"ready": self.book.accept_ready, "build": self.book.accept_target[:12]},
             "missing_files": self.book.missing,
             "ux_scores": self.ux_scores[-10:],
         }
@@ -4423,6 +4682,9 @@ class Pool:
         return started
 
     def run(self):
+        if self.cfg.accept:  # a repository installed before the acceptance check lacks the label
+            self.gh("label", "create", ACCEPT_STAGE, "--color", "c5def5", "--force",
+                    "--description", "Merged; the acceptance check is owed")
         pruned = prune_scratch()
         if pruned:
             self.log("scratch_pruned", count=len(pruned), paths=pruned[:20])
@@ -4527,6 +4789,7 @@ def cmd_run(_a) -> int:
     os.environ["POOL_LOGDIR"] = str(cfg.logdir)
     # Sweeps (sweep_locked.py) and the merge gates (role_guard.py) follow the train's state.
     os.environ["POOL_MERGE_TRAIN"] = "1" if cfg.merge_train else "0"
+    os.environ["POOL_ACCEPT"] = "1" if cfg.accept else "0"
     pool = Pool(cfg)
     signal.signal(signal.SIGTERM, pool.stop)
     signal.signal(signal.SIGINT, pool.stop)

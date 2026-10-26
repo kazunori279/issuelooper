@@ -666,6 +666,7 @@ def text(m: dict, width: int = 100) -> str:
                 ("doing", "stage:doing"),
                 ("pr", "stage:pr"),
                 ("live", "stage:live"),
+                ("accept", "stage:accept"),
             )
         )
         + f" · owner {st.get('stage:owner', 0)} · on hold {st.get('on hold', 0)} · open PRs {sum((q.get('prs') or {}).values())}",

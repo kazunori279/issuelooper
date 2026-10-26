@@ -74,6 +74,10 @@ LABEL_RULES = {
     # `stage:live`: a `needs:live` issue after its merge (the PR said `Refs #N`),
     # waiting for the tester's live check.
     "stage:live": {"add": {"merger", "monitor"}, "remove": {"monitor"}},
+    # `stage:accept`: an issue whose PR changed product code ([accept] paths), after its
+    # merge (the PR said `Refs #N`), waiting for the tester's acceptance check. The
+    # supervisor moves it on; the tester only comments.
+    "stage:accept": {"add": {"merger", "monitor"}, "remove": {"monitor"}},
     "P0": {"add": {"monitor", "tester", "aide"}, "remove": {"monitor"}},
     "P1": {"add": {"monitor", "tester", "aide"}, "remove": {"monitor"}},
     "P2": {"add": {"monitor", "tester", "aide"}, "remove": {"monitor"}},
@@ -246,6 +250,34 @@ LIVE_STAGE = "stage:live"
 # run where the behavior was actually observed.
 LIVE_EVIDENCE = re.compile(r"(?im)^[ \t>*-]*live-verified:[ \t]*\S")
 LIVE_LINE = "live-verified: <what you ran, and where> <YYYY-MM-DD>"
+
+# The acceptance check (POOL_ACCEPT, [accept] paths): a PR that changes product code
+# says `Refs #N`, and its issue waits at `stage:accept` (or `stage:live`, from before)
+# for the tester's `accept-verified:` line.
+ACCEPT_STAGE = "stage:accept"
+ACCEPT_EVIDENCE = re.compile(r"(?im)^[ \t>*-]*(?:accept|live)-verified:[ \t]*\S")
+CLOSING_REF = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#(\d+)\b")
+
+
+def accept_on() -> bool:
+    """POOL_ACCEPT (on unless 0) with [accept] paths set."""
+    return os.environ.get("POOL_ACCEPT", "1").strip().lower() not in ("0", "off", "false", "no") \
+        and bool(config.accept_paths())
+
+
+def product_paths(paths: list[str]) -> list[str]:
+    """The paths among these under [accept] paths (product code)."""
+    return [p for p in paths if any(config.path_matches(p, g) for g in config.accept_paths())] if accept_on() else []
+
+
+def refuse_closing_product_change(which: str, product: list[str]) -> None:
+    block(
+        f"This pull request changes product code ({', '.join(f'`{p}`' for p in product[:3])}) and would close "
+        f"{which} on merge.\n\nA change to `[accept] paths` is accepted after the merge: a tester who did not "
+        "write it drives it on the deployed build, through the checklist, and only that closes the issue. "
+        f"Write `Refs {which.split(',')[0]}` instead of `Fixes`/`Closes`/`Resolves` in the body; the merge moves "
+        "the issue to `stage:accept`."
+    )
 
 # Which issue or pull request a close or a merge is aimed at, so the hold can be
 # looked up. Both `gh issue close` and `gh pr merge` take the number anywhere in
@@ -1213,7 +1245,7 @@ def check_issue_close(command: str) -> None:
 
     for number in list(dict.fromkeys(numbers))[:3]:
         names = issue_labels(number, repo)
-        if names is None or LIVE not in names:
+        if names is None or not (LIVE in names or ACCEPT_STAGE in names):
             continue
         data = gh_json(["gh", "issue", "view", number, "--json", "comments"], repo)
         if not isinstance(data, dict):
@@ -1231,6 +1263,15 @@ def check_issue_close(command: str) -> None:
         ]
         if any(LIVE_EVIDENCE.search(b) for b in bodies):
             continue
+        if LIVE not in names:
+            if any(ACCEPT_EVIDENCE.search(b) for b in bodies):
+                continue
+            block(
+                f"#{number} is at `{ACCEPT_STAGE}`: its acceptance check is owed, so it does not close yet.\n\n"
+                "The supervisor closes it on the tester's `accept-verified:` line, from a tester who did not "
+                "write the change. If the check cannot run, the tester says `accept-blocked:` and the issue "
+                "goes to the owner. Only the tester's signed comment or the owner's own counts."
+            )
         block(
             f"#{number} carries `{LIVE}` and no comment on it says the behavior was "
             "observed live, so it does not close yet.\n\n"
@@ -1261,7 +1302,7 @@ def monitor_live_label_check(command: str) -> None:
     numbers += REST_LABELS_TARGET.findall(command) + REST_ISSUE_TARGET.findall(command)
     for number in list(dict.fromkeys(numbers))[:3]:
         names = issue_labels(number, repo) or set()
-        stage = names & {LIVE_STAGE, "stage:owner"}
+        stage = names & {LIVE_STAGE, ACCEPT_STAGE, "stage:owner"}
         if stage:
             block(
                 f"#{number} is at `{sorted(stage)[0]}`: its live check is owed, and `{LIVE}` comes off only "
@@ -1641,6 +1682,13 @@ def check_pr_merge(command: str) -> None:
                 "If the label is wrong — the acceptance really is checkable from a "
                 "test — say so on the issue. The monitor clears it; a merge does not."
             )
+
+        # Gate 4 for the acceptance check: a product change does not close its issue.
+        if closing:
+            product = product_paths([str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
+                                     if isinstance(f, dict)])
+            if product:
+                refuse_closing_product_change(", ".join(f"#{n}" for n in closing), product)
 
         # Gate 6: the protected paths are the owner's.
         protected = protected_paths()
@@ -2409,6 +2457,13 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
             "the full check suite was measured against the head commit being submitted.\n\n"
             "Run the sweep at the current head and add `- **Sweep SHA:** <HEAD sha>` to the PR body."
         )
+
+    # Gate 4 for the acceptance check, before the PR exists rather than at its merge.
+    closing_refs = CLOSING_REF.findall(body)
+    if closing_refs and accept_on():
+        product = product_paths(pr_create_paths(command, cwd))
+        if product:
+            refuse_closing_product_change(", ".join(f"#{n}" for n in dict.fromkeys(closing_refs)), product)
 
     # Gate 7, as far as it can be told before the PR exists: the issue's labels and
     # the files the branch changes. The merge gate checks the record against the head.
