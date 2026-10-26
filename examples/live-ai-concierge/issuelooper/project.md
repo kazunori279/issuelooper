@@ -80,10 +80,15 @@ your own:
 2. **Live journey**, twice, each into its own directory (`live-1/`, `live-2/`),
    after `ln -sf "$SHARED_REPO_PATH/.env" "$T/.env"` (the tree's path, written out):
    `uv run python ux/journeys.py --live --out "$SHARED_REPO_PATH/.ux/<sha12>/live-1"`.
-   It asks three questions, interrupts a long story (barge-in), asks about "near
-   here" after setting a location, and asks twice in Japanese. The app must stop
-   the first answer, answer every question, and never show "Not delivered", a
-   stuck status or a dead input. A step that fails in one of the two runs is a bug.
+   This is the live journey; every UX run runs it twice. It asks three questions,
+   interrupts a long story by text and then by voice (the fake microphone says
+   "Sorry, stop. What time is it in Tokyo?"), reloads in the middle of a turn and
+   asks again, sets the location to Otaru and asks "near here" in English, asks
+   for several cards in one turn, and asks in Japanese, "near here" included
+   (この近く). A step fails when it could not be done, or when its screenshot shows
+   an answer that ignores the saved location, a reply under another question, a
+   first answer that did not stop, a status stuck on thinking, "Not delivered" or a
+   dead input. A step that fails in either run is a bug and caps the score at 70.
 3. **Your own probes.** Then up to six actions of your own, in a short Playwright
    script at `$ISSUELOOPER_TMP/tst-$TST_PORT-probes.py` (scratch, not a journeys file), on
    whatever looked wrong or untested in the journeys, and every

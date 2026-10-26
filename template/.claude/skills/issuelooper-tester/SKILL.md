@@ -141,11 +141,11 @@ screenshots never dirty the shared checkout):
 python3 <your journeys file> --port "$TST_PORT" --out "$SHARED_REPO_PATH/.ux/<sha12>"
 ```
 
-When live checks are on and `.issuelooper/project.md` names a live journey, run
-it too, twice, each time from a fresh start, with screenshots under
-`.ux/<sha12>/live-1/` and `live-2/` and the server log kept. A step that fails
-once in two tries is a bug: file it with both runs and the log lines around the
-failure.
+When `.issuelooper/project.md` names a live journey, every UX run runs it too,
+twice, each time from a fresh start, with screenshots under `.ux/<sha12>/live-1/`
+and `live-2/` and the server log kept (when the credentials it needs are missing,
+say so in the report and skip it). A step that fails once in two tries is a bug:
+file it with both runs and the log lines around the failure.
 
 ### 2. Read every screenshot, together
 
@@ -176,7 +176,12 @@ Taste is not a defect. A finding says what the user sees, at which step.
 
 Score strictly: a user who meets a blocker (cannot do what they came for) would not
 rate the app above 50, and one who meets a major defect (misled, or slowed down
-badly) not above 70, however polished the rest is. A run that files nothing new
+badly) not above 70, however polished the rest is. A live-journey step that fails
+in either run counts as a major: it could not be done, or its screenshot shows the
+wrong result (an answer that ignores what was set, such as the saved location; a
+reply under another question; a status stuck on thinking). Scripted journeys
+cannot show these: in one cohort the tester scored 91-95 while an outside audit of
+the same deploys found 7-19 live majors. A run that files nothing new
 still reports every defect it saw, with the issue that already tracks it.
 
 ### 3. File at most five

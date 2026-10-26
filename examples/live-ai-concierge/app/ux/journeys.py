@@ -14,8 +14,11 @@ writes one screenshot per step to DIR with:
 - DIR/server-*.log: the server logs.
 
 --live walks the live journey instead, against the real model: the checkout needs
-the credentials (.env). Run it twice, each into its own DIR; a step that fails in one
-of the two runs is a bug.
+the credentials (.env). It asks questions, interrupts a long story by text and by
+voice (the fake microphone plays ux/barge_in.wav), reloads in the middle of a turn,
+sets a location and asks "near here" in English and in Japanese, and asks for
+several cards in one turn. Run it twice, each into its own DIR; a step that fails in
+one of the two runs is a bug.
 
 A failed action is part of the experience, not an error: it is recorded with its
 reason and the journey goes on. Judge the screenshots against spec/ and ux/rubric.md.
@@ -67,6 +70,12 @@ LIVE_LONG = "Tell me a long story about a lighthouse keeper, at least two minute
 LIVE_BARGE = "Sorry to interrupt: what time is it in Tokyo?"
 LIVE_HERE = "Find a sushi place near here."
 LIVE_JA = ("金沢の天気を教えて", "この近くのカフェを探して")
+# What the fake microphone says when the mic is tapped (Chromium plays this file once).
+LIVE_VOICE = pathlib.Path(__file__).with_name("barge_in.wav")
+LIVE_VOICE_TEXT = "Sorry, stop. What time is it in Tokyo?"
+LIVE_RELOAD = "What are three things to do in Hakodate?"
+LIVE_AFTER_RELOAD = "Which of those is best on a rainy day?"
+LIVE_MULTI = "Plan my evening here: the weather tonight, a seafood place nearby, and how to walk there from the station."
 
 
 # --- the app ------------------------------------------------------------------------
@@ -669,6 +678,42 @@ def live(browser, rec: Recorder, out: pathlib.Path, port: int | None):
         rec.do(
             page,
             j,
+            f"asks: {LIVE_LONG} (screenshot 8 s later, while it is speaking)",
+            lambda: (send(page, LIVE_LONG), page.wait_for_timeout(8000)),
+        )
+        rec.do(
+            page,
+            j,
+            f'interrupts by voice: taps the mic and says "{LIVE_VOICE_TEXT}" (screenshot 5 s later)',
+            lambda: (tid(page, "composer-mic").click(), page.wait_for_timeout(5000)),
+        )
+        rec.do(
+            page,
+            j,
+            "waits for the reply to finish, then taps the mic off",
+            lambda: (page.wait_for_timeout(15000), tid(page, "composer-mic").click()),
+            1500,
+        )
+        rec.do(
+            page,
+            j,
+            f"asks: {LIVE_RELOAD}, and reloads the page 2 s later, mid-turn (screenshot 4 s after the reload)",
+            lambda: (
+                send(page, LIVE_RELOAD),
+                page.wait_for_timeout(2000),
+                page.reload(),
+                page.wait_for_timeout(4000),
+            ),
+        )
+        rec.do(
+            page,
+            j,
+            f"asks after the reload: {LIVE_AFTER_RELOAD}",
+            lambda: say(page, LIVE_AFTER_RELOAD, 25000),
+        )
+        rec.do(
+            page,
+            j,
             "opens settings, sets the location to Otaru, Hokkaido and closes settings",
             lambda: (
                 open_settings(page),
@@ -679,6 +724,12 @@ def live(browser, rec: Recorder, out: pathlib.Path, port: int | None):
             3000,
         )
         rec.do(page, j, f"asks: {LIVE_HERE}", lambda: say(page, LIVE_HERE, 25000))
+        rec.do(
+            page,
+            j,
+            f"asks for several cards in one turn: {LIVE_MULTI}",
+            lambda: say(page, LIVE_MULTI, 35000),
+        )
         rec.do(
             page,
             j,
@@ -707,7 +758,9 @@ def main():
                 "--use-fake-ui-for-media-stream",
                 "--use-fake-device-for-media-stream",
                 "--autoplay-policy=no-user-gesture-required",
-            ],
+            ]
+            # Live: the microphone says LIVE_VOICE_TEXT once, for the voice barge-in.
+            + ([f"--use-file-for-fake-audio-capture={LIVE_VOICE}%noloop"] if a.live else []),
             # No sound server: playback goes to a silent device whose clock runs, so the
             # app's speaking state ends on time (a real sound server can hold it).
             env={**os.environ, "PULSE_SERVER": "unix:/nonexistent"},
