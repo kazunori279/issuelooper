@@ -110,8 +110,10 @@ re-sweep fails only where that red `main` fails is held for a later try rather t
 handed back. The merged-tree check and
 re-sweeps run once more before acting on a failure (a PR that fails twice the same
 way is handed back with the failing tests; twice differently, it is held as flaky),
-and when `main` turns green again with no commit touching the tests that failed,
-the supervisor files a `Flaky test:` issue for them (or comments on the open one). `[sweep] main_check = false`
+and a test that fails and then passes at the same commit (main, a PR's head or a
+merged tree) is flaky: the supervisor files a `Flaky test:` issue for it (or comments
+on the open one). A later green commit proves nothing: that rule once labeled a main
+break as flaky. `[sweep] main_check = false`
 turns it off.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that

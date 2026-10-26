@@ -2741,19 +2741,19 @@ def test_a_single_flaky_failure_is_tried_again() -> None:
 
 
 def test_a_flaky_red_main_gets_an_issue() -> None:
-    """main went red four times on an e2e weather-card flake and nobody filed a fix."""
+    """main went red four times on an e2e weather-card flake and nobody filed a fix. Only a
+    failure and a pass at one commit make a test flaky: cohort 52's main break (#194) was
+    labeled flaky because a later commit was green with no change to the test."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-flaky-"))
     gh = d / "gh"
     gh.write_text(FAKE_GH_LOG)
     gh.chmod(0o755)
     h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
     red = "FAILED tests/e2e/test_issue_14.py::test_weather_card - Timeout\n== sweep is red ==\n"
-    results = {"1": (False, red), "2": (True, "green"), "3": (False, red), "4": (True, "green")}
-    h.pool.sweep_main = lambda sha: results[sha[0]]
+    runs = {"1": [(False, red), (False, red)], "2": [(True, "green")], "3": [(False, red), (True, "green")]}
+    h.pool.sweep_main = lambda sha: runs[sha[0]].pop(0)
     h.pool.commits_since = lambda old, new: []
-    touched = {"2": [], "4": ["abc1234"]}
-    h.pool.touched = lambda old, new, paths: touched[new[0]]
-    for k in "1234":
+    for k in "12":
         h.st = state(main=k * 40)
         h.step()
         for _ in range(100):
@@ -2761,12 +2761,20 @@ def test_a_flaky_red_main_gets_an_issue() -> None:
                 break
             time.sleep(0.05)
     log = (d / "gh.log").read_text()
-    check("red, then green with no commit to the test's file: a flaky-test issue",
+    check("red at one commit, green at the next: a main break and its fix, not a flake",
+          ("Flaky test:" in log, any("flaky" in e for e in h.pool.events)), (False, False))
+    h.st = state(main="3" * 40)
+    h.step()
+    for _ in range(100):
+        if not h.pool.main_check_running:
+            break
+        time.sleep(0.05)
+    log = (d / "gh.log").read_text()
+    check("red and then green at the same commit: a flaky-test issue, marked as such",
           ([ln.split(" --body ")[0] for ln in log.splitlines() if ln.startswith("issue create --title Flaky")],
-           any("flaky test(s) tests/e2e/test_issue_14.py::test_weather_card" in e for e in h.pool.events)),
+           ccpool.FLAKY_MARK in log, any("failed and passed at one commit (main at 33333333)" in e for e in h.pool.events)),
           (["issue create --title Flaky test: tests/e2e/test_issue_14.py::test_weather_card --label type:bug "
-            "--label P1 --label stage:triage"], True))
-    check("red and green after a commit that touched it: no second one", log.count("Flaky test:"), 1)
+            "--label P1 --label stage:triage"], True, True))
 
 
 def test_known_flaky_tests_do_not_turn_main_red() -> None:
@@ -2777,7 +2785,11 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
     gh.write_text(FAKE_GH_LOG)
     gh.chmod(0o755)
     (d / "gh.list").write_text(json.dumps([{"number": 92, "title": "Flaky test: tests/unit/test_a.py::test_x",
-                                            "body": "- `tests/unit/test_a.py::test_x`", "comments": []}]))
+                                            "body": ccpool.FLAKY_MARK + "\n- `tests/unit/test_a.py::test_x`",
+                                            "comments": []},
+                                           {"number": 194, "title": "Flaky test: tests/unit/test_b.py::test_y",
+                                            "body": "main went red ... green again ...\n- `tests/unit/test_b.py::test_y`",
+                                            "comments": []}]))
     h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
     flaky = "FAILED tests/unit/test_a.py::test_x - boom\n== sweep is red ==\n"
     other = "FAILED tests/unit/test_b.py::test_y - boom\n== sweep is red ==\n"
@@ -2801,7 +2813,7 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
             log = (d / "gh.log").read_text()
             check("another test failed and passed on the second run: main green, the test reported as flaky",
                   (h.pool.main_check_last["ok"], "--title main is red" in log,
-                   "passed when the check ran again" in log), (True, False, True))
+                   "passed when they ran again at the same commit" in log), (True, False, True))
     check("failed twice: main red, as before",
           (h.pool.main_check_last["ok"], "--title main is red" in (d / "gh.log").read_text()),
           (False, True))
@@ -2816,6 +2828,11 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
         ccpool.Pool.flaky_tests = real
     check("a re-sweep red only on a known flaky test: held, not handed back",
           (outcome, "pr comment" in log), ("held (the re-sweep failed only known flaky tests: #135)", False))
+    stale2 = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
+    outcome, _, log, pool = resweep_session(stale2, ALLOW_SH, sweeps=[(False, RED_SWEEP), (True, "281 green")])
+    check("a re-sweep that fails, then passes at the same head: merged, and the test recorded as flaky",
+          (outcome, any("failed and passed at one commit (PR #9's head cccccccc)" in e for e in pool.events)),
+          ("ok", True))
 
 
 def test_a_check_that_failed_on_the_machine_blames_nobody() -> None:
