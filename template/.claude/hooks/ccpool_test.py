@@ -2975,6 +2975,43 @@ def test_a_flaky_test_has_a_deadline() -> None:
     check("said once: no second comment", "issue comment" in (d / "gh.log").read_text(), False)
 
 
+def test_a_consolidation_chore_when_per_issue_tests_pile_up() -> None:
+    """Cohort 52's final main: 104 of 251 e2e tests were a coverage subset of another."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-consolidate-"))
+    old = os.environ.get("SHARED_REPO_PATH")
+    try:
+        work, g = git_repo(d)
+        (work / "tests" / "e2e").mkdir(parents=True)
+        for k in range(3):
+            (work / "tests" / "e2e" / f"test_issue_{k}.py").write_text("def test_a():\n    pass\n")
+        (work / "tests" / "e2e" / "test_settings.py").write_text("")
+        g("add", "-A")
+        g("commit", "-qm", "tests")
+        sha = g("rev-parse", "HEAD")
+        os.environ["SHARED_REPO_PATH"] = str(work)
+        gh = d / "gh"
+        gh.write_text(FAKE_GH_LOG)
+        gh.chmod(0o755)
+        h = Rig(state(), gh=str(gh), consolidate_at=4)
+        h.pool.consolidation_chore(sha)
+        check("under the threshold: nothing", (d / "gh.log").exists(), False)
+        h.pool.cfg.consolidate_at = 3
+        h.pool.consolidation_chore(sha)
+        log = (d / "gh.log").read_text()
+        check("at the threshold: one chore, P2, with what to delete, merge, parametrize or replace",
+              ("issue create --title Consolidate per-issue tests: 3 tests/e2e/test_issue_*.py files --label P2" in log,
+               all(w in log for w in ("**delete**", "**merge**", "**parametrize**", "**replace**"))), (True, True))
+        (d / "gh.list").write_text(json.dumps([{"number": 300, "title": "Consolidate per-issue tests: 3 files"}]))
+        (d / "gh.log").write_text("")
+        h.pool.consolidation_chore(sha)
+        check("not again while one is open", "issue create" in (d / "gh.log").read_text(), False)
+    finally:
+        if old is None:
+            os.environ.pop("SHARED_REPO_PATH", None)
+        else:
+            os.environ["SHARED_REPO_PATH"] = old
+
+
 GATE7_ONCE = ("if [ -e {d}/once ]; then " + "echo '{\"decision\": \"allow\"}'" + "; else touch {d}/once; "
               "echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
               "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'; fi\n")

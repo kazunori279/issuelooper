@@ -195,6 +195,7 @@ import collections
 import collections.abc
 import dataclasses
 import datetime as dt
+import fnmatch
 import glob
 import hashlib
 import json
@@ -338,6 +339,8 @@ class Config:
     deploy_grace_s: float = 300
     key_tries: int = 2
     family_max: int = 6
+    consolidate_glob: str = "tests/e2e/test_issue_*.py"  # per-issue test files counted for the chore
+    consolidate_at: int = 40  # that many on main: one chore to merge or parametrize them by flow (0 = off)
     flaky_merges: int = 10  # merges a recorded flaky test has to be fixed or deleted in (0 = no deadline)
     hold_retry_s: float = 60  # a unit that ended held is due again after this, without spending a try
     crash_max: int = 3
@@ -447,6 +450,8 @@ class Config:
             family_max=env_int("POOL_FAMILY_MAX", 6),
             hold_retry_s=float(e("POOL_HOLD_RETRY_S", "") or 60),
             flaky_merges=env_int("POOL_FLAKY_MERGES", 10),
+            consolidate_glob=e("POOL_CONSOLIDATE_GLOB", "") or "tests/e2e/test_issue_*.py",
+            consolidate_at=env_int("POOL_CONSOLIDATE_AT", 40),
             crash_max=env_int("POOL_CRASH_MAX", 3),
             crash_pause_s=float(e("POOL_CRASH_PAUSE_S", "120")),
             quota_resumes=env_int("POOL_QUOTA_RESUMES", 8),
@@ -3363,6 +3368,7 @@ class Pool:
                 ok, out = self.second_look(sha, out)
             self.main_checked(sha, ok, out)
             self.flaky_deadlines()
+            self.consolidation_chore(sha)
         except Exception as exc:  # noqa: BLE001 - a failed check is not a failed supervisor
             self.log("main_check_error", sha=sha[:12], error=str(exc)[:300])
         finally:
@@ -3540,6 +3546,46 @@ class Pool:
             self.event(f"flaky test(s) {', '.join(t for t, _ in due[:2])} past their deadline of "
                        f"{self.cfg.flaky_merges} merges: #{n} says so, at P1")
             self.flaky_known = (0.0, self.flaky_known[1])  # its comments changed
+
+    def consolidation_chore(self, sha: str) -> None:
+        """File one chore when main holds POOL_CONSOLIDATE_AT (40) per-issue test files
+        (POOL_CONSOLIDATE_GLOB): merge or parametrize them by flow. Not while one is open.
+        On cohort 52's final main, 104 of 251 e2e tests were a coverage subset of another,
+        most of them one new test_issue_<N>.py per issue for a flow that already had one."""
+        if not self.cfg.consolidate_at:
+            return
+        r = subprocess.run(["git", "-C", str(repo_root()), "ls-tree", "-r", "--name-only", sha],
+                           capture_output=True, text=True, timeout=60)
+        listed = r.stdout.split() if r.returncode == 0 else []
+        files = [f for f in listed if fnmatch.fnmatch(f, self.cfg.consolidate_glob)]
+        if len(files) < self.cfg.consolidate_at:
+            return
+        o = self.gh("issue", "list", "--state", "open", "--search", "Consolidate per-issue tests in:title",
+                    "--json", "number,title")
+        try:
+            if o.returncode != 0 or any(str(i.get("title", "")).startswith("Consolidate per-issue tests")
+                                        for i in json.loads(o.stdout or "[]")):
+                return
+        except ValueError:
+            return
+        body = (
+            f"<!-- merger -->\nmain at {sha[:8]} has {len(files)} files matching `{self.cfg.consolidate_glob}`, one per "
+            "issue. Many test a flow that another file already tests, and every sweep runs them all.\n\n"
+            "Merge or parametrize them by flow, without losing what they check:\n"
+            "- **delete** a test whose steps and assertions another test already covers (a strict subset), and any "
+            "test that checks no behavior (a lint or file-layout check, a source-text grep, a page that only loads);\n"
+            "- **merge** two tests that start from the same fixture and take the same steps into one;\n"
+            "- **parametrize** copies of one test across viewports, languages or settings into one test;\n"
+            "- **replace** a structural check (a grep of JS or HTML source) with a test that drives the behavior.\n\n"
+            "Keep every assertion that is not covered elsewhere. Do it in a few PRs, one flow each, with the sweep "
+            "green after each; give the merged tests flow names (`test_settings.py`, `test_reload.py`)."
+        )
+        title = f"Consolidate per-issue tests: {len(files)} {self.cfg.consolidate_glob} files"
+        c = self.gh("issue", "create", "--title", title, "--label", "P2", "--label", "stage:triage", "--body", body)
+        m = re.search(r"/issues/(\d+)", c.stdout)
+        self.log("consolidate_filed", files=len(files), ok=bool(m))
+        if m:
+            self.event(f"filed #{m.group(1)}: consolidate {len(files)} per-issue test files by flow")
 
     def merges_since(self, at: str) -> int:
         """Commits on origin/main since an ISO time: the merges (each lands as one squash commit)."""

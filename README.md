@@ -135,7 +135,9 @@ rebase went to a merger twice on the same files makes other PRs' merges that tou
 files wait until it lands (`POOL_STARVE_AFTER`, at most `POOL_STARVE_HOLD_S`, 60 min),
 a file that keeps
 conflicting gets an issue to split it (the review gate summarizes the blocks such a
-split moves verbatim, so its diff fits), and a deploy that lost a race with another
+split moves verbatim, so its diff fits), `POOL_CONSOLIDATE_AT` (40) per-issue test files
+(`POOL_CONSOLIDATE_GLOB`, `tests/e2e/test_issue_*.py`) on `main` get one chore to merge or
+parametrize them by flow (not while one is open), and a deploy that lost a race with another
 `git fetch` is tried again. Servers and test runs a session left running in its
 scratch paths are killed when it ends. Issues blocked by an open issue (a `Blocked by:` line
 or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the
