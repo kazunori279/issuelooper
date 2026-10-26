@@ -58,6 +58,9 @@ paths = []                   # ACCEPT_PATHS: product code, e.g. ["src/"]. A PR t
                              # when nothing deploys) has it, one tester unit accepts a batch of such issues on it,
                              # needs:live ones in live mode. Empty = off: only needs:live issues get a live check
 batch = 6                    # POOL_ACCEPT_BATCH: issues one acceptance unit checks at most
+guard = ""                   # ACCEPT_GUARD: runs tests/accept/ (e.g. "uv run pytest -q tests/accept") on each deploy,
+                             # with no model; a failing test files `Regression of #N`. The scripts of verified issues
+                             # become a chore issue for those tests. Empty = off
 # The acceptance checklist the worker's live check (devcheck.py, merge gate 7) and the
 # tester share. Rows have ids (viewport:<size>, lang:<code>, always:<first three words>,
 # live:<first three words>); a live-check script declares the rows it covers with a line

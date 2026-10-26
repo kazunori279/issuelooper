@@ -980,6 +980,10 @@ with open(os.environ["FAKE_GH_LOG"], "a") as f:
     f.write(" ".join(a.replace("\n", "\\n") for a in sys.argv[1:]) + "\n")
 if sys.argv[1:3] == ["pr", "view"]:
     print(os.environ.get("FAKE_GH_PR", "{}"))
+if sys.argv[1:3] == ["issue", "list"]:
+    print(os.environ.get("FAKE_GH_LIST", "[]"))
+if sys.argv[1:3] == ["issue", "create"]:
+    print("https://github.com/o/r/issues/77")
 if sys.argv[1:3] == ["issue", "view"]:
     view = os.environ.get("FAKE_GH_VIEW", "")
     if not view:
@@ -1081,6 +1085,77 @@ def test_acceptance_verdicts_settle_themselves() -> None:
           (calls, pool.book.accept_rounds[9]), ([], 1))
     calls, pool, _ = settle([], finished=False)
     check("a unit that timed out leaves an issue without a verdict for its retry", pool.book.accept_rounds[9], 0)
+
+
+def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
+    """Fixed regressions came back in cohort 52 ("maps blank after reload"). A verified
+    issue's script becomes tests/accept/, run on each build with no model."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-guard-"))
+    work, g = git_repo(d)
+    (work / "tests/accept").mkdir(parents=True)
+    (work / "tests/accept/test_accept_5.py").write_text("def test_sheet(): pass\n")
+    g("add", ".")
+    g("commit", "-qm", "guard for #5")
+    g("push", "-q", "origin", "HEAD:main")
+    sha = g("rev-parse", "HEAD")
+    gh = d / "gh"
+    gh.write_text(ACCEPT_GH)
+    gh.chmod(0o755)
+    log = d / "gh.log"
+    restore = with_env({"SHARED_REPO_PATH": str(work), "FAKE_GH_LOG": str(log)})
+    try:
+        fail = "echo 'FAILED tests/accept/test_accept_5.py::test_sheet - the map is blank'; exit 1"
+
+        def guard(cmd, rerun="", listed="[]"):
+            log.write_text("")
+            os.environ["FAKE_GH_LIST"] = listed
+            pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept_guard=cmd, rerun_cmd=rerun),
+                               fetcher=state, spawn=False)
+            pool.flaky_known = (time.time() + 3600, {})
+            pool.guard_due({"main": sha})
+            pool.main_check_thread.join(60)
+            return [x for x in log.read_text().splitlines() if x.startswith("issue create")], pool
+        created, pool = guard(fail)
+        check("a failing guard test files `Regression of #N` (P1) with the test",
+              [x.split(" --label")[0] for x in created],
+              ["issue create --title Regression of #5: tests/accept/test_accept_5.py::test_sheet"])
+        check("with the labels and the output", ("--label P1" in created[0], "the map is blank" in created[0]),
+              (True, True))
+        check("the main lane is free again, and the same build is not run twice",
+              (pool.main_check_running, pool.guard_sha), (False, sha))
+        created, _ = guard(fail, listed=json.dumps([{"number": 77, "title": "Regression of #5: "
+                                                    "tests/accept/test_accept_5.py::test_sheet"}]))
+        check("once while its issue is open", created, [])
+        created, pool = guard(fail, rerun="true {tests}")
+        check("passing when it runs again at the same commit: flaky, no regression",
+              ([x for x in created if "Regression" in x], any("flaky" in e for e in pool.events)), ([], True))
+        created, pool = guard("exit 0")
+        check("green: nothing filed", created, [])
+        pool.main_check_running = True
+        pool.guard_sha = ""
+        pool.guard_due({"main": sha})
+        check("not while the train or the main check holds the lane", pool.guard_sha, "")
+        os.environ.pop("FAKE_GH_LIST", None)
+        logdir = d / "session"
+        (logdir / "accept").mkdir(parents=True)
+        (logdir / "accept/test_accept_5.py").write_text("print('five')\n")
+        (logdir / "accept/test_accept_6.py").write_text("print('six')\n")
+        log.write_text("")
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept_guard="pytest tests/accept"),
+                           fetcher=state, spawn=False)
+        pool.accept_chore(logdir, [5, 6, 7])
+        created = [x for x in log.read_text().splitlines() if x.startswith("issue create")]
+        check("the verified scripts become one chore issue, but not one whose test is on main already",
+              ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
+               "print('five')" in created[0] if created else True),
+              (["issue create --title Acceptance tests for #6"], True, False))
+        log.write_text("")
+        pool.cfg.accept_guard = ""
+        pool.accept_chore(logdir, [6])
+        check("with no guard, no chore", log.read_text(), "")
+    finally:
+        restore()
+        os.environ.pop("FAKE_GH_LIST", None)
 
 
 def test_long_dependency_waits_are_pointed_out() -> None:
@@ -3316,6 +3391,9 @@ def test_worker_prompt_says_refs_and_the_checklist() -> None:
     check("a product change writes Refs, and the live check declares its rows",
           ("changes src/ writes `Refs #5`" in " ".join(text.split()), "# accept-rows: <ids>" in text,
            "lang:ja" in text), (True, True, True))
+    guarded = ccpool.worker_prompt(claim, "1", "45m", "u", accept="src/", guard=True)
+    check("with the guard on, an accept test rather than a new e2e file",
+          "tests/accept/test_accept_5.py" in guarded, True)
     plain = ccpool.worker_prompt(claim, "1", "45m", "u")
     check("without them, neither", ("Refs #5" in plain, "accept-rows" in plain), (False, False))
 

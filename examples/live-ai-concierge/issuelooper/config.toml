@@ -69,6 +69,8 @@ labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS
 [accept]
 paths = ["src/"]             # ACCEPT_PATHS: a PR that changes these says `Refs #N`; a tester accepts its issue on
                              # the deployed build (a batch of up to [accept] batch, 6, per unit) before it closes
+guard = "uv run pytest -q -p no:cacheprovider tests/accept"   # ACCEPT_GUARD: the accepted issues' Playwright
+                             # scripts, run on each deploy with no model; a failure files `Regression of #N`
 # The acceptance checklist (ids: viewport:<size>, lang:<code>, always:/live:<first three
 # words>). Live-check scripts declare `# accept-rows: <ids>`, or `# accept-skip: <id> <why>`;
 # gate 7 refuses a record that misses a row the PR's paths trigger. Most of cohort 52's QA

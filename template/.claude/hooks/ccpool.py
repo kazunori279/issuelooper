@@ -88,7 +88,11 @@ UNITS
           live paths. settle_accept: `accept-verified:` closes, `accept-blocked:` goes
           to the owner, a failure is checked once more by a fresh session before it
           counts, then hands back to stage:triage, and a second counted failure goes to
-          the owner.
+          the owner. With [accept] guard set, the scripts of verified issues become one
+          chore issue (tests/accept/test_accept_<N>.py, written by a worker through the
+          usual gates), and the supervisor runs that command on each deploy in the main
+          lane, with no model: a failing test files `Regression of #N` (P1), once while
+          it is open, after a rerun that passes counts it flaky instead.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
 monitor's; no unit is started for them, and none for an issue with an open blocker
@@ -428,6 +432,7 @@ class Config:
     accept: bool = False
     accept_paths: list = dataclasses.field(default_factory=list)
     accept_batch: int = 6  # issues one acceptance unit checks at most
+    accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
@@ -538,6 +543,7 @@ class Config:
             accept=env_flag("POOL_ACCEPT", True) and bool(config.accept_paths()),
             accept_paths=config.accept_paths(),
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
+            accept_guard=e("ACCEPT_GUARD", "").strip(),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -1216,13 +1222,18 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
 
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
                   wrap_min: int = 35, issue: str = "", files: str = "", devcheck: bool = False,
-                  accept: str = "", checklist: str = "") -> str:
+                  accept: str = "", checklist: str = "", guard: bool = False) -> str:
     n, token = c["issue"], c["token"]
     live_text = ", labelled needs:live: write Refs #%s, not Fixes" % n if live and c.get("needs_live") else ""
     accept_text = (
         f"\nA pull request that changes {accept} writes `Refs #{n}`, not `Fixes`: after the merge #{n}\n"
         "waits at stage:accept until a tester who did not write it checks it on the deployed build.\n"
         if accept else "")
+    if accept and guard:
+        accept_text += (
+            f"When #{n}'s acceptance is behavior a user drives, write its test as tests/accept/test_accept_{n}.py\n"
+            f"(Playwright, scripted mode) instead of a new tests/e2e/test_issue_{n}.py: the supervisor runs\n"
+            "tests/accept/ against every deploy.\n")
     if devcheck and checklist:
         accept_text += (
             "\nYour live check (devcheck.py) covers the acceptance checklist rows your change triggers.\n"
@@ -2217,7 +2228,8 @@ class Session(threading.Thread):
             prompt = worker_prompt(claim, str(self.seq), cfg.timeouts["worker"], pool, wip,
                                    cfg.live, int(cfg.wrap_s() // 60) or 35,
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
-                                   ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text())
+                                   ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
+                                   bool(cfg.accept_guard))
         elif u.role == "merger":
             env.update(MERGE_PR=str(u.number))
             prompt = merger_prompt(u, cfg.timeouts["merger"])
@@ -3007,6 +3019,7 @@ class Pool:
         self.train_landing = False  # it is merging its batch now (deploy_check waits)
         self.train_until = 0.0  # no train before this after one that was held
         self.train_red_main: tuple = ()  # (main, heads) of a train that failed only where main fails
+        self.guard_sha = ""  # the last build the acceptance guard ran on (guard_due)
         self.main_green = ""  # the last main whose full check was green
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
@@ -3302,7 +3315,8 @@ class Pool:
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
             self.settle_live(u)
         if u.role == "tester" and u.kind == "accept" and (outcome == "ok" or outcome.startswith(("timed out", "failed"))):
-            self.settle_accept(u, w.started, outcome == "ok")  # a session that timed out may have settled some
+            verified = self.settle_accept(u, w.started, outcome == "ok")  # one that timed out may have settled some
+            self.accept_chore(w.dir, verified)
         if u.kind == "ux":
             self.record_ux_score(w)
         extra = {}
@@ -4418,6 +4432,117 @@ class Pool:
             self.log("accept_settled", issue=n, verdict=how)
         return verified
 
+    def accept_chore(self, logdir: pathlib.Path, verified: list[int]) -> None:
+        """One chore issue for the scripts of the issues this acceptance unit verified
+        ($LOGDIR/accept/test_accept_<N>.py), with [accept] guard set: a worker turns them
+        into tests/accept/test_accept_<N>.py through the usual gates. Not for an issue
+        whose test is already on main (its own worker wrote one)."""
+        if not self.cfg.accept_guard or not verified:
+            return
+        self.git("fetch", "-q", "origin", "main")
+        found = []
+        for n in verified:
+            path = logdir / "accept" / f"test_accept_{n}.py"
+            if path.is_file() and self.git("cat-file", "-e", f"origin/main:tests/accept/test_accept_{n}.py").returncode:
+                found.append((n, path.read_text(errors="replace")))
+        if not found:
+            return
+        names = ", ".join(f"#{n}" for n, _ in found)
+        body = (
+            f"<!-- merger -->\nThe tester verified {names} on the deployed build with these scripts. Add each as "
+            "`tests/accept/test_accept_<N>.py`: Playwright, in scripted mode wherever the issue does not need live "
+            "mode, starting the app the way the project's e2e tests do, and keeping every check the script makes. "
+            "The supervisor runs `tests/accept/` against each deploy with no model, and a failure files "
+            "`Regression of #N`; such a test guards what the tester saw work.\n"
+        )
+        for n, text in found:
+            room = 60000 - len(body)
+            if room < 2000:
+                body += f"\n#{n}: `{logdir / 'accept' / f'test_accept_{n}.py'}` (too long to quote here)\n"
+                continue
+            body += (f"\n### #{n}\n\n```python\n" + text[: min(12000, room - 200)].replace("```", "'" * 3)
+                     + "\n```\n")
+        r = self.gh("issue", "create", "--title", f"Acceptance tests for {names}"[:200], "--label", "P2",
+                    "--label", "stage:triage", "--body", body)
+        m = re.search(r"/issues/(\d+)", r.stdout)
+        self.log("accept_chore", issues=[n for n, _ in found], ok=bool(m))
+        if m:
+            self.event(f"filed #{m.group(1)}: turn the acceptance scripts of {names} into tests/accept/ guards")
+
+    def guard_due(self, st: dict) -> None:
+        """Run [accept] guard (tests/accept/) on each new build, the deployed sha or main
+        when nothing deploys, in the main lane it shares with the train and the main
+        check. No model is involved."""
+        target = self.own_deployed if self.cfg.deploy_cmd else st.get("main", "")
+        with self.lock:
+            if (not self.cfg.accept_guard or not target or target == self.guard_sha or self.main_check_running
+                    or self.stopping):
+                return
+            self.main_check_running, self.guard_sha = True, target
+        self.main_check_thread = threading.Thread(target=self.run_guard, args=(target,), daemon=True)
+        self.main_check_thread.start()
+
+    def run_guard(self, sha: str) -> None:
+        root, wt = str(repo_root()), scratch(f"main-guard-{sha[:12]}")
+        try:
+            remove_worktree(root, wt, self.log)
+            self.git("fetch", "-q", "origin", "main")
+            if self.git("worktree", "add", "-q", "--detach", wt, sha).returncode != 0:
+                self.log("accept_guard", sha=sha[:12], ok=None, why="no worktree")
+                return
+            if not (pathlib.Path(wt) / "tests" / "accept").is_dir():
+                return  # no guard on main yet
+            try:
+                r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.main_check_s, cwd=wt,
+                                   env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
+                ok, out = r.returncode == 0, r.stdout + r.stderr
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                ok, out = None, str(exc)
+            failing = failing_tests(out) if ok is False else []
+            if ok is False and INFRA.search(out):
+                ok = None
+            if ok is False:
+                again, _ = self.rerun_tests(wt, failing)  # the same commit: a pass makes them flaky
+                if again:
+                    self.report_flaky(f"the acceptance guard at {sha[:8]}", failing)
+                    ok = True
+            self.log("accept_guard", sha=sha[:12], ok=ok, failing=failing[:5])
+            if ok is False:
+                self.report_regressions(sha, failing, out)
+        except Exception as exc:  # noqa: BLE001 - a failed guard is not a failed supervisor
+            self.log("accept_guard_error", sha=sha[:12], error=str(exc)[:300])
+        finally:
+            remove_worktree(root, wt, self.log)
+            with self.lock:
+                self.main_check_running = False
+            self.wake.set()
+
+    def report_regressions(self, sha: str, failing: list[str], out: str) -> None:
+        """File `Regression of #N: <test>` (P1) per failing acceptance test, unless an open
+        issue already names that test."""
+        r = self.gh("issue", "list", "--state", "open", "--search", "in:title Regression", "--json", "number,title")
+        try:
+            titles = [str(i.get("title", "")) for i in json.loads(r.stdout or "[]")]
+        except (ValueError, TypeError, AttributeError):
+            titles = []
+        for t in (failing or [""])[:10]:
+            m = re.search(r"test_accept_(\d+)", t)
+            title = (f"Regression of #{m.group(1)}: {t}" if m
+                     else f"Acceptance guard fails at {sha[:8]}: {t or 'see the output'}")[:200]
+            if any((t or title) in x for x in titles):
+                continue
+            body = (f"<!-- merger -->\nThe acceptance guard (`{self.cfg.accept_guard}`) fails on the build at "
+                    f"{sha[:8]}" + (f": `{t}`, the test that guards #{m.group(1)}, which the tester had verified."
+                                    if m else ".")
+                    + " It failed again when it ran alone at the same commit, so it is not a flake.\n\n"
+                    "The end of the output:\n\n```\n" + out.strip()[-3000:].replace("```", "'" * 3) + "\n```\n")
+            c = self.gh("issue", "create", "--title", title, "--label", "type:bug", "--label", "P1",
+                        "--label", "stage:triage", "--body", body)
+            n = re.search(r"/issues/(\d+)", c.stdout)
+            self.log("regression_filed", test=t[:200], ok=bool(n))
+            self.event(f"acceptance guard at {sha[:8]}: {t or 'it fails'}; "
+                       + (f"filed #{n.group(1)}" if n else "could not file an issue"))
+
     def settle_live(self, u: Unit) -> None:
         """Act on the tester's verdict on a stage:live issue: close it on a `live-verified:`
         line, send it to the owner on `live-check-blocked:`, hand it back to stage:triage
@@ -4643,6 +4768,7 @@ class Pool:
         self.deploy_check(st, now)
         self.train_due(st)  # first: its sweep covers main too
         self.main_check_due(st)
+        self.guard_due(st)
         self.feed(st, now)
         if not self.events:
             self.pending_since = 0.0
