@@ -58,7 +58,9 @@ gh pr view $P --json headRefOid -q .headRefOid            # must equal git rev-p
 ```
 
 If the sweep says the project's formatter changed files, commit and push them, and
-run it again.
+run it again. With the merge train on, the sweep runs only the tests the change
+touches; the supervisor runs the whole suite on `main` with the PR merged before it
+merges.
 
 When the body has a `- **Live check:** <sha>` line naming another sha than your
 new head, check it again before you stop, after the sweep:
@@ -89,7 +91,7 @@ git merge-base --is-ancestor origin/main HEAD || git rebase origin/main
   of its own
   (`git push --force-with-lease origin "HEAD:<headRefName>"`) and do not sweep
   again. The supervisor sweeps a head that has no sweep record before its merge
-  gates, and checks it merged with the current `main` under its merge lock.
+  gates, and checks it merged with the current `main` before it merges.
 - Conflicts: resolve them as in step 2, then step 3 again, then this step again.
   Three rounds at most; then go on with the head you pushed.
 

@@ -84,7 +84,23 @@ A gate that cannot be checked counts as refused: when the guard fails, gives no
 answer, or cannot read the PR or a changed file from GitHub, the supervisor does
 not merge and tries again on a later poll.
 
-Each gate checks the PR's head, and a head swept on an older `main` says nothing
+By default the supervisor merges through a merge train. Each PR's own sweep (the
+worker's, a merger's, the supervisor's re-sweep) then runs only the tests its change
+touches, when the project sets `[sweep] affected = "<command with {tests}>"`
+(`[sweep] affected_map` adds tests for paths; a change it cannot map, or one to an
+`[sweep] affected_full` path, runs the whole suite). A PR that passes the review gate
+and the merge gates waits in a queue. The supervisor merges up to `[pool] train_size`
+(4) of them, P0 first, onto `main` in a worktree and runs the whole suite on that tree
+once. Green: they merge in that order, each checked to leave `main` with the tree the
+train ran, and that run is `main`'s check. Red: the failing tests run again on the
+same tree (a pass makes them flaky), then on `main` alone (a failure there makes
+`main` red and blames no PR), then on the trees in between, halving, to find the first
+PR that fails them. That PR is handed back with the failing tests, the PRs before it
+merge, and the rest wait for the next train. `[pool] merge_train = false` merges each
+PR on its own, as the next paragraphs describe; so does a project without a
+`[sweep] command`.
+
+Without the train, each gate checks the PR's head, and a head swept on an older `main` says nothing
 about the merged result: two PRs that do not conflict can still break `main`
 together (one moves an import the other still uses). With `[sweep] fast_command`
 set, the supervisor merges a PR whose head is behind `main` with the current
@@ -94,7 +110,8 @@ fails the check too, in which case nobody is blamed and the gates decide.
 
 What the quick check leaves out can still break `main`. After `main` moves, the
 supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
-background, one run at a time, for `POOL_MAIN_CHECK_S` (1200) at most. A check that fails
+background (with the train, only on a `main` the train did not check whole), one run
+at a time, for `POOL_MAIN_CHECK_S` (1200) at most. A check that fails
 on the machine (no space left on the device, say) counts as not run, and a PR whose check
 fails that way is held, not handed back; the monitor hears when the scratch file system
 is nearly full. A failure only in tests that have an open `Flaky test:`

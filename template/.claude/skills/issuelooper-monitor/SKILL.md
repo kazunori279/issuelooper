@@ -67,7 +67,10 @@ time; answer them first. A message that needs nothing from you gets one line.
    keep going. An issue the supervisor parked at `stage:owner` after three
    failed attempts, with no question for the owner on it, needs a look: if it
    needs no product decision, rewrite or split it and re-queue it with a comment
-   containing `<!-- reset-attempts -->` (that resets the attempt count). Never edit the hooks, the supervisor or the
+   containing `<!-- reset-attempts -->` (that resets the attempt count). A PR at
+   `stage:pr` with nothing running on it may be waiting in the merge train's queue
+   (`train` in the pool's state.json); the train hands back the PR that breaks the
+   whole suite, with its failing tests. Never edit the hooks, the supervisor or the
    skills, and never ask for them to be restarted; report a problem with the loop
    itself to the owner in your reply.
 6. **Raise the owner's decisions** at `stage:owner`: only questions about what

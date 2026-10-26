@@ -176,6 +176,9 @@ The sweep must print `git: <sha> (clean)`, the `green:` line and
 sweep runs it first; if it changed files, it stops and names them: commit them
 (amend is fine) and sweep again. Commit first and sweep after. Red: fix, commit, sweep
 again. A wait of a few minutes for a sweep slot is normal; never delete a lock.
+With the merge train on, the sweep runs only the tests your change touches (its
+`affected:` line names them); the supervisor runs the whole suite with your PR
+merged before the merge, and a failure there comes back to you with the failing tests.
 Then the live check (step 4), at the same commit.
 
 ## 6. Push, open the PR, move the issue
