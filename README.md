@@ -93,8 +93,9 @@ and the merge gates waits in a queue. The supervisor merges up to `[pool] train_
 (4) of them, P0 first, onto `main` in a worktree and runs the whole suite on that tree
 once. Green: they merge in that order, each checked to leave `main` with the tree the
 train ran, and that run is `main`'s check. Red: the failing tests run again on the
-same tree (a pass makes them flaky), then on `main` alone (a failure there makes
-`main` red and blames no PR), then on the trees in between, halving, to find the first
+same tree (a pass makes them flaky), then on `main` alone (the same tests running and
+failing there make `main` red and blame no PR; a test `main` does not have, "not found"
+or a collection error, is the PR's), then on the trees in between, halving, to find the first
 PR that fails them. That PR is handed back with the failing tests, the PRs before it
 merge, and the rest wait for the next train. `[pool] merge_train = false` merges each
 PR on its own, as the next paragraphs describe; so does a project without a
@@ -171,7 +172,11 @@ the issues a tester verified become one chore issue. A worker turns them into
 `tests/accept/test_accept_<N>.py` through the usual gates. On each new build, the
 supervisor runs that command in the main lane, with no model. A failing test runs once
 more alone (a pass makes it flaky), then files `Regression of #N: <test>` (P1), once
-while that issue is open. Workers write a new issue's acceptance behavior as such a
+while that issue is open. With the merge train, its full check runs the guard too,
+after the sweep and on the same merged tree, and a guard failure is bisected and
+handed back like a sweep failure. The sweep keeps `POOL_MAIN_CHECK_S` and the guard
+gets `[accept] guard_timeout_s` (1200). A deploy of a main the train checked this way
+is not guarded again. Workers write a new issue's acceptance behavior as such a
 test, rather than as a new `tests/e2e/test_issue_<N>.py`.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that

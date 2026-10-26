@@ -4403,6 +4403,65 @@ def test_a_train_holds_on_a_flake_a_machine_failure_or_a_moved_main() -> None:
         t.close()
 
 
+def test_a_test_main_does_not_have_is_the_prs_not_mains() -> None:
+    """Run 10b: the train reran a failing test on main, pytest said "not found" (the test
+    came with the PR), and the train filed a false `main is red` and blamed nobody."""
+    t = TrainRig({1: "pr1=a", 2: "newt=b"})
+    try:
+        new = "tests/accept/test_new.py::test_it"
+
+        def sweep(wt, caller):
+            t.sweeps.append(t.where(wt))
+            return ((False, f"FAILED {new} - boom\n== sweep is red ==") if (pathlib.Path(wt) / "newt").exists()
+                    else (True, "green"))
+
+        def rerun(wt, tests, env=None):
+            t.reruns.append(t.where(wt))
+            if (pathlib.Path(wt) / "newt").exists():
+                return False, f"FAILED {new} - boom"
+            return False, f"ERROR: file or directory not found: {new}\n\nno tests ran in 0.01s"
+        t.where = lambda wt: ",".join(sorted(p.name for p in pathlib.Path(wt).iterdir() if p.name in ("pr1", "newt")))
+        t.pool.sweep_tree, t.pool.rerun_tests = sweep, rerun
+        t.pool.run_train()
+        check("not found on main is not failing on main: no red main, the PR that adds the test goes back",
+              (t.pool.main_check_last.get("ok"), [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")],
+               "pr comment 12" in (t.d / "gh.log").read_text()), (None, ["11"], True))
+    finally:
+        t.close()
+
+
+def test_the_trains_check_runs_the_acceptance_guard() -> None:
+    """c55: two regressions passed `make verify` (no tests/accept) and turned main red
+    until the guard after the deploy caught them."""
+    t = TrainRig({1: "pr1=a", 2: "gbad=b"})
+    try:
+        t.pool.cfg.accept_guard = "pytest tests/accept"
+        guard = "tests/accept/test_accept_5.py::test_map"
+        t.pool.guard_tree = lambda wt, sha="": ((False, f"FAILED {guard} - blank map") if (pathlib.Path(wt) / "gbad").exists()
+                                                else (True, "1 passed"))
+        t.pool.rerun_tests = lambda wt, tests, env=None: ((False, f"FAILED {guard} - blank map")
+                                                           if (pathlib.Path(wt) / "gbad").exists() else (True, "1 passed"))
+        t.pool.run_train()
+        check("a guard failure on the merged tree is the train's: bisected, PR #12 back, #11 merged",
+              ([x.split()[2] for x in t.gh_log() if x.startswith("pr merge")], "pr comment 12" in (t.d / "gh.log").read_text()),
+              (["11"], True))
+    finally:
+        t.close()
+    t = TrainRig({1: "pr1=a"})
+    try:
+        t.pool.cfg.accept_guard = "pytest tests/accept"
+        ran = []
+        t.pool.guard_tree = lambda wt, sha="": (ran.append(wt), (True, "1 passed"))[1]
+        t.pool.run_train()
+        final = t.g("rev-parse", "origin/main")
+        check("green: the guard ran on the train's tree, and that main counts as guarded",
+              (len(ran), final in t.pool.guard_checked), (1, True))
+        t.pool.guard_due({"main": final})
+        check("so the guard after it does not run again", (t.pool.main_check_running, t.pool.guard_sha), (False, final))
+    finally:
+        t.close()
+
+
 def test_the_merge_train_follows_the_config() -> None:
     old = {k: os.environ.get(k) for k in ("POOL_MERGE_TRAIN", "SWEEP_COMMAND", "POOL_TRAIN_SIZE")}
     try:

@@ -435,6 +435,7 @@ class Config:
     accept_paths: list = dataclasses.field(default_factory=list)
     accept_batch: int = 6  # issues one acceptance unit checks at most
     accept_units: int = 2  # acceptance units side by side at most (c55: one at a time fell an hour behind)
+    accept_guard_s: float = 1200  # [accept] guard's time limit, in the train's check and after a deploy
     accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
@@ -547,6 +548,7 @@ class Config:
             accept_paths=config.accept_paths(),
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
             accept_units=env_int("POOL_ACCEPT_UNITS", 2),
+            accept_guard_s=float(e("POOL_ACCEPT_GUARD_S", "") or 1200),
             accept_guard=e("ACCEPT_GUARD", "").strip(),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
@@ -3092,6 +3094,7 @@ class Pool:
         self.train_until = 0.0  # no train before this after one that was held
         self.train_red_main: tuple = ()  # (main, heads) of a train that failed only where main fails
         self.guard_sha = ""  # the last build the acceptance guard ran on (guard_due)
+        self.guard_checked: set[str] = set()  # mains the train checked with the guard (no second run)
         self.main_green = ""  # the last main whose full check was green
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
@@ -4066,7 +4069,7 @@ class Pool:
                 self.train_wait()
                 return
             self.log("train_start", base=base[:12], prs=[c["pr"] for c in cars])
-            ok, out = self.sweep_tree(wt, "merge-train")
+            ok, out = self.train_check(wt)
             if ok is False:
                 ok, out = self.train_second_look(wt, base, cars, out)
             if ok is None:
@@ -4079,6 +4082,36 @@ class Pool:
                 self.train_bisect(wt, base, cars, out)
         finally:
             remove_worktree(root, wt, self.log)
+
+    def train_check(self, wt: str) -> tuple[bool | None, str]:
+        """The train's full check: the sweep, then [accept] guard on the same tree (c55: two
+        regressions passed `make verify`, which leaves tests/accept out, and turned main
+        red until the guard after the deploy caught them). Each has its own time limit,
+        POOL_MAIN_CHECK_S and POOL_ACCEPT_GUARD_S, so the check takes at most their sum."""
+        ok, out = self.sweep_tree(wt, "merge-train")
+        if ok:
+            ok, guard = self.guard_tree(wt)
+            if guard:
+                out += "\n== acceptance guard ==\n" + guard
+        return ok, out
+
+    def guard_tree(self, wt: str, sha: str = "") -> tuple[bool | None, str]:
+        """[accept] guard in a worktree that exists: (True green, False red, None it could
+        not run; its output, '' when there is nothing to run: no guard, no tests/accept/,
+        or pytest finding no test there)."""
+        if not self.cfg.accept_guard or not (pathlib.Path(wt) / "tests" / "accept").is_dir():
+            return True, ""
+        try:
+            r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.accept_guard_s, cwd=wt,
+                               env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        out = r.stdout + r.stderr
+        if r.returncode == 5 and "no tests ran" in out:
+            return True, ""  # tests/accept/ holds no test yet
+        if r.returncode == 0:
+            return True, out
+        return (None if INFRA.search(out) else False), out
 
     @staticmethod
     def train_label(cars: list[dict]) -> str:
@@ -4100,21 +4133,28 @@ class Pool:
         if again is False:
             return False, out
         if again is None:
-            again, out2 = self.sweep_tree(wt, "merge-train")
+            again, out2 = self.train_check(wt)
         if again:
             self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged", failing)
             return True, out2
         return (None, out2) if again is None else (False, out2)
 
     def train_red_at(self, wt: str, commit: str, failing: list[str]) -> tuple[bool | None, str]:
-        """Whether the train's failing tests fail at one of its commits (None: unknown)."""
+        """Whether the train's failing tests fail at one of its commits (None: unknown).
+        Failing means the same tests ran and failed there: a test that does not exist at
+        that commit (pytest's "not found", a collection error) does not fail there, so
+        it is the change of a PR after it. In run 10b a test only the PR had was "not
+        found" on main, and the train filed a false `main is red` and blamed nobody."""
         if self.git("checkout", "-q", "--detach", commit, wt=wt).returncode != 0:
             return None, f"could not check out {commit[:12]}"
         ok, out = self.rerun_tests(wt, failing)
         if ok is None:
-            ok, out = self.sweep_tree(wt, "merge-train")
+            ok, out = self.train_check(wt)
         if ok is None or (ok is False and INFRA.search(out)):
             return None, out
+        ids = {t for t in failing if "::" in t}
+        if ok is False and ids:
+            return bool(ids & set(failing_tests(out))), out
         return not ok, out
 
     def train_bisect(self, wt: str, base: str, cars: list[dict], out: str) -> None:
@@ -4226,6 +4266,8 @@ class Pool:
         if covered:
             with self.lock:
                 self.main_check_sha = final  # main_check_due: this main is checked
+                if self.cfg.accept_guard:
+                    self.guard_checked.add(final)  # guard_due: and so is its acceptance guard
             self.main_checked(final, True, out)
             self.flaky_deadlines()
             self.consolidation_chore(final)
@@ -4563,6 +4605,9 @@ class Pool:
             if (not self.cfg.accept_guard or not target or target == self.guard_sha or self.main_check_running
                     or self.stopping):
                 return
+            if target in self.guard_checked:
+                self.guard_sha = target  # the train's check ran the guard on this tree
+                return
             self.main_check_running, self.guard_sha = True, target
         self.main_check_thread = threading.Thread(target=self.run_guard, args=(target,), daemon=True)
         self.main_check_thread.start()
@@ -4575,19 +4620,10 @@ class Pool:
             if self.git("worktree", "add", "-q", "--detach", wt, sha).returncode != 0:
                 self.log("accept_guard", sha=sha[:12], ok=None, why="no worktree")
                 return
-            if not (pathlib.Path(wt) / "tests" / "accept").is_dir():
-                return  # no guard on main yet
-            try:
-                r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.main_check_s, cwd=wt,
-                                   env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
-                ok, out = r.returncode == 0, r.stdout + r.stderr
-                if r.returncode == 5 and "no tests ran" in out:
-                    ok = True  # pytest found nothing to run: tests/accept/ holds no test yet
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                ok, out = None, str(exc)
+            ok, out = self.guard_tree(wt, sha)
+            if ok and not out:
+                return  # nothing to run yet: no tests/accept/, or no test in it
             failing = failing_tests(out) if ok is False else []
-            if ok is False and INFRA.search(out):
-                ok = None
             if ok is False:
                 again, _ = self.rerun_tests(wt, failing)  # the same commit: a pass makes them flaky
                 if again:

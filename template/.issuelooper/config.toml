@@ -62,7 +62,10 @@ units = 2                    # POOL_ACCEPT_UNITS: acceptance units side by side 
                              # against max_sessions); a second starts only once a full batch waits
 guard = ""                   # ACCEPT_GUARD: runs tests/accept/ (e.g. "uv run pytest -q tests/accept") on each deploy,
                              # with no model; a failing test files `Regression of #N`. The scripts of verified issues
-                             # become a chore issue for those tests. Empty = off
+                             # become a chore issue for those tests. With the merge train, its full check runs this
+                             # too, after the sweep, and a deploy of a main it checked is not guarded again. Empty = off
+guard_timeout_s = 1200       # POOL_ACCEPT_GUARD_S: the guard's time limit (the train's check: the sweep's
+                             # POOL_MAIN_CHECK_S plus this)
 # The acceptance checklist the worker's live check (devcheck.py, merge gate 7) and the
 # tester share. Rows have ids (viewport:<size>, lang:<code>, always:<first three words>,
 # live:<first three words>); a live-check script declares the rows it covers with a line
