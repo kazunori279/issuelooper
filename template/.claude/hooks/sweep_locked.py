@@ -20,6 +20,11 @@ It prints how long it waited for the slot and how long the sweep took, then
 sweep_run.py's own output: the `git:` provenance line, the `green:` line, and
 `sweep record: <path>` when it wrote one. The exit status is sweep_run.py's.
 
+A clean checkout whose HEAD already has a green sweep record for the same command is
+not swept again: it prints the record's `git:`, `sweep record:` and `green:` lines as
+a sweep would, and --update-pr goes on from there (SWEEP_FORCE=1 sweeps anyway). In
+cohort 52, 3.9 h went to sweeping commits that were already green.
+
 With --update-pr N, a green sweep that wrote its record also rewrites PR #N's
 body: the `Sweep SHA:` line gets the swept head and the `green:` line is
 replaced (or appended). That is the step a rebase makes necessary (Gate 2
@@ -31,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import pathlib
 import re
@@ -87,6 +93,46 @@ def update_pr(pr: str, sha: str, green: str) -> int:
     return 0
 
 
+def green_record(root: str) -> tuple[str, pathlib.Path, dict] | None:
+    """(HEAD, its record, the record) when the checkout is clean and HEAD has a green
+    sweep record for this sweep command; else None."""
+    def git(*a):
+        r = subprocess.run(["git", "-C", root, *a], capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
+    head = (git("rev-parse", "HEAD") or "").strip()
+    status = git("status", "--porcelain", "--", ".")
+    if len(head) != 40 or status is None or status.strip():
+        return None
+    command = os.environ.get("SWEEP_COMMAND", "").strip() or "make verify"
+    for d in config.record_dirs("sweep"):
+        path = d / f"{head}.json"
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("sha") == head and rec.get("command") == command and isinstance(rec.get("areas"), dict):
+            return head, path, rec
+    return None
+
+
+def reuse(head: str, path: pathlib.Path, rec: dict) -> str:
+    """Print what a green sweep prints, from its record, and note the run in runs.jsonl."""
+    areas = rec["areas"]
+    green = f"{sum(areas.values())} green: " + " · ".join(f"{k} {v}" for k, v in areas.items())
+    out = (f"{head[:12]} already has a green sweep record for this command; not swept again "
+           f"(SWEEP_FORCE=1 sweeps anyway)\ngit:            {head} (clean)\nsweep record: {path}\n\n{green}\n")
+    print(out, end="", flush=True)
+    try:
+        import sweep_run
+        now = sweep_run.datetime.now(sweep_run.timezone.utc).isoformat()
+        sweep_run.append_run({"run_id": f"reuse-{head[:8]}-{os.getpid()}", "sha": head, "clean": True,
+                              "caller": sweep_run.caller(), "started_at": now, "finished_at": now, "seconds": 0,
+                              "exit": 0, "outcome": "green", "reused": str(path)})
+    except Exception as exc:  # noqa: BLE001 - the record never changes the verdict
+        print(f"note: run not recorded ({exc})", file=sys.stderr)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--update-pr", metavar="N", help="after a green, recorded sweep, fix PR #N's body")
@@ -104,6 +150,13 @@ def main() -> int:
     if not os.path.isfile(os.path.join(root, RUNNER)):
         print(f"sweep_locked: {root} has no {RUNNER}; sweep NOT run", file=sys.stderr)
         return 2
+    found = None if os.environ.get("SWEEP_FORCE") == "1" else green_record(root)
+    if found:
+        out = reuse(*found)
+        if not args.update_pr:
+            return 0
+        sha, green = GIT_LINE.search(out), GREEN_LINE.findall(out)
+        return update_pr(args.update_pr, sha.group(1), green[-1].strip())
     start = time.time()
     deadline = start + DEADLINE_S
     fd = None

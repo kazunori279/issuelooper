@@ -736,6 +736,42 @@ def test_sweep_update_pr_body() -> None:
     )
 
 
+def test_a_commit_with_a_green_record_is_not_swept_again() -> None:
+    """Cohort 52: 3.9 h of sweeps went to commits that already had a green record (a
+    worker sweeping twice; the supervisor re-sweeping because the PR body's Sweep SHA
+    was stale)."""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
+    wt = make_worktree(tmp)
+    (wt / ".gitignore").write_text(".claude/\n")
+    for cmd in (["add", ".gitignore"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]):
+        subprocess.run(["git", "-C", str(wt), *cmd], check=True, capture_output=True)
+    head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    records = tmp / "records"
+    records.mkdir()
+    (records / f"{head}.json").write_text(json.dumps({"sha": head, "command": "make verify",
+                                                      "areas": {"unit": 21, "e2e": 23}, "total": 44}))
+    body = "<!-- worker -->\nFixes #5\n- **Sweep SHA:** bbbbbbbbbbbb\n\n40 green: unit 20 · e2e 20\n"
+    env = dict(sweep_env(tmp, tmp / "lock", body), SWEEP_RECORD_DIR=str(records))
+    env.pop("SWEEP_COMMAND", None)
+
+    def go(**extra):
+        (tmp / "spans").unlink(missing_ok=True)
+        return subprocess.run([sys.executable, str(SWEEP), "--update-pr", "41"], cwd=wt, env=dict(env, **extra),
+                              capture_output=True, text=True)
+    res = go()
+    edited = (tmp / "edited.md").read_text()
+    check("a clean head with a green record for this command: not swept, and the PR body names it",
+          (res.returncode, (tmp / "spans").exists(), "already has a green sweep record" in res.stdout,
+           f"- **Sweep SHA:** {head}" in edited, "44 green: unit 21 · e2e 23" in edited), (0, False, True, True, True))
+    runs_log = [json.loads(x) for x in (records / "runs.jsonl").read_text().splitlines()]
+    check("and runs.jsonl says the record was reused", (runs_log[-1]["outcome"], runs_log[-1]["reused"]),
+          ("green", str(records / f"{head}.json")))
+    check("another sweep command: swept", go(SWEEP_COMMAND="make test") and (tmp / "spans").exists(), True)
+    check("SWEEP_FORCE=1: swept", go(SWEEP_FORCE="1") and (tmp / "spans").exists(), True)
+    (wt / "dirty.txt").write_text("x")
+    check("a dirty tree: swept", go() and (tmp / "spans").exists(), True)
+
+
 def test_ux_proposed_is_never_claimed() -> None:
     """A UX candidate waits for the owner; claim.py neither lists nor claims it."""
     before = len(FAILURES)
