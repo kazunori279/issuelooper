@@ -1956,7 +1956,7 @@ def test_quota_backoff_and_pause() -> None:
 ALLOW = '{"decision": "allow"}'
 
 
-def auto_session(guard_out: str, review_rc: int = 0, guard_rc: int = 0, guard_cmd: str = ""):
+def auto_session(guard_out: str, review_rc: int = 0, guard_rc: int = 0, guard_cmd: str = "", **extra):
     """Session.auto_merge with a logging fake gh, a fake review gate and a fake guard."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-auto-"))
     gh = d / "gh"
@@ -1970,7 +1970,7 @@ def auto_session(guard_out: str, review_rc: int = 0, guard_rc: int = 0, guard_cm
                      f"printf '%s' '{guard_out}'\nexit {guard_rc}\n")
     guard.chmod(0o755)
     cfg = ccpool.Config(
-        logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=guard_cmd or str(guard)
+        logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=guard_cmd or str(guard), **extra
     )
     pool = ccpool.Pool(cfg, fetcher=state, spawn=False)
     u = ccpool.Unit(
@@ -3730,6 +3730,278 @@ def test_worker_wrap_up_on_claude() -> None:
     check("claude: ends cleanly", (rc, timed_out), (0, False))
 
 
+# --- the merge train -----------------------------------------------------------
+
+TRAIN_GH = r"""#!/usr/bin/env python3
+import os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["TRAIN_GH_LOG"], "a") as f:
+    f.write(" ".join(args) + "\n")
+if args[:2] == ["pr", "merge"]:
+    head = args[args.index("--match-head-commit") + 1]
+    c = os.environ["TRAIN_GH_CLONE"]
+    def g(*a):
+        subprocess.run(["git", "-C", c, *a], check=True, capture_output=True)
+    g("fetch", "-q", "origin")
+    g("checkout", "-q", "-B", "main", "origin/main")
+    g("merge", "--squash", head)
+    g("commit", "-qm", "PR #" + args[2])
+    g("push", "-q", "origin", "main")
+"""
+
+
+class TrainRig:
+    """A real origin with one branch per PR, a gh that squash-merges like GitHub, and a
+    sweep that is red while the tree holds a file named `bad`."""
+
+    def __init__(self, prs: dict[int, str], main_bad: bool = False, labels: dict[int, str] | None = None):
+        self.d = d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-train-"))
+        self.work, g = git_repo(d)
+        self.g = g
+        (self.work / "app.py").write_text("x = 1\n")
+        if main_bad:
+            (self.work / "bad").write_text("main\n")
+        g("add", ".")
+        g("commit", "-qm", "base")
+        g("push", "-q", "origin", "HEAD:main")
+        self.heads = {}
+        for n, content in prs.items():
+            g("checkout", "-qb", f"issue-{n}", "main")
+            name, _, text = content.partition("=")
+            (self.work / name).write_text(text + "\n")
+            g("add", ".")
+            g("commit", "-qm", f"issue {n}")
+            g("push", "-q", "origin", f"issue-{n}")
+            self.heads[n] = g("rev-parse", "HEAD")
+        g("checkout", "-q", "main")
+        clone = d / "ghclone"
+        subprocess.run(["git", "clone", "-q", str(d / "origin.git"), str(clone)], check=True, capture_output=True)
+        for k, v in (("user.name", "gh"), ("user.email", "gh@gh")):
+            subprocess.run(["git", "-C", str(clone), "config", k, v], check=True)
+        gh = d / "gh"
+        gh.write_text(TRAIN_GH)
+        gh.chmod(0o755)
+        self.old = {k: os.environ.get(k) for k in ("SHARED_REPO_PATH", "TRAIN_GH_LOG", "TRAIN_GH_CLONE")}
+        os.environ.update(SHARED_REPO_PATH=str(self.work), TRAIN_GH_LOG=str(d / "gh.log"), TRAIN_GH_CLONE=str(clone))
+        self.pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), merge_train=True, train_size=4,
+                                              rerun_cmd="rerun {tests}"), fetcher=state, spawn=False)
+        self.now = NOW
+        self.pool.clock = lambda: self.now
+        self.pool.flaky_known = (time.time() + 3600, {})
+        self.pool.prev = state([iss(n, ["stage:pr", (labels or {}).get(n, "P2")]) for n in prs])
+        self.sweeps: list[str] = []  # (caller, which car or "main") per full sweep
+        self.reruns: list[str] = []
+        self.red_once = False  # the first full sweep is red whatever the tree (a flaky test)
+        self.pool.sweep_tree = self.sweep_tree
+        self.pool.rerun_tests = self.rerun_tests
+        for k, n in enumerate(prs):
+            self.pool.enqueue(ccpool.Unit("auto", "merge", f"merge:{10 + n}@x", f"mrg:{10 + n}", 10 + n, (0,),
+                                          {"issue": n, "head": self.heads[n], "branch": f"issue-{n}"}))
+            self.now += 1
+
+    def where(self, wt: str) -> str:
+        return ",".join(sorted(p.name for p in pathlib.Path(wt).iterdir() if p.name.startswith(("pr", "bad"))))
+
+    def sweep_tree(self, wt, caller):
+        self.sweeps.append(f"{caller}:{self.where(wt)}")
+        if self.red_once:
+            self.red_once = False
+            return False, "FAILED tests/test_app.py::test_flaky - boom\n== sweep is red =="
+        if (pathlib.Path(wt) / "bad").exists():
+            return False, "FAILED tests/test_app.py::test_bad - boom\n== sweep is red =="
+        return True, "== sweep is green =="
+
+    def rerun_tests(self, wt, tests, env=None):
+        self.reruns.append(self.where(wt))
+        if (pathlib.Path(wt) / "bad").exists():
+            return False, "FAILED tests/test_app.py::test_bad - boom"
+        return True, "1 passed"
+
+    def gh_log(self) -> list[str]:
+        f = self.d / "gh.log"
+        return [x for x in f.read_text().splitlines() if not x.startswith(("pr view", "issue list"))] \
+            if f.exists() else []
+
+    def main_files(self) -> list[str]:
+        self.g("fetch", "-q", "origin")
+        return sorted(self.g("ls-tree", "--name-only", "origin/main").split())
+
+    def logs(self, kind: str) -> list[dict]:
+        rows = [json.loads(x) for x in (self.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()]
+        return [r for r in rows if r["kind"] == kind]
+
+    def close(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.d, ignore_errors=True)
+
+
+def test_the_merge_train_queues_a_pr_that_passed_the_gates() -> None:
+    outcome, log, pool = auto_session(ALLOW, merge_train=True, fast_check_cmd="exit 1")
+    check("gates pass with the train on: queued, not merged, no quick check",
+          (outcome, [x for x in log if x.startswith("pr merge")], sorted(pool.book.train)),
+          ("held (queued for the merge train)", [], [9]))
+    check("the queue entry has what the train merges with",
+          {k: pool.book.train[9][k] for k in ("issue", "head", "needs_live")}, {"issue": 2, "head": "c" * 40,
+                                                                              "needs_live": True})
+    outcome, log, pool = auto_session(json.dumps({"decision": "block", "reason": "PR #9 body is missing `Fail-before`."}),
+                                      merge_train=True)
+    check("a refusal is still handed back, not queued", (outcome, pool.book.train),
+          ("refused by the merge gates (handed back)", {}))
+    h = Rig(state([iss(1, ["stage:pr"]), iss(2, ["stage:pr"]), iss(3, ["stage:pr"])],
+                  prs=[pr(11, 1), pr(12, 2, head="d" * 40), pr(13, 3)]), merge_train=True)
+    for n, head in ((11, "b" * 40), (12, "c" * 40), (13, "b" * 40)):
+        h.pool.book.train[n] = {"pr": n, "issue": n - 10, "head": head, "branch": "", "needs_live": False, "queued": 0}
+    check("a queued PR gets no merge unit; one whose head moved leaves the queue and gets one",
+          (sorted(u.number for u in h.step() if u.kind == "merge"), sorted(h.pool.book.train)), ([12], [11, 13]))
+    h.st = state([iss(1, ["stage:pr"]), iss(3, ["stage:pr"])],
+                 prs=[pr(11, 1, mergeable="UNKNOWN"), pr(13, 3, mergeable="CONFLICTING")])
+    h.step()
+    check("UNKNOWN (main just moved) stays queued; CONFLICTING and a closed PR leave the queue",
+          sorted(h.pool.book.train), [11])
+    h.st = state([iss(1, ["stage:pr", "on hold"])], prs=[pr(11, 1)])
+    h.step()
+    check("so does a PR whose issue was put on hold", h.pool.book.train, {})
+
+
+def test_a_green_train_merges_its_batch_and_checks_main() -> None:
+    t = TrainRig({1: "pr1=a", 2: "pr2=b", 3: "pr3=c"}, labels={3: "P0"})
+    try:
+        t.pool.run_train()
+        merges = [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")]
+        check("one full sweep for the batch, on main with all three merged, P0 first",
+              (t.sweeps, merges), (["merge-train:pr1,pr2,pr3"], ["13", "11", "12"]))
+        check("each merged at its head, and main has the tree the train swept",
+              (all(f"--match-head-commit {t.heads[int(m) - 10]}" in x
+                   for m, x in zip(merges, [x for x in t.gh_log() if x.startswith("pr merge")])),
+               t.main_files()), (True, ["app.py", "pr1", "pr2", "pr3"]))
+        check("each issue leaves stage:pr with a comment",
+              sum(x.startswith("issue edit") for x in t.gh_log()), 3)
+        final = t.g("rev-parse", "origin/main")
+        last = t.logs("train")[-1]
+        check("the train's sweep is main's check: green at the new main, which gets no check of its own",
+              (t.pool.main_check_last.get("sha"), t.pool.main_check_last.get("ok"), t.pool.main_check_sha,
+               last["checked"], t.pool.book.train, t.pool.main_check_running), (final, True, final, True, {}, False))
+        t.pool.cfg.main_check = True
+        t.pool.main_check_due({"main": final})
+        check("main_check_due starts nothing for it", t.pool.main_check_running, False)
+    finally:
+        t.close()
+
+
+def test_a_red_train_hands_back_only_the_pr_that_breaks_it() -> None:
+    t = TrainRig({1: "pr1=a", 2: "bad=b", 3: "pr3=c", 4: "pr4=d"})
+    try:
+        base = t.g("rev-parse", "origin/main")
+        t.pool.run_train()
+        merges = [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")]
+        check("the failing tests run again on the tree, on main alone, then halving: PR #12 is found",
+              t.reruns, ["bad,pr1,pr3,pr4", "", "bad,pr1", "pr1"])
+        check("one full sweep only (the rerun names the tests)", len(t.sweeps), 1)
+        check("PR #11 before it merges, #12 goes back with its failure, #13 and #14 wait",
+              (merges, sorted(t.pool.book.train), t.main_files()), (["11"], [13, 14], ["app.py", "pr1"]))
+        text = (t.d / "gh.log").read_text()
+        back = text[text.find("pr comment 12"):]
+        check("the hand-back names the test and the PRs ahead of it",
+              (text.count("pr comment 12"), "test_bad" in back, "after PR #11" in back), (1, True, True))
+        check("its issue back to triage, counted as its own failure, remembered at its head",
+              ("issue edit 2 --remove-label stage:pr --add-label stage:triage" in t.gh_log(),
+               t.pool.book.failed_tries[2], t.pool.book.handed_back.get(12)), (True, 1, [t.heads[2], False]))
+        check("main after a partial batch was not swept as a whole: it gets its own check",
+              (t.logs("train")[-1]["checked"], t.pool.main_check_sha), (False, ""))
+        t.pool.run_train()
+        check("the next train runs the rest on the new main", (t.sweeps[-1], t.pool.book.train),
+              ("merge-train:pr1,pr3,pr4", {}))
+        check("and its green covers that main", t.pool.main_check_last.get("ok"), True)
+        check("the base was not blamed", base != t.pool.main_check_last.get("sha"), True)
+    finally:
+        t.close()
+
+
+def test_a_train_on_a_red_main_blames_no_pr() -> None:
+    t = TrainRig({1: "pr1=a", 2: "pr2=b"}, main_bad=True)
+    try:
+        base = t.g("rev-parse", "origin/main")
+        t.pool.run_train()
+        check("main alone fails the same tests: nothing merged, nothing handed back, all still queued",
+              ([x for x in t.gh_log() if x.startswith(("pr merge", "pr comment"))], sorted(t.pool.book.train)),
+              ([], [11, 12]))
+        check("main is red at its base, and the train waits", (t.pool.main_check_last.get("sha"),
+              t.pool.main_check_last.get("ok"), t.pool.train_until > t.now), (base, False, True))
+        t.now = t.pool.train_until + 1
+        t.pool.run_train()
+        check("the same PRs on the same red main are not swept again", len(t.sweeps), 1)
+        t.pool.train_red_main = ()
+        t.now = t.pool.train_until + 1
+        t.pool.main_check_last = {"sha": "f" * 40, "ok": False}
+        t.pool.run_train()
+        check("while main is red, PRs not built on that main do not go", len(t.sweeps), 1)
+    finally:
+        t.close()
+
+
+def test_a_train_holds_on_a_flake_a_machine_failure_or_a_moved_main() -> None:
+    t = TrainRig({1: "pr1=a", 2: "pr2=b"})
+    try:
+        t.red_once = True
+        t.pool.run_train()
+        check("red once, the failing test passes on the same tree: a flake, and the batch merges",
+              ([x.split()[2] for x in t.gh_log() if x.startswith("pr merge")], t.reruns,
+               any("failed and passed at one commit" in e for e in t.pool.events)),
+              (["11", "12"], ["pr1,pr2"], True))
+    finally:
+        t.close()
+    t = TrainRig({1: "pr1=a"})
+    try:
+        t.pool.sweep_tree = lambda wt, caller: (None, "Caused by: No space left on device")
+        t.pool.run_train()
+        check("a check that could not run: held, queued, and no train for a while",
+              (t.gh_log(), sorted(t.pool.book.train), t.pool.train_until > t.now), ([], [11], True))
+        t.pool.train_due(state())
+        check("train_due waits for it", t.pool.train_running, False)
+    finally:
+        t.close()
+    t = TrainRig({1: "pr1=a"})
+    try:
+        def moved(wt, caller):
+            (t.work / "other").write_text("x\n")
+            t.g("add", "other")
+            t.g("commit", "-qm", "someone else")
+            t.g("push", "-q", "origin", "HEAD:main")
+            return True, "green"
+        t.pool.sweep_tree = moved
+        t.pool.run_train()
+        check("main moved while the train ran: nothing merged, the PR stays queued",
+              ([x for x in t.gh_log() if x.startswith("pr merge")], sorted(t.pool.book.train),
+               any("main moved" in e for e in t.pool.events)), ([], [11], True))
+    finally:
+        t.close()
+
+
+def test_the_merge_train_follows_the_config() -> None:
+    old = {k: os.environ.get(k) for k in ("POOL_MERGE_TRAIN", "SWEEP_COMMAND", "POOL_TRAIN_SIZE")}
+    try:
+        os.environ.update(SWEEP_COMMAND="make test", POOL_TRAIN_SIZE="6")
+        os.environ.pop("POOL_MERGE_TRAIN", None)
+        cfg = ccpool.Config.from_env()
+        check("on by default with a sweep command, its size from POOL_TRAIN_SIZE", (cfg.merge_train, cfg.train_size),
+              (True, 6))
+        os.environ["POOL_MERGE_TRAIN"] = "0"
+        check("POOL_MERGE_TRAIN=0 turns it off", ccpool.Config.from_env().merge_train, False)
+        os.environ.update(POOL_MERGE_TRAIN="1", SWEEP_COMMAND="")
+        check("no sweep command, no train", ccpool.Config.from_env().merge_train, False)
+        check("the dataclass default keeps the merge per PR", ccpool.Config().merge_train, False)
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # --- end to end: the real loop, fake gh and fake agy ---------------------------
 
 FAKE_GH_GRAPHQL = r"""#!/usr/bin/env python3
@@ -3848,6 +4120,7 @@ def test_end_to_end_with_fake_github() -> None:
         POOL_REVIEW_CMD=str(review),
         POOL_GUARD_CMD=str(guard),
         POOL_MAIN_CHECK="0",  # it would fetch into this checkout
+        POOL_MERGE_TRAIN="0",  # the per-PR merge; the train has its own cases, with a real repository
         POOL_KILL_LEFTOVERS="0",  # nothing to kill: its sessions start no processes
     )
     proc = subprocess.Popen(

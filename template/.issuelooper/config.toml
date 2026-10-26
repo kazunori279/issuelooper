@@ -44,11 +44,12 @@ junit = false                # SWEEP_JUNIT: a pytest suite: each pytest run in a
                              # (per-test times and results) beside sweep/runs.jsonl, which records every run
 fast_command = ""            # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit
                              # tests pass) run before a merge on a pull request that is behind main, merged with
-                             # main; a failure hands it back. Runs in a fresh worktree, so it sets up what it needs.
+                             # main, when the merge train is off; a failure hands it back. Runs in a fresh worktree, so it sets up what it needs.
                              # It runs under the merge lock, for POOL_FAST_CHECK_S (120) at most; a timeout holds
                              # the PR, and a second one on the same head hands it back. Empty = no such check
 main_check = true            # POOL_MAIN_CHECK: after main moves, run the whole suite on the newest main in the
-                             # background; a red main files a `main is red` issue (P0), closed when it is green again
+                             # background (not on a main the merge train checked); a red main files a `main is red`
+                             # issue (P0), closed when it is green again
 
 [deploy]
 command = ""                 # POOL_DEPLOY_CMD: run from the shared checkout after main moves; empty = no deploys
@@ -101,6 +102,10 @@ max_sessions = 8             # POOL_MAX_WORKERS: agent sessions running at once,
 # worker_timeout = "45m"     # POOL_TIMEOUT_WORKER: default 45m, or 60m with [devcheck] on
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
+merge_train = true           # POOL_MERGE_TRAIN: PRs that pass the gates wait in a queue; one run of the whole
+                             # suite on main with a batch of them merged decides the batch and is main's check.
+                             # Off (or no [sweep] command): each PR merges on its own after the quick check
+train_size = 4               # POOL_TRAIN_SIZE: PRs in one train at most
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
 

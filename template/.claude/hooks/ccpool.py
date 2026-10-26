@@ -24,7 +24,10 @@ UNITS
   auto    (no agent) merge: one per open PR whose issue is at stage:pr and that
           GitHub calls MERGEABLE. The review gate (review_gate.py) reads the diff,
           role_guard.py's merge gates run with CC_ROLE=merger, and the PR is
-          squash-merged; a refusal hands the PR back to a worker (a head the gates
+          squash-merged, or with POOL_MERGE_TRAIN (the default) queued for the merge
+          train (Pool.train: one full sweep of main with up to POOL_TRAIN_SIZE queued
+          PRs merged decides them, and is main's check); a refusal hands the PR back
+          to a worker (a head the gates
           would refuse for its sweep is swept here first, outside the merge lock; a
           gate 7 refusal after a rebase replays the live check outside the lock; a PR
           held after a red re-sweep is not swept again for the same head and main, and
@@ -397,6 +400,11 @@ class Config:
     render: str = f"python3 {HERE / 'ccloop_render.py'}"
     gh: str = "gh"
     red_hold: bool = True  # while main's full check is red, only a PR built on that main merges
+    # The merge train (Pool.train): a PR that passes the gates waits in a queue, and one
+    # full sweep of main with a batch of them merged decides the batch; that sweep is also
+    # main's check. Off: each PR merges on its own after the merged-tree check.
+    merge_train: bool = False
+    train_size: int = 4  # PRs in one train at most
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
@@ -502,6 +510,8 @@ class Config:
             gh=e("POOL_GH", e("CLAIM_GH", "gh")),
             gh_rate_wait_s=float(e("POOL_GH_RATE_WAIT_S", "") or 30),
             red_hold=env_flag("POOL_RED_HOLD", True),
+            merge_train=env_flag("POOL_MERGE_TRAIN", True) and bool(e("SWEEP_COMMAND", "").strip()),
+            train_size=env_int("POOL_TRAIN_SIZE", 4),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -731,6 +741,7 @@ class Book:
         self.swept_held: dict[int, tuple[str, str]] = {}  # PR -> (unit key, hold) after a red re-sweep
         self.rebase_wanted: dict[int, str] = {}  # PR -> head the supervisor rebases onto main (auto rebase)
         self.rebase_failed: dict[int, str] = {}  # PR -> head whose auto-rebase failed
+        self.train: dict[int, dict] = {}  # PR -> its place in the merge train's queue (Pool.enqueue)
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
@@ -875,6 +886,14 @@ def plan(
         book.pr_heads[pr["number"]] = pr["head"]
         n = pr_issue(pr)
         issue = open_by.get(n) if n is not None else None
+        queued = book.train.get(pr["number"])
+        if queued and (queued["head"] != pr["head"] or pr["mergeable"] == "CONFLICTING" or pr["draft"]
+                       or issue is None or "stage:pr" not in issue["labels"]
+                       or set(issue["labels"]) & (HOLDS | IGNORED)):
+            # Out of the train's queue: a new head, a conflict, or the issue moved on. Not
+            # for UNKNOWN: GitHub reads every PR as UNKNOWN for a while after main moves.
+            del book.train[pr["number"]]
+            queued = None
         if pr["draft"] or issue is None:
             continue
         labels = set(issue["labels"])
@@ -907,7 +926,9 @@ def plan(
             book.unknown_since.pop(pr["number"], None)
         if book.rebase_wanted.get(pr["number"]) not in (None, pr["head"]):
             del book.rebase_wanted[pr["number"]]  # a new head: the rebase happened, or work moved on
-        if state == "MERGEABLE" and book.rebase_wanted.get(pr["number"]) == pr["head"]:
+        if state == "MERGEABLE" and queued:
+            pass  # passed the gates; waits for the merge train
+        elif state == "MERGEABLE" and book.rebase_wanted.get(pr["number"]) == pr["head"]:
             units.append(
                 Unit(
                     "auto",
@@ -982,6 +1003,8 @@ def plan(
         del book.pr_heads[k]
     for k in set(book.handed_back) - seen_prs:
         del book.handed_back[k]
+    for k in set(book.train) - seen_prs:
+        del book.train[k]  # merged or closed
 
     # Never beside a running UX run: a slow run outlasts the gap, and the overlapping
     # runs test the same app and file the same findings.
@@ -2285,7 +2308,8 @@ class Session(threading.Thread):
                 # head merged with the current main instead. It runs under the lock, right
                 # before the merge: a check made before the review went stale when other
                 # merges landed meanwhile, and main broke three times in one run that way.
-                if self.pool.cfg.fast_check_cmd:
+                # The merge train's full sweep of the merged tree replaces the quick check.
+                if self.pool.cfg.fast_check_cmd and not self.pool.cfg.merge_train:
                     held = self.merged_check(pr, n, head, branch, env)
                     if held:
                         return held
@@ -2303,22 +2327,13 @@ class Session(threading.Thread):
                 ):
                     want_sweep = True
                     continue  # the gates want a sweep after all: leave the lock, sweep, ask again
+                if self.pool.cfg.merge_train and verdict.get("decision") == "allow":
+                    return self.pool.enqueue(u)
                 outcome = self.land(pr, n, head, verdict)
                 if outcome:
                     return outcome
                 break
-        args = ["issue", "edit", str(n), "--remove-label", "stage:pr"]
-        if u.info.get("needs_live"):
-            args += ["--add-label", "stage:live"]
-        self.gh(*args)
-        self.gh(
-            "issue", "comment", str(n), "--body",
-            (f"<!-- merger -->\nMerged PR #{pr} (head {head[:8]}): the review gate and the merge "
-             "gates passed, so the supervisor landed it. "
-             + ("It stays open at stage:live for the tester's live check." if u.info.get("needs_live")
-                else "The supervisor deploys main next." if self.pool.cfg.deploy_cmd else "")).strip(),
-        )
-        self.note_large_files(pr)
+        self.pool.after_merge(pr, n, head, bool(u.info.get("needs_live")), "the review gate and the merge gates passed")
         return "ok"
 
     def flaky_hold(self, pr: int, what: str, first: str, second: str) -> str:
@@ -2639,22 +2654,6 @@ class Session(threading.Thread):
         finally:
             remove_worktree(root, wt, self.pool.log)
 
-    def note_large_files(self, pr: int) -> None:
-        """Measure the source files this PR touched on main; report the long ones. Source
-        files are those under REVIEW_PATHS (the production paths, default src/)."""
-        files = self.gh("pr", "view", str(pr), "--json", "files", "-q", ".files[].path").stdout.split()
-        root = str(repo_root())
-        self.git(root, "fetch", "-q", "origin", "main")
-        large = {}
-        for f in files:
-            if not is_source(f):
-                continue
-            text = self.git(root, "show", f"origin/main:{f}").stdout
-            if text.count("\n") > self.pool.cfg.split_lines:
-                large[f] = text.count("\n")
-        if large:
-            self.pool.record_large(large)
-
     def git(self, wt: str, *args: str, check: bool = False, **kw) -> subprocess.CompletedProcess:
         r = subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, timeout=300, **kw)
         if check and r.returncode != 0:
@@ -2773,14 +2772,7 @@ class Session(threading.Thread):
         return True
 
     def hand_back(self, pr: int, n: int, text: str):
-        head = self.unit.info.get("head") or ""
-        if head:
-            with self.pool.lock:
-                self.pool.book.handed_back[pr] = [head, False]
-        self.gh("pr", "comment", str(pr), "--body", f"<!-- merger -->\n{text}\n\n"
-                "Fix this on this branch, re-sweep, push and update the PR body; the supervisor "
-                "tries the merge again on the new head.")
-        self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
+        self.pool.hand_back(pr, n, self.unit.info.get("head") or "", text)
 
     def merger_handback(self, env: dict) -> str:
         """A PR that conflicted again after POOL_MERGER_MAX merger sessions: back to a worker."""
@@ -2912,6 +2904,10 @@ class Pool:
         self.main_check_thread: threading.Thread | None = None
         self.owned: set[subprocess.Popen] = set()  # the supervisor's own long commands (run_owned)
         self.main_check_last: dict = {}  # {sha, ok, t, failing}: the last full check that finished
+        self.train_running = False  # the merge train runs (it shares main_check_running: one main lane)
+        self.train_landing = False  # it is merging its batch now (deploy_check waits)
+        self.train_until = 0.0  # no train before this after one that was held
+        self.train_red_main: tuple = ()  # (main, heads) of a train that failed only where main fails
         self.main_green = ""  # the last main whose full check was green
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
@@ -3298,7 +3294,7 @@ class Pool:
         # The grace counts from the first undeployed main, not from each new one: while
         # mergers kept running and main kept moving, the deploy waited 24 minutes.
         self.undeployed_since = self.undeployed_since or now
-        mergers = self.book.role_counts()["merger"]
+        mergers = self.book.role_counts()["merger"] or self.train_landing
         if mergers and now - self.undeployed_since < self.cfg.deploy_grace_s:
             return
         self.undeployed_since = 0.0
@@ -3392,20 +3388,26 @@ class Pool:
                 time.sleep(2 + 2 * attempt)
             if git("worktree", "add", "-q", "--detach", wt, sha).returncode != 0:
                 return None, f"could not add a worktree at {sha[:12]}"
-            # In its own lane: it ran after every merge, and in a sweep slot it held one of
-            # the sessions' slots for over half the run.
-            r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main"],
-                               self.cfg.main_check_s, cwd=wt,
-                               env=dict(os.environ, SWEEP_CALLER="main-check"), stdin=subprocess.DEVNULL)
-            out = r.stdout + r.stderr
-            if r.returncode == 0 and "green" in r.stdout:
-                return True, out
-            # 1 is a red sweep; 2 and 3 mean it did not run (no runner, no slot).
-            return (False if r.returncode == 1 else None), out
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return None, str(exc)
+            return self.sweep_tree(wt, "main-check")
         finally:
             remove_worktree(root, wt, self.log)
+
+    def sweep_tree(self, wt: str, caller: str) -> tuple[bool | None, str]:
+        """The full sweep in a worktree that exists, in the main lane: (True green, False
+        red, None when it could not run; its output). In its own lane: the main check ran
+        after every merge, and in a sweep slot it held one of the sessions' slots for over
+        half the run."""
+        try:
+            r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main", "--full"],
+                               self.cfg.main_check_s, cwd=wt,
+                               env=dict(os.environ, SWEEP_CALLER=caller), stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        out = r.stdout + r.stderr
+        if r.returncode == 0 and "green" in r.stdout:
+            return True, out
+        # 1 is a red sweep; 2 and 3 mean it did not run (no runner, no slot).
+        return (False if r.returncode == 1 else None), out
 
     def commits_since(self, old: str, new: str) -> list[str]:
         root = str(repo_root())
@@ -3693,6 +3695,316 @@ class Pool:
         self.red_failing = tuple(failing)
         self.event(f"main {sha[:8]} is RED: the full check suite fails ({names or 'no test named'}); {what}. "
                    "Until it is green only a PR built on it merges; the fix is P0")
+
+    # --- merging ---
+    def git(self, *args: str, wt: str = "") -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", wt or str(repo_root()), *args], capture_output=True, text=True,
+                              timeout=300)
+
+    def hand_back(self, pr: int, n: int, head: str, text: str) -> None:
+        """Send a PR back to a worker: a comment on the PR, its issue to stage:triage. The
+        head is remembered, so a poll read before the hand-back does not merge it."""
+        if head:
+            with self.lock:
+                self.book.handed_back[pr] = [head, False]
+        self.gh("pr", "comment", str(pr), "--body", f"<!-- merger -->\n{text}\n\n"
+                "Fix this on this branch, re-sweep, push and update the PR body; the supervisor "
+                "tries the merge again on the new head.")
+        self.gh("issue", "edit", str(n), "--remove-label", "stage:pr", "--add-label", "stage:triage")
+
+    def after_merge(self, pr: int, n: int, head: str, needs_live: bool, why: str) -> None:
+        """A merged PR's issue: off stage:pr (to stage:live when it needs a live check),
+        a comment saying why it merged, and the long files it left on main."""
+        args = ["issue", "edit", str(n), "--remove-label", "stage:pr"]
+        if needs_live:
+            args += ["--add-label", "stage:live"]
+        self.gh(*args)
+        self.gh(
+            "issue", "comment", str(n), "--body",
+            (f"<!-- merger -->\nMerged PR #{pr} (head {head[:8]}): {why}, so the supervisor landed it. "
+             + ("It stays open at stage:live for the tester's live check." if needs_live
+                else "The supervisor deploys main next." if self.cfg.deploy_cmd else "")).strip(),
+        )
+        self.note_large_files(pr)
+        self.log("merged", pr=pr, issue=n, head=head[:12])
+
+    def note_large_files(self, pr: int) -> None:
+        """Measure the source files this PR touched on main; report the long ones. Source
+        files are those under REVIEW_PATHS (the production paths, default src/)."""
+        files = self.gh("pr", "view", str(pr), "--json", "files", "-q", ".files[].path").stdout.split()
+        self.git("fetch", "-q", "origin", "main")
+        large = {}
+        for f in files:
+            if not is_source(f):
+                continue
+            text = self.git("show", f"origin/main:{f}").stdout
+            if text.count("\n") > self.cfg.split_lines:
+                large[f] = text.count("\n")
+        if large:
+            self.record_large(large)
+
+    # --- the merge train ---
+    # Each PR's own sweep runs only the tests its change touches (sweep_run.py --affected).
+    # A PR that passes the review and the merge gates waits in a queue. The train merges up
+    # to POOL_TRAIN_SIZE of them onto main in a scratch worktree and runs the full sweep on
+    # that tree once, in the main lane. Green: the PRs merge in that order, each checked to
+    # give main the tree the train swept, and that sweep is main's check. Red: the failing
+    # tests run again on the same tree (flaky?), then on main alone (main's own failure?),
+    # then on the trees in between, halving, to find the first PR that fails them; it goes
+    # back to its worker, and the PRs before it merge. In cohort 52 every PR head and every
+    # main got a full sweep: 43.6 h of sweeps in 6 h.
+    def enqueue(self, u: Unit) -> str:
+        """Put a PR that passed the gates in the train's queue (the auto-merge unit's outcome)."""
+        e = {"pr": u.number, "issue": u.info["issue"], "head": u.info["head"],
+             "branch": u.info.get("branch") or "", "needs_live": bool(u.info.get("needs_live")),
+             "queued": self.clock()}
+        with self.lock:
+            self.book.train[u.number] = e
+            self.train_until = 0.0
+            size = len(self.book.train)
+        self.log("train_queued", pr=u.number, head=e["head"][:12], queue=size)
+        self.wake.set()
+        return "held (queued for the merge train)"
+
+    def train_due(self, st: dict) -> None:
+        """Start the merge train when PRs wait in its queue and the main lane is free: the
+        train and the main check share it (main_check_running), one full sweep at a time."""
+        with self.lock:
+            if (not self.cfg.merge_train or not self.book.train or self.main_check_running or self.stopping
+                    or self.clock() < self.train_until):
+                return
+            self.main_check_running = self.train_running = True
+        self.main_check_thread = threading.Thread(target=self.run_train, daemon=True)
+        self.main_check_thread.start()
+
+    def run_train(self) -> None:
+        try:
+            self.train()
+        except Exception as exc:  # noqa: BLE001 - a failed train is not a failed supervisor
+            self.log("train_error", error=str(exc)[:300])
+            self.train_wait()
+        finally:
+            with self.lock:
+                self.main_check_running = self.train_running = False
+            self.wake.set()
+
+    def train_wait(self) -> None:
+        """No train for POOL_HOLD_RETRY_S (one that was held would hold again at once)."""
+        self.train_until = self.clock() + self.cfg.hold_retry_s
+
+    def train_batch(self) -> list[dict]:
+        """Up to POOL_TRAIN_SIZE queued PRs: P0 first, then in the order they were queued.
+        While main's full check is red, only PRs built on that main (as red_main_hold)."""
+        prio = {i["number"]: priority(i["labels"]) for i in (self.prev or {}).get("open", [])}
+        with self.lock:
+            entries = sorted(self.book.train.values(), key=lambda e: (prio.get(e["issue"], 9), e["queued"], e["pr"]))
+        last = self.main_check_last
+        red = str(last.get("sha") or "") if last.get("ok") is False and self.cfg.red_hold else ""
+        if red:
+            entries = [e for e in entries if self.git("merge-base", "--is-ancestor", red, e["head"]).returncode == 0]
+        return entries[: max(1, self.cfg.train_size)]
+
+    def train(self) -> None:
+        with self.lock:
+            branches = sorted({e["branch"] for e in self.book.train.values() if e["branch"]})
+        for attempt in range(3):  # other units fetch into the same .git (ref lock)
+            if self.git("fetch", "-q", "origin", "main", *branches).returncode == 0:
+                break
+            time.sleep(2 + 2 * attempt)
+        batch = self.train_batch()
+        if not batch:
+            self.train_wait()
+            return
+        root = str(repo_root())
+        base = self.git("rev-parse", "origin/main").stdout.strip()
+        wt = scratch(f"main-train-{base[:12]}")
+        remove_worktree(root, wt, self.log)
+        try:
+            if self.git("worktree", "add", "-q", "--detach", wt, base).returncode != 0:
+                self.log("train_error", error=f"could not add a worktree at {base[:12]}")
+                self.train_wait()
+                return
+            cars = []
+            for e in batch:
+                m = self.git("-c", "user.name=ccpool", "-c", "user.email=ccpool@localhost", "merge", "-q", "--no-ff",
+                             "--no-edit", "-m", f"merge train: PR #{e['pr']}", e["head"], wt=wt)
+                if m.returncode != 0:
+                    # It conflicts with main or with a PR ahead of it: it waits for a later
+                    # train, and GitHub calls it CONFLICTING once those are on main.
+                    self.git("merge", "--abort", wt=wt)
+                    self.log("train_skip", pr=e["pr"], why=(m.stderr or m.stdout).strip()[-200:])
+                    continue
+                cars.append({**e, "commit": self.git("rev-parse", "HEAD", wt=wt).stdout.strip(),
+                             "tree": self.git("rev-parse", "HEAD^{tree}", wt=wt).stdout.strip()})
+            if not cars or (base, frozenset(c["head"] for c in cars)) == self.train_red_main:
+                # The same PRs on the same red main fail the same way: they wait for a fix
+                # to join them (it is P0, so it goes first) or for main to move.
+                self.train_wait()
+                return
+            self.log("train_start", base=base[:12], prs=[c["pr"] for c in cars])
+            ok, out = self.sweep_tree(wt, "merge-train")
+            if ok is False:
+                ok, out = self.train_second_look(wt, base, cars, out)
+            if ok is None:
+                self.event(f"merge train of {self.train_label(cars)} held: its check could not run "
+                           f"({out.strip().splitlines()[-1][:200] if out.strip() else 'no output'}); tried again later")
+                self.train_wait()
+            elif ok:
+                self.train_land(base, cars, out, checked=True)
+            else:
+                self.train_bisect(wt, base, cars, out)
+        finally:
+            remove_worktree(root, wt, self.log)
+
+    @staticmethod
+    def train_label(cars: list[dict]) -> str:
+        return "PR " + ", ".join(f"#{c['pr']}" for c in cars)
+
+    def train_second_look(self, wt: str, base: str, cars: list[dict], out: str) -> tuple[bool | None, str]:
+        """A red train, looked at again as second_look does for main: a failure of the
+        machine is None; only known flaky tests count as green; otherwise the failing tests
+        (or the whole sweep) run again on the same tree, and a pass makes them flaky."""
+        if INFRA.search(out):
+            return None, out
+        failing = failing_tests(out)
+        known = self.flaky_tests()
+        if failing and all(t in known for t in failing):
+            self.event(f"merge train of {self.train_label(cars)} failed only known flaky tests "
+                       f"({', '.join(failing[:2])}); counted as green")
+            return True, out
+        again, out2 = self.rerun_tests(wt, failing)
+        if again is False:
+            return False, out
+        if again is None:
+            again, out2 = self.sweep_tree(wt, "merge-train")
+        if again:
+            self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged", failing)
+            return True, out2
+        return (None, out2) if again is None else (False, out2)
+
+    def train_red_at(self, wt: str, commit: str, failing: list[str]) -> tuple[bool | None, str]:
+        """Whether the train's failing tests fail at one of its commits (None: unknown)."""
+        if self.git("checkout", "-q", "--detach", commit, wt=wt).returncode != 0:
+            return None, f"could not check out {commit[:12]}"
+        ok, out = self.rerun_tests(wt, failing)
+        if ok is None:
+            ok, out = self.sweep_tree(wt, "merge-train")
+        if ok is None or (ok is False and INFRA.search(out)):
+            return None, out
+        return not ok, out
+
+    def train_bisect(self, wt: str, base: str, cars: list[dict], out: str) -> None:
+        """A red train: main alone first (its own failure blames no PR), then halve the
+        cars to find the first one whose tree fails. It goes back to its worker; the ones
+        before it merge (main's check covers them); the ones after it wait for the next."""
+        failing = failing_tests(out)
+        red, base_out = self.train_red_at(wt, base, failing)
+        if red is None:
+            self.event(f"merge train of {self.train_label(cars)} held: it failed, and main alone could not be "
+                       "checked; tried again later")
+            self.train_wait()
+            return
+        if red:
+            self.event(f"merge train of {self.train_label(cars)}: main {base[:8]} fails the same tests by itself; "
+                       "no PR is blamed, and until main is green only PRs built on it go")
+            with self.lock:
+                self.main_check_sha = base
+                self.train_red_main = (base, frozenset(c["head"] for c in cars))
+            self.main_checked(base, False, base_out)
+            self.train_wait()
+            return
+        lo, hi = 0, len(cars)  # main (no car) passes; all the cars fail
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            red, _ = self.train_red_at(wt, cars[mid - 1]["commit"], failing)
+            if red is None:
+                self.event(f"merge train of {self.train_label(cars)} held: it failed, and the PRs could not be "
+                           "told apart; tried again later")
+                self.train_wait()
+                return
+            lo, hi = (lo, mid) if red else (mid, hi)
+        self.train_hand_back(cars[hi - 1], cars[:hi - 1], base, failing, out)
+        if hi > 1:
+            self.train_land(base, cars[:hi - 1], out, checked=False)
+
+    def train_hand_back(self, car: dict, ahead: list[dict], base: str, failing: list[str], out: str) -> None:
+        pr, n, head = car["pr"], car["issue"], car["head"]
+        with self.lock:
+            self.book.train.pop(pr, None)
+        after = f", after {self.train_label(ahead)}, which pass without it" if ahead else ""
+        self.hand_back(pr, n, head, (
+            f"**Not merged: the full check fails with this PR merged.** The supervisor merged this head "
+            f"({head[:8]}) onto main {base[:8]}{after}, ran the full check suite on the result, and these fail "
+            "there (main alone passes them):\n\n"
+            + ("\n".join(f"- `{t}`" for t in failing[:20]) or "- (no test named; see the output)")
+            + "\n\nThe end of the output:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3) + "\n```\n\n"
+            "Your own sweep ran only the tests your change touches; run these too (or the full suite with "
+            "`sweep_locked.py --full`). Rebase onto origin/main in your worktree, fix it, sweep and push."))
+        self.log("handback", pr=pr, issue=n, by="merge train", reason=(failing or ["the full check is red"])[0][:200])
+        self.failed_try(n)
+        self.event(f"merge train: PR #{pr} (#{n}) fails the full check merged with main "
+                   f"({', '.join(failing[:2]) or 'no test named'}); handed back")
+
+    def fetch_main(self, old: str = "") -> str:
+        """origin/main after a fetch; when old is given, fetched again a few times while it
+        still reads old (the merge has just been made on GitHub)."""
+        sha = ""
+        for attempt in range(5):
+            self.git("fetch", "-q", "origin", "main")
+            sha = self.git("rev-parse", "origin/main").stdout.strip()
+            if not old or sha != old:
+                break
+            time.sleep(1 + attempt)
+        return sha
+
+    def train_land(self, base: str, cars: list[dict], out: str, checked: bool) -> None:
+        """Merge the cars on GitHub in the train's order, under the merge lock. Not when main
+        has moved since the train built its tree. After each merge main must have the tree
+        the train made for that point; otherwise the rest wait. checked: the train's full
+        sweep was green on the last car's tree, so that main needs no check of its own."""
+        merged: list[int] = []
+        final = base
+        with self.merge_lock:
+            self.train_landing = True
+            try:
+                now_main = self.fetch_main()
+                if now_main != base:
+                    self.event(f"merge train of {self.train_label(cars)} not merged: main moved from {base[:8]} to "
+                               f"{now_main[:8]} while it ran; the next train runs on the new main")
+                    return
+                for c in cars:
+                    args = ("pr", "merge", str(c["pr"]), "--squash", "--delete-branch", "--match-head-commit", c["head"])
+                    m = self.gh(*args)
+                    if m.returncode != 0:
+                        time.sleep(5)  # GitHub may still be computing mergeability after the last merge
+                        m = self.gh(*args)
+                    if m.returncode != 0:
+                        self.event(f"merge train: GitHub refused to merge PR #{c['pr']} (exit {m.returncode}: "
+                                   f"{(m.stderr or m.stdout).strip()[-200:]}); it and the PRs after it wait")
+                        break
+                    with self.lock:
+                        self.book.train.pop(c["pr"], None)
+                        self.book.merger_runs.pop(c["pr"], None)
+                    merged.append(c["pr"])
+                    final = self.fetch_main(final)
+                    self.after_merge(c["pr"], c["issue"], c["head"], c["needs_live"],
+                                     "the review gate and the merge gates passed, and the full check passed on main "
+                                     "with it merged (the merge train)")
+                    if self.git("rev-parse", f"{final}^{{tree}}").stdout.strip() != c["tree"]:
+                        self.event(f"merge train stopped after PR #{c['pr']}: main {final[:8]} is not the tree the "
+                                   "train checked; the PRs after it wait, and main gets its own full check")
+                        break
+            finally:
+                self.train_landing = False
+        covered = checked and len(merged) == len(cars) and \
+            self.git("rev-parse", f"{final}^{{tree}}").stdout.strip() == cars[-1]["tree"]
+        self.log("train", base=base[:12], merged=merged, main=final[:12], checked=covered)
+        if covered:
+            with self.lock:
+                self.main_check_sha = final  # main_check_due: this main is checked
+            self.main_checked(final, True, out)
+            self.flaky_deadlines()
+            self.consolidation_chore(final)
 
     # --- monitor feed ---
     def observe(self, st: dict, now: float, started: list[Unit], stuck: list[Unit]):
@@ -4071,6 +4383,7 @@ class Pool:
         ):
             self.hurry_pr = None
         self.deploy_check(st, now)
+        self.train_due(st)  # first: its sweep covers main too
         self.main_check_due(st)
         self.feed(st, now)
         if not self.events:
@@ -4097,6 +4410,7 @@ class Pool:
             "feed_pending": len(self.events),
             "feed_pending_since": self.pending_since,
             "main_check": self.main_check_last,
+            "train": {"running": self.train_running, "queue": sorted(self.book.train)},
             "missing_files": self.book.missing,
             "ux_scores": self.ux_scores[-10:],
         }
@@ -4211,6 +4525,8 @@ def cmd_run(_a) -> int:
     cfg = Config.from_env()
     # Sessions and the review gate find the pool's logs here.
     os.environ["POOL_LOGDIR"] = str(cfg.logdir)
+    # Sweeps (sweep_locked.py) and the merge gates (role_guard.py) follow the train's state.
+    os.environ["POOL_MERGE_TRAIN"] = "1" if cfg.merge_train else "0"
     pool = Pool(cfg)
     signal.signal(signal.SIGTERM, pool.stop)
     signal.signal(signal.SIGINT, pool.stop)
