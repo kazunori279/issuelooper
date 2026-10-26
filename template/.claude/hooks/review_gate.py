@@ -150,7 +150,7 @@ TEST_FILE = re.compile(
     r"|_test\.[^/]+$|\.(?:test|spec)\.[^/]+$"
 )
 CODE_EXT = (".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".html")
-NO_RULES = "(This project has no rules file; only the two kinds above apply.)"
+NO_RULES = "(This project has no rules file; only the kinds above apply.)"
 
 SCHEMA = {
     "type": "object",

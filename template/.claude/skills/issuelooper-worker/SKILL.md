@@ -84,10 +84,15 @@ approach. Read the way a careful engineer with a short budget does:
 - To try a behavior, write the failing test and run it; do not probe with a string
   of one-line scripts.
 
-Then write the test **in a new file of its own**, named
-`test_issue_$N.py` in the suite `.issuelooper/project.md` names for this kind of
-change. Never append to a shared test file: every worker appending to the same
-file is what makes pull requests conflict. Use the suite's existing fixtures; add
+Then write the test. When a test of the same flow already exists, extend or
+parametrize it (a new case, a new viewport or language); otherwise put it **in a
+new file of its own**, named `test_issue_$N.py` in the suite
+`.issuelooper/project.md` names for this kind of change. Never append to a shared
+catch-all test file: every worker appending to the same file is what makes pull
+requests conflict. A test drives the behavior; the review gate rejects these:
+lint or structure written as a test (`ruff format --check`, Makefile greps, line
+counts of "split into modules"), greps of JS or HTML source text, and
+presence-only tests (`test_page_loads`). Use the suite's existing fixtures; add
 to a conftest only what several tests need. The cases test the issue's
 acceptance, not what the code does now. For a report of something a user saw, a
 case reproduces what the user did and asserts the symptom the report names, so it

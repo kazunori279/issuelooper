@@ -195,6 +195,8 @@ try:
     )
     check("no rules line", rg.NO_RULES in p, True)
     check("paths in prompt", "`src/`, `web/`" in p, True)
+    check("the tests a diff adds are judged too (lint as a test, source greps, presence only)",
+          ("Tests this diff adds" in p, "ruff format --check" in p, "test_page_loads" in p), (True, True, True))
     check("diff text not substituted", "+x <<RULES>>" in p, True)
     check("title", '#7 ("Add search")' in p, True)
     check("flags", "- src/a.py: Mock: x" in p, True)
