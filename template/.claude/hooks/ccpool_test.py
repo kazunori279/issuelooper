@@ -2205,6 +2205,17 @@ def test_leftover_processes_are_killed() -> None:
         check("and the kill is logged", [(p["pid"], p["cwd"], p["cmd"]) for p in rec[0]["processes"]],
               [(procs[0].pid, str(inside), "sleep 60")])
         check("nothing left: nothing logged", w.kill_leftovers(), [])
+        # Run 11: `uv run concierge` from the scratch root, its python from the worktree's .venv.
+        venv = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", f"{inside}/.venv/bin/concierge"],
+                                cwd=SCRATCH, start_new_session=True)
+        prompt = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                   f"Your paths: worktree {inside}/wt"], cwd=SCRATCH, start_new_session=True)
+        procs += [venv, prompt]
+        time.sleep(0.3)
+        killed = w.kill_leftovers()
+        check("one running a program out of the session's paths is killed, wherever its cwd",
+              (venv.pid in killed, venv.wait(timeout=10) != 0), (True, True))
+        check("one that only names the path inside an argument (an agent's prompt) is not", prompt.poll(), None)
         m = ccpool.Session(h.pool, ccpool.Unit("merger", "land", "mrg:12@x", "mrg:12", 12, (0,), {"issue": 2}), 3)
         t = ccpool.Session(h.pool, ccpool.Unit("tester", "ux", "ux:a", "tst:ux:a", None, (2,), {"sha": "a"}), 4)
         t.port = 8121

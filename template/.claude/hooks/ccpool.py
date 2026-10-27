@@ -1736,22 +1736,47 @@ def process_cwds() -> dict[int, str]:
     return parse_lsof(r.stdout)
 
 
+def process_argv(pid: int) -> list[str]:
+    """A process's arguments, and its executable's path first ([] when unreadable)."""
+    try:
+        args = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except OSError:
+        return []
+    try:
+        args.insert(0, os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        pass
+    return [a for a in args if a]
+
+
+def runs_from(argv: list[str], prefixes: tuple[str, ...]) -> bool:
+    """Whether an argument (or the value of a --flag=value) is a path under one of
+    `prefixes`: a program run out of a session's worktree (its .venv), whatever its
+    working directory. A whole argument, not a substring: an agent's prompt names the
+    session's paths too, and never starts with one."""
+    return any(a.startswith(prefixes) or ("=" in a and a.split("=", 1)[1].startswith(prefixes)) for a in argv)
+
+
 def kill_in(prefixes: tuple[str, ...]) -> list[dict]:
     """Kill the processes whose working directory is at or under one of `prefixes`
     (matched as `cwd + "/"`, so a worktree path with a trailing / matches itself and
-    nothing beside it): SIGTERM, then SIGKILL after 5 s. Matched by working directory
-    alone, never by name; the supervisor is never one of them. Returns what was killed."""
+    nothing beside it), or that run a program or a path from there (runs_from):
+    SIGTERM, then SIGKILL after 5 s. Never by name; the supervisor is never one of them.
+    Run 11: a worker's `uv run concierge --port 53523` ran with the scratch root as its
+    working directory and its python from wrk-253-77-wt/.venv, and outlived the stop.
+    Returns what was killed."""
     if not prefixes:
         return []
     spare = {1, os.getpid(), os.getppid()}
-    found = {pid: cwd for pid, cwd in process_cwds().items()
-             if pid not in spare and (cwd + "/").startswith(prefixes)}
+    found = {}
+    for pid, cwd in process_cwds().items():
+        if pid in spare:
+            continue
+        if (cwd + "/").startswith(prefixes) or runs_from(process_argv(pid), prefixes):
+            found[pid] = cwd
     procs = []
     for pid, cwd in found.items():
-        try:
-            cmd = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-        except OSError:
-            cmd = ""
+        cmd = " ".join(process_argv(pid)[1:])
         procs.append({"pid": pid, "cwd": cwd, "cmd": cmd.strip()[:200]})
         try:
             os.kill(pid, signal.SIGTERM)
@@ -5263,7 +5288,15 @@ def cmd_run(_a) -> int:
     return 0
 
 
-def cmd_prune(_a) -> int:
+def cmd_prune(a) -> int:
+    if getattr(a, "kill", False):
+        # `issuelooper stop --all`, after the supervisor has gone: whatever still runs in or
+        # out of this repository's scratch root is a leftover of its sessions.
+        root = str(config.scratch_root()).rstrip("/") + "/"
+        procs = kill_in(tuple(sorted({root, os.path.realpath(root).rstrip("/") + "/"})))
+        if procs:
+            print(f"scratch: killed {len(procs)} process(es) left running: "
+                  + "; ".join(f"{p['pid']} {p['cmd'][:60]}" for p in procs[:5]))
     gone = prune_scratch()
     print(f"scratch: removed {len(gone)} left from earlier runs" if gone else "scratch: nothing to remove")
     return 0
@@ -5308,7 +5341,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan")
     p.add_argument("--fixture")
     p.add_argument("--ux-sha", default="", help="the sha a UX run would test (POOL_UX=1)")
-    sub.add_parser("prune", help="remove what earlier runs left in scratch (while the supervisor is stopped)")
+    p = sub.add_parser("prune", help="remove what earlier runs left in scratch (while the supervisor is stopped)")
+    p.add_argument("--kill", action="store_true", help="first kill what still runs in or from the scratch root")
     p = sub.add_parser("probe")
     p.add_argument("role", choices=ROLES)
     p.add_argument("--prompt", default="Report your CC_ROLE and the skills you can see, then stop.")

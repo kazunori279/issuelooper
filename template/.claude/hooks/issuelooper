@@ -283,7 +283,7 @@ cmd_stop() {
   fi
   rm -f "$RUN/broker.pid"
   # Everything is stopped: what the runs left in scratch can go (records stay).
-  if [ "${1:-}" = "--all" ]; then python3 "$HERE/ccpool.py" prune || true; fi
+  if [ "${1:-}" = "--all" ]; then python3 "$HERE/ccpool.py" prune --kill || true; fi
 }
 
 cmd_status() {
