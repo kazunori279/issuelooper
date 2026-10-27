@@ -16,7 +16,9 @@ computed for several minutes). Your prompt names the PR (`$MERGE_PR`), its issue
 and its head. You do not merge: the supervisor merges your resolved head on its next
 poll, after checking it merged with the current `main`, and the guard refuses
 `gh pr merge` from you. You write no feature code: you resolve conflicts, nothing
-more.
+more. With `[pool] author_resolve` on, the PR's author resolves its conflicts first
+(its conversation, resumed, follows steps 2-4 below); you get a PR whose author
+could not be resumed or did not land it in two tries.
 
 Names below: `P=$MERGE_PR`, `N` its issue, `WT=$ISSUELOOPER_TMP/mrg-$P-wt`.
 

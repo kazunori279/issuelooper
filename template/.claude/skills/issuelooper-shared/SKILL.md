@@ -135,6 +135,7 @@ One label per axis. Two `stage:` labels on one issue is a bug.
 | `hold:monitor` | the monitor stopped this change from landing | monitor | monitor |
 | `on hold` | the owner parked it | the owner | the owner |
 | `owner-request` | the owner asked for it | the owner | nobody |
+| `area:<name>` | with `[areas]` set: worked by that area's conversation | monitor; worker, tester and aide when filing | monitor |
 | `ux:proposed` | a proposal waiting for the owner's decision | the owner's tooling | the owner |
 
 Ordering between issues is a GitHub issue dependency (`blocked_by`), never a

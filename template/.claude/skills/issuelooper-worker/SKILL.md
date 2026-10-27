@@ -276,7 +276,26 @@ A release counts as a failed attempt; after three, the issue goes to the owner
 until they comment. If the session times out, the supervisor releases the claim
 and saves your worktree to `issue-$N` itself.
 
-## 8. Finish
+## 8. When the supervisor resumes your conversation
+
+The supervisor keeps your conversation and may resume it later for the same issue,
+or, with `[areas]` on, for your area's next issue. The prompt says which step:
+
+- **The area's next issue**: a new issue, worked from step 1 in a new worktree (the
+  old one is gone). Before your last line, rewrite the area's notes file the prompt
+  names (30 lines at most: where things are, conventions, traps).
+- **A conflict on your PR**: rebase, resolve, sweep, push and stop, as the
+  `issuelooper-merger` skill's steps 2-4 say. The guard lets you push only that PR's
+  branch and write only to it; you move no label and open no PR.
+- **The acceptance check**: run the merged change on the build the prompt names, as
+  the `issuelooper-tester` skill's rig and *Acceptance check* say, and post one
+  comment whose first lines are `<!-- worker -->` and `<!-- author-accept -->`, with
+  `rows:`, `skip:` and the verdict line. Change no code in that step: what is wrong
+  goes in the verdict and comes back to you. After a verified verdict the prompt may
+  give you minutes to look around your change and file up to three issues (signed,
+  checked for duplicates, `type:bug` and `area:<name>`, no stage or priority).
+
+## 9. Finish
 
 `cd /`, remove your worktree
 (`git -C "$SHARED_REPO_PATH" worktree remove --force "$WT"`), stop anything you

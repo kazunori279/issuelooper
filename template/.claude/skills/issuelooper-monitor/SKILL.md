@@ -33,6 +33,9 @@ time; answer them first. A message that needs nothing from you gets one line.
    `type:documentation`, `type:spike`, `type:chore`), a priority, `needs:live`
    when live checks are on and an acceptance needs the live environment, and `stage:triage` so a
    worker claims it. Record ordering as a dependency (*Dependencies* below).
+   With `[areas]` set, an issue goes to its area's conversation by the files it names;
+   an `area:<name>` label overrides that (add it when the routing is wrong; an issue a
+   worker or explorer filed may already carry one).
    Nobody else triages; an untriaged issue waits for you.
 2. **Keep the priorities right.** P0 is what the minimum viable product needs
    or what is broken for users now, then P1, then P2 (the default). An
@@ -57,6 +60,9 @@ time; answer them first. A message that needs nothing from you gets one line.
    same way (`accept-verified:` closes, `accept-blocked:` goes to the owner), except
    that a failure is checked once more by a fresh tester session before it counts;
    a `Regression of #N` issue from the acceptance guard is a P1 bug like any other.
+   With `[accept] author` on, the author's own verdict settles most of them, and a
+   tester checks a sample; when the sample keeps failing what authors verified, the
+   supervisor raises the sample rate and tells you: look at those issues for a pattern.
    After a blocked check, tell the owner what is missing; after a second failed
    one, add one comment listing what each fix changed and what each check saw.
    When it says it could not read the verdict, act on the tester's comment by

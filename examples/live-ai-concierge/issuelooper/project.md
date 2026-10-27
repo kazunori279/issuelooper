@@ -125,6 +125,14 @@ the issue concerns language.
 
 `src/concierge/static/*`, `src/concierge/main.py`.
 
+## Areas and explorers
+
+config.toml names five areas (live, settings, cards, shell, tools); each issue is
+worked in its area's conversation, and `main.py` (live) and `app.js`, `index.html`,
+`style.css` (shell) are hot files, one session at a time. An issue you file that
+lies in one area carries `area:<name>`. Explorers each take one focus from
+`[explore] focuses` and judge it like a UX run, by `ux/rubric.md`.
+
 ## Secrets
 
 `.env` holds real credentials. `GET /api/config` answers with the browser Maps

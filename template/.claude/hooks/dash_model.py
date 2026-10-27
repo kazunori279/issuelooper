@@ -249,6 +249,9 @@ def load(
     model["progress"]["ux_scores"] = [
         r.get("score") for r in state.get("ux_scores") or []
     ]
+    # The worker-owns-its-issue switches: the acceptance sample, explorers, areas (absent: off).
+    model["ownership"] = {"sample": (state.get("accept") or {}).get("sample"),
+                          "explore": state.get("explore"), "areas": state.get("areas")}
     model["attention"] = attention(model, state, log, now)
     return model
 
@@ -616,6 +619,27 @@ def ux_scores_text(scores: list) -> str:
     )
 
 
+def ownership_lines(o: dict) -> list[str]:
+    """The acceptance sample's disagreement, the explorers and the areas, one line each."""
+    out = []
+    s = o.get("sample") or {}
+    if s:
+        rate = f"{s['rate']:.0%}" if s.get("rate") is not None else "—"
+        out.append(f"Acceptance sample: 1 in {s.get('every')} · {s.get('disagree', 0)} of the last "
+                   f"{s.get('window', 0)} disagree with the author ({rate}) · {s.get('samples', 0)} sampled in all")
+    e = o.get("explore") or {}
+    if e:
+        out.append(f"Explorers: {len(e.get('running') or [])} running ({'; '.join(e.get('running') or []) or 'none'}) · "
+                   f"{e.get('last_hour', 0)}/{e.get('per_hour', 0)} this hour")
+    a = o.get("areas") or {}
+    if a:
+        out.append("Areas: " + " · ".join(
+            f"{name} {v.get('queue', 0)} waiting" + "".join(
+                f" [{'busy' if sl.get('busy') else 'idle'}, {sl.get('issues', 0)} issues]" for sl in v.get("slots") or [])
+            for name, v in a.items()))
+    return out
+
+
 def main_check_text(mc: dict) -> str:
     """" · main check green abcd1234", or "" before the first check."""
     if not mc:
@@ -673,6 +697,7 @@ def text(m: dict, width: int = 100) -> str:
     ]
     if p.get("ux_scores"):
         lines.append(ux_scores_text(p["ux_scores"]))
+    lines += ownership_lines(m.get("ownership") or {})
     for key in ("1h", "24h"):
         x = p[key]
         cyc = x["cycle_min"]

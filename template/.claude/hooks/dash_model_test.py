@@ -320,6 +320,17 @@ def test_model() -> None:
     check("the recent UX scores", "UX score 38 → 58 → 78 (1 report(s) without a score)" in txt, True)
 
 
+def test_ownership_lines() -> None:
+    o = {"sample": {"every": 2, "samples": 9, "window": 6, "disagree": 2, "rate": 0.333},
+         "explore": {"running": ["phone 320 px"], "last_hour": 3, "per_hour": 6},
+         "areas": {"live": {"queue": 4, "slots": [{"busy": True, "issues": 2}]}}}
+    check("the acceptance sample, the explorers and the areas, one line each", dm.ownership_lines(o), [
+        "Acceptance sample: 1 in 2 · 2 of the last 6 disagree with the author (33%) · 9 sampled in all",
+        "Explorers: 1 running (phone 320 px) · 3/6 this hour",
+        "Areas: live 4 waiting [busy, 2 issues]"])
+    check("all off: nothing", dm.ownership_lines({}), [])
+
+
 def test_empty_run_dir() -> None:
     run = pathlib.Path(tempfile.mkdtemp(prefix="dash-empty-"))
     os.environ.update(POOL_LOGDIR=str(run / "pool"), REVIEW_DIR=str(run / "none"))

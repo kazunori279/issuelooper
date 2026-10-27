@@ -73,7 +73,13 @@ labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS
 paths = ["src/"]             # ACCEPT_PATHS: a PR that changes these says `Refs #N`; a tester accepts its issue on
                              # the deployed build (a batch of up to [accept] batch, 6, per unit) before it closes
 units = 3                    # POOL_ACCEPT_UNITS: acceptance units side by side, of 16 sessions (c55: one unit fell
-                             # behind 10-15 merges an hour and stage:accept reached 62)
+                             # behind 10-15 merges an hour and stage:accept reached 62); with author on, they run the
+                             # independent sample and the issues whose author cannot be resumed
+author = true                # POOL_AUTHOR_ACCEPT: the author's conversation accepts its own issue on the deployed build
+sample = 4                   # POOL_ACCEPT_SAMPLE: a tester also checks owner requests, P0 and 1 in 4 of the rest
+escalate_at = 0.15           # POOL_ACCEPT_ESCALATE_AT: over 15 % of the last 20 samples failing what the author
+window = 20                  # POOL_ACCEPT_WINDOW: verified doubles the sample rate (c55's QA: 16.5 %)
+neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: the author's look around its change after verifying it
 guard = "uv run pytest -q -p no:cacheprovider tests/accept"   # ACCEPT_GUARD: the accepted issues' Playwright
                              # scripts, run on each deploy with no model; a failure files `Regression of #N`
 # The acceptance checklist (ids: viewport:<size>, lang:<code>, always:/live:<first three
@@ -93,17 +99,63 @@ no_skip = ["live:voice-and-typed"]   # rows a live check may not skip: the fake 
 
 [ux]
 enabled = true               # POOL_UX: a tester walks the deployed app as a user and files findings
-gap_minutes = 25             # POOL_UX_GAP_MIN: at most one UX run per this many minutes
+gap_minutes = 60             # POOL_UX_GAP_MIN: the whole-app UX run, hourly, for the score and cross-area regressions;
+                             # explorers (below) find the rest
 idle_gap_minutes = 10        # POOL_UX_IDLE_GAP_MIN: while no worker or merger has work, another UX run after this many minutes
 journeys = "ux/journeys.py"  # POOL_UX_JOURNEYS: the project's journeys script, a path in the repository; project.md
                              # says how to run it. Empty = the tester writes and keeps its own
 
 [spec]
 enabled = true               # POOL_SPEC: while no worker or merger has work, or half of max_sessions is idle, a
-                             # tester checks the app against the spec
+                             # tester checks the app against the spec (with [explore] on, explorers take those slots;
+                             # the spec sections are among their focuses)
 gap_minutes = 45             # POOL_SPEC_GAP_MIN: at most one spec check per this many minutes
 id_pattern = '\bR-[A-Z]+-\d+\b|\bA-\d+\b'   # POOL_MAP_ID_PATTERN: a regex for the spec's requirement ids (such as '\bREQ-\d+\b');
                              # a worker's prompt lists the files that name the ids its issue mentions
+
+[explore]
+enabled = true               # POOL_EXPLORE: slots the due work leaves free go to explorers, one focus each
+focuses = [                  # POOL_EXPLORE_FOCUSES: taken in turn
+  "phone 320x640: every screen, card and control",
+  "Japanese: every screen, card, status and date",
+  "the live journey: voice and typed interruption, a saved location and 'near here' (live mode)",
+  "reload mid-task and after: the feed, the cards and their maps restored",
+  "the settings sheet: every control, kept across a reload and a second profile",
+  "the weather and place info cards, at 1280x800 and 390x844",
+  "the maps and route cards: maps load, fit and stay after a reload",
+  "the images, video and web search cards",
+  "spec/REQUIREMENTS.md sections 2-3 (layout, conversation) against the screen",
+  "spec/REQUIREMENTS.md sections 6-7 (history, profiles and memory) against the screen",
+  "spec/ACCEPTANCE.md cases A-01 to A-14 on the deployed build",
+  "spec/ACCEPTANCE.md cases A-15 to A-27 on the deployed build",
+]
+max = 3                      # POOL_EXPLORE_MAX: explorers at once, of 16 sessions
+per_hour = 6                 # POOL_EXPLORE_PER_HOUR: the model quota is shared with every other session
+issues = 3                   # POOL_EXPLORE_ISSUES
+
+# Areas of the app (src/concierge): each issue goes to its area's conversation. main.py holds the
+# live session and every tool's wiring, so it is the live area's hot file; app.js, index.html and
+# style.css are the shell's.
+[areas]
+refresh_after = 6            # POOL_AREA_REFRESH
+conversations = 2            # POOL_AREA_CONVERSATIONS
+second_at = 3                # POOL_AREA_SECOND_AT
+hot_lock = true              # POOL_AREA_HOT_LOCK
+[areas.live]
+paths = ["src/concierge/main.py", "src/concierge/sessions.py", "src/concierge/memory.py",
+         "src/concierge/static/js/audio.js", "src/concierge/static/js/*live*"]
+hot = ["src/concierge/main.py"]
+[areas.settings]
+paths = ["src/concierge/static/js/settings.js", "src/concierge/static/js/i18n.js", "src/concierge/static/js/volume.js",
+         "src/concierge/static/css/settings*"]
+[areas.cards]
+paths = ["src/concierge/static/js/cards/*", "src/concierge/static/css/*"]
+[areas.shell]
+paths = ["src/concierge/static/index.html", "src/concierge/static/style.css", "src/concierge/static/js/app.js",
+         "src/concierge/static/js/feed.js", "src/concierge/static/js/composer.js"]
+hot = ["src/concierge/static/js/app.js", "src/concierge/static/index.html", "src/concierge/static/style.css"]
+[areas.tools]
+paths = ["src/concierge/tools/*", "src/concierge/weather.py", "src/concierge/scripted.py"]
 
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
@@ -116,6 +168,8 @@ max_sessions = 16            # POOL_MAX_WORKERS: agent sessions running at once,
 worker_timeout = "60m"       # POOL_TIMEOUT_WORKER: 60 with the live check on
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
+author_resolve = true        # POOL_AUTHOR_RESOLVE: the author's conversation resolves its PR's conflicts; a merger only
+                             # when it cannot (c58: 32 merger sessions, a median 14.5 min, in 4 h)
 starve_hold_s = 1800         # POOL_STARVE_HOLD_S: run 11's starving PRs on main.py held 9 PRs 179 times in 34 min
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports

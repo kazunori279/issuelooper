@@ -187,6 +187,32 @@ and the guard took 14 minutes. The chore asks for one compact test per issue: sc
 mode, the suite's shared app server, one page, no fixed sleeps, no source-text checks.
 Split issues get no guard test.
 
+Four switches let the worker own its issue end to end, in one conversation, and keep
+the pool busy; each is off by default (the concierge sample turns them on):
+
+- `[pool] author_resolve`: the supervisor records each worker's conversation per issue
+  (`run/pool/owners.json`). A PR that conflicts after its rebase, or whose rebase went
+  red, is resolved by its author's conversation, resumed (agy `--conversation`, Claude
+  Code `--resume`) with main's new commits and the conflicting files. The guard lets it
+  push only that PR's branch. A merger takes over when there is no conversation to
+  resume or two author sessions did not land it.
+- `[accept] author`: once the deployed build has the merge, the author's conversation
+  accepts its issue there, with the tester's verdict lines and rows. A tester checks
+  owner requests, P0 and 1 in `[accept] sample` (4) of the rest; when more than
+  `[accept] escalate_at` (0.15) of the last `[accept] window` (20) samples fail what the
+  author verified, the sample doubles and the monitor hears it (`state.json`,
+  `accept.sample`; the dashboard). After a verified verdict the author spends
+  `[accept] neighbourhood_min` (10) minutes around its change and files up to three issues.
+- `[explore]`: agent slots the due work leaves free go to explorers, each walking one of
+  `[explore] focuses` in turn and filing up to `[explore] issues` findings, at most
+  `[explore] max` at once and `[explore] per_hour` an hour. They replace idle-time UX runs
+  and spec checks; the regular UX run (`[ux] gap_minutes`) stays.
+- `[areas.<name>]` (path globs, hot files): an issue goes to its area's conversation (an
+  `area:<name>` label, else the files its last branch or its text names), resumed issue
+  after issue, at most `[areas] conversations` (2) per area, and a fresh one with the old
+  one's notes after `[areas] refresh_after` (6) issues. One session at a time works an
+  issue naming a hot file, and the starve hold leaves hot files to that rule.
+
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
 worker, model quota errors are waited out with backoff, silent sessions are
@@ -195,7 +221,11 @@ too, and so does an agy session whose turn ended while it waits on a background 
 an agy session whose stream stopped behind a step while its conversation went on and
 finished is ended `POOL_UNSEEN_IDLE_S` after the last step, once nothing it started
 in its scratch paths is still working), and a session's clocks stand still while the agent CLI retries a failed model
-call (agy), up to a hard ceiling of 1.5 times its timeout (`POOL_TIMEOUT_CEILING`). Conflicting PRs that only add lines are rebased without an agent (once
+call (agy), up to a hard ceiling of 1.5 times its timeout (`POOL_TIMEOUT_CEILING`); quota
+errors agy retries inside a turn (read from its conversation record) pause new sessions
+pool-wide, and a turn agy ends on an error it calls retryable is resumed, not counted
+as a failure. A UX run, spec check or explorer gets a turn to write its report before
+its time runs out. Conflicting PRs that only add lines are rebased without an agent (once
 per head; a head whose rebase failed goes to a merger), a PR that conflicts again
 after three merger sessions (main kept moving) goes back to a worker, a P0/P1 PR whose
 rebase went to a merger twice on the same files makes other PRs' merges that touch those

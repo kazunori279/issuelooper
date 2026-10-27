@@ -267,6 +267,7 @@ def progress(m: dict) -> str:
     return (
         "<h2>Progress</h2>"
         + (f"<div style='margin-bottom:6px'>{esc(dm.ux_scores_text(ux))}</div>" if ux else "")
+        + "".join(f"<div style='margin-bottom:6px'>{esc(x)}</div>" for x in dm.ownership_lines(m.get("ownership") or {}))
         + table
         + review
         + (
