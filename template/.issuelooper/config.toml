@@ -72,6 +72,14 @@ guard = ""                   # ACCEPT_GUARD: runs tests/accept/ (e.g. "uv run py
                              # with no model; a failing test files `Regression of #N`. The scripts of verified issues
                              # become a chore issue for those tests. With the merge train, its full check runs this
                              # too, after the sweep, and a deploy of a main it checked is not guarded again. Empty = off
+author = false               # POOL_AUTHOR_ACCEPT: the author's conversation, resumed, accepts its own merged issue on
+                             # the deployed build (same verdict lines); off: tester units accept every issue
+sample = 4                   # POOL_ACCEPT_SAMPLE: with author on, a tester who did not write it also checks owner
+                             # requests, P0, and 1 in this many of the rest (0: only those two kinds)
+escalate_at = 0.15           # POOL_ACCEPT_ESCALATE_AT: when more of the last `window` samples than this failed what
+window = 20                  # POOL_ACCEPT_WINDOW: their author verified, the sample rate doubles (N halves, to 1)
+neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: after a verified verdict the author looks around its change
+                             # this long and files at most 3 issues (0 = off)
 chore_priority = "P1"        # POOL_ACCEPT_CHORE_PRIORITY: the priority of the chore (type:chore) that turns verified
                              # scripts into tests/accept/; at P2 behind a P1 queue they sat unclaimed
 guard_timeout_s = 1200       # POOL_ACCEPT_GUARD_S: the guard's time limit (the train's check: the sweep's

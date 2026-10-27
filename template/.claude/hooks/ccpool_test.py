@@ -1177,6 +1177,143 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     del unit.info["issues"][0]["rows"]
 
 
+def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
+    """Proposal §1 steps 3-4 and §4: c58's acceptance units took a median 13 min for one
+    issue, mostly re-reading; c55's independent QA failed 16.5 % of what D's tester verified."""
+    restore = with_env({**ACCEPT_ENV, "CCROLE_WORKER_CLI": "claude"})
+    try:
+        issues = [iss(4, ["stage:accept", "P1"], title="sheet"), iss(5, ["stage:accept", "P1"], title="ja"),
+                  iss(6, ["stage:accept", "P2"], title="busy")]
+        h = Rig(state(issues), accept=True, accept_paths=["src/"], author_accept=True,
+                timeouts={"worker": "60m", "merger": "45m", "tester": "50m"})
+        h.pool.track_accept = lambda st: None
+        h.pool.settle_accept = lambda *a: []
+        h.pool.settle_author = lambda *a, **k: None  # its own case below
+        b = h.pool.book
+        b.accept_ready, b.accept_target = [4, 5, 6], "d" * 40
+        b.accept_merged = {4: {"pr": 14, "sha": "x", "t": 0, "files": ["src/static/a.js"]}}
+        b.convs = {4: {"conv": "s4", "cli": "claude"}, 6: {"conv": "s6", "cli": "claude", "area": "live", "slot": 0}}
+        b.running["x"] = ccpool.Unit("worker", "implement", "wrk:9@x", "x", 9, (4,), {"area": "live", "slot": 0})
+        b.accept_ready_since[6] = h.now
+        started = h.step()
+        check("the author's conversation accepts its issue; one with no author goes to a tester; a busy one waits",
+              sorted((u.role, u.kind, u.number or tuple(x["n"] for x in u.info["issues"])) for u in started),
+              [("tester", "accept", (5,)), ("worker", "own-accept", 4)])
+        own = next(u for u in started if u.kind == "own-accept")
+        check("resumed in its conversation, on the tester's time, its rows listed, held from tester units",
+              (own.info["resume"], own.info["timeout"], "always:keyboard-tab-enter" in own.info["issues"][0]["rows"],
+               b.accept_held.get(4) == own.key),
+              ("s4", "50m", True, True))
+        prompt = ccpool.author_accept_prompt(own, 7, 8121, "50m", ["live", "cards"])
+        check("its prompt: the build, the marker, the verdict lines, the rows, the neighbourhood pass",
+              all(x in prompt for x in ("dddddddddddd", ccpool.AUTHOR_ACCEPT, "accept-verified:", "accept-blocked:",
+                                        "rows: <ids>", "at most 10 minutes", "at most 3 issues", "`area:<name>`",
+                                        "live, cards", "test_accept_4.py", "$TST_PORT=8121")), True)
+        h.now += 1801
+        h.finish(next(u.key for u in started if u.kind == "accept"))
+        b.accept_ready = [5, 6]
+        check("a conversation busy past POOL_AUTHOR_WAIT_S: a tester instead",
+              [tuple(x["n"] for x in u.info["issues"]) for u in h.step() if u.kind == "accept"], [(5, 6)])
+        b.accept_author[4] = {"entry": b.live_entry[4], "tries": 0, "verdict": "verified", "sample": True}
+        b.accept_held.clear()
+        for f in [f for f, u in b.running.items() if u.kind in ("accept", "own-accept")]:
+            h.finish(b.running[f].key)
+        b.accept_ready = [4]
+        check("verified by its author and drawn for the sample: an independent tester checks it",
+              [(u.kind, [x["n"] for x in u.info["issues"]]) for u in h.step()], [("accept", [4])])
+    finally:
+        restore()
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-author-"))
+    gh = d / "gh"
+    gh.write_text(FAKE_GH_ISSUE)
+    gh.chmod(0o755)
+    loop = {"login": "loop-bot"}
+    since = "2026-10-23T12:00:00Z"
+    started_at = ccpool.claimlib.parse_time("2026-10-23T12:10:00Z").timestamp()
+    unit = ccpool.Unit("worker", "own-accept", "oac:9", "wrk:9", 9, (2, 1, 9),
+                       {"sha": "d" * 40, "issues": [{"n": 9, "title": "sheet", "live": False, "since": since}]})
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept=True, accept_paths=["src/"],
+                                     author_accept=True, accept_sample=2), fetcher=state, spawn=False)
+
+    def settle(comments, labels=("stage:accept", "P1")):
+        log = d / "gh.log"
+        log.write_text("")
+        os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="loop-bot", FAKE_GH_VIEW=json.dumps(
+            {"state": "OPEN", "labels": [{"name": x} for x in labels], "comments": comments}))
+        try:
+            pool.book.accept_author.pop(9, None)
+            pool.settle_author(unit, started_at, d)
+        finally:
+            for k in ("FAKE_GH_LOG", "ISSUELOOPER_LOGIN", "FAKE_GH_VIEW"):
+                os.environ.pop(k, None)
+        return [ln.split(" --comment")[0] for ln in log.read_text().splitlines() if not ln.startswith("issue view")]
+
+    def author(body, at="2026-10-23T12:30:00Z"):
+        return {"author": loop, "body": f"<!-- worker -->\n{ccpool.AUTHOR_ACCEPT}\n" + body, "createdAt": at,
+                "url": "https://x/c/2"}
+
+    calls = settle([author("rows: always:x\naccept-verified: script at 3 viewports")])
+    check("the first verified issue of each N is drawn: it stays open for a tester, with a comment",
+          (len(calls), ccpool.ACCEPT_SAMPLE in calls[0], pool.book.accept_author[9]["sample"]), (1, True, True))
+    calls = settle([author("accept-verified: script")])
+    check("the next is not drawn: the author's verdict closes it",
+          calls[:2], ["issue edit 9 --remove-label stage:accept", "issue close 9 --reason completed"])
+    calls = settle([author("accept-verified: script")], labels=("stage:accept", "owner-request"))
+    check("an owner request is always sampled", ccpool.ACCEPT_SAMPLE in calls[0], True)
+    calls = settle([author("accept-blocked: no .env")])
+    check("accept-blocked: the owner", calls[0], "issue edit 9 --remove-label stage:accept --add-label stage:owner")
+    calls = settle([author("Escape still closes the whole sheet at 320 px.")])
+    check("the author's own failure: back to stage:triage, counted",
+          (calls[0], ccpool.ACCEPT_HANDBACK in calls[1], pool.book.failed_tries[9]),
+          ("issue edit 9 --remove-label stage:accept --add-label stage:triage", True, 1))
+    calls = settle([author("accept-verified: x", at="2026-10-23T12:05:00Z"),
+                    {"author": loop, "body": "<!-- worker -->\nno marker\naccept-verified: y", "createdAt": "2026-10-23T12:30:00Z"}])
+    check("no verdict of this session's (older, or without the marker): asked again, one try counted",
+          (calls, pool.book.accept_author[9]["tries"]), ([], 1))
+    check("no verdict twice: it goes to a tester", (
+        ccpool.plan_author_accept(state([iss(9, ["stage:accept"])]),
+                                  _book(convs={9: {"conv": "c", "cli": "claude"}},
+                                        accept_author={9: {"entry": "", "tries": 2}}),
+                                  pool.cfg, NOW, [9], {9: False}, [])), [9])
+    # The sample's disagreement rate, and its escalation.
+    pool.cfg.accept_sample, pool.book.sample_n = 4, 0
+    for k, agree in enumerate([True, False, True, True, False, True]):
+        pool.record_sample(100 + k, agree)
+    stats = pool.sample_stats()
+    check("2 of the first 5 disagree (40 %, over 15 %): the sample goes from 1 in 4 to 1 in 2, the monitor hears it, "
+          "and the window starts again",
+          (pool.sample_every(), any("from 1 in 4 to 1 in 2" in e for e in pool.events), stats["window"]), (2, True, 1))
+    for k in range(6):
+        pool.record_sample(200 + k, True)
+    check("agreeing samples leave it there", pool.sample_every(), 2)
+    pool.book.accept_author[9] = {"entry": since, "verdict": "verified", "sample": True}
+    log = d / "gh.log"
+    os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="loop-bot", FAKE_GH_VIEW=json.dumps(
+        {"state": "OPEN", "labels": [{"name": "stage:accept"}], "comments": [
+            {"author": loop, "body": "<!-- tester -->\nThe sheet does not close on Escape.", "createdAt": "2026-10-23T12:30:00Z",
+             "url": "u"}]}))
+    try:
+        before = len(pool.book.samples)
+        pool.settle_accept(ccpool.Unit("tester", "accept", "accept:y", "tst:accept0", None, (2,),
+                                       {"sha": "d" * 40, "issues": [{"n": 9, "title": "s", "since": since}]}), started_at, True)
+    finally:
+        for k in ("FAKE_GH_LOG", "ISSUELOOPER_LOGIN", "FAKE_GH_VIEW"):
+            os.environ.pop(k, None)
+    check("the independent tester failing an issue its author verified is a disagreement, recorded once",
+          (len(pool.book.samples) - before, pool.book.samples[-1]["agree"], pool.book.accept_author[9]["independent"]),
+          (1, False, "retry"))
+    again = ccpool.Pool(pool.cfg, fetcher=state, spawn=False)
+    check("a restarted supervisor keeps the sample and its rate", (len(again.book.samples), again.sample_every()),
+          (len(pool.book.samples), 2))
+
+
+def _book(**kw):
+    b = ccpool.Book()
+    for k, v in kw.items():
+        setattr(b, k, v)
+    return b
+
+
 def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
     """Fixed regressions came back in cohort 52 ("maps blank after reload"). A verified
     issue's script becomes tests/accept/, run on each build with no model."""

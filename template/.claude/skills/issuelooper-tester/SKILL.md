@@ -81,7 +81,10 @@ the server and remove `$T`.
 
 Your prompt lists merged issues (up to six) and the commit they are in: the deployed
 build, or `origin/main` when nothing deploys. Someone else wrote each change; you
-are the first person to use it. Start the app at that commit (the rig), in scripted
+are the first person to use it. With `[accept] author` on, the author accepted most
+issues itself and you get a sample (an `accept-sample` comment says its author
+verified it): check it as if you had not seen that verdict. Where you see something
+else, say so plainly: those disagreements decide how many issues you check. Start the app at that commit (the rig), in scripted
 mode, or live mode for an issue marked live (as in **Live check** below). For each
 issue:
 

@@ -254,6 +254,9 @@ ACCEPTING = (ACCEPT_STAGE, "stage:live")
 ACCEPT_VERIFIED = re.compile(r"(?im)^[ \t>*-]*(?:accept|live)-verified:[ \t]*\S")
 ACCEPT_BLOCKED = re.compile(r"(?im)^[ \t>*`-]*(?:accept-blocked|live-check-blocked):")
 ACCEPT_RETRY = "<!-- accept-retry -->"
+# The author's own acceptance verdict (POOL_AUTHOR_ACCEPT) carries this under its worker marker.
+AUTHOR_ACCEPT = "<!-- author-accept -->"
+ACCEPT_SAMPLE = "<!-- accept-sample -->"
 ACCEPT_HANDBACK = "<!-- accept-handback -->"
 def bare_login(login: str) -> str:
     """A login as both GitHub APIs agree on it: REST names a GitHub App's bot
@@ -463,6 +466,18 @@ class Config:
     # The priority acceptance chores are filed at. Run 11: four chores sat unclaimed at P2
     # behind the P1 queue (one also lacked type:chore, which the monitor added to the rest).
     accept_chore_priority: str = "P1"
+    # The author accepts its own merged issue on the deployed build, in its conversation
+    # (POOL_AUTHOR_ACCEPT); a tester who did not write it checks a sample: owner requests,
+    # P0, and 1 in accept_sample of the rest. When the sample disagrees with the author
+    # (verified, then not) on more than accept_escalate_at of the last accept_window samples,
+    # the sample rate doubles (N halves, down to 1). c58: acceptance units were 13.5 of 67
+    # agent hours in 4 h, a median 13 min for one issue.
+    author_accept: bool = False
+    accept_sample: int = 4
+    accept_escalate_at: float = 0.15
+    accept_window: int = 20
+    accept_neighbourhood_min: float = 10  # the author's look around its change after a verified verdict (0 = off)
+    author_wait_s: float = 1800  # an issue whose author's conversation stays busy this long goes to a tester
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
@@ -586,6 +601,12 @@ class Config:
             accept_guard_s=float(e("POOL_ACCEPT_GUARD_S", "") or 1200),
             accept_guard=e("ACCEPT_GUARD", "").strip(),
             accept_chore_priority=e("POOL_ACCEPT_CHORE_PRIORITY", "").strip() or "P1",
+            author_accept=env_flag("POOL_AUTHOR_ACCEPT"),
+            accept_sample=env_int("POOL_ACCEPT_SAMPLE", 4),
+            accept_escalate_at=float(e("POOL_ACCEPT_ESCALATE_AT", "") or 0.15),
+            accept_window=env_int("POOL_ACCEPT_WINDOW", 20),
+            accept_neighbourhood_min=float(e("POOL_ACCEPT_NEIGHBOURHOOD_MIN", "") or 10),
+            author_wait_s=float(e("POOL_AUTHOR_WAIT_S", "") or 1800),
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -924,6 +945,16 @@ class Book:
         # issue -> the conversation that last worked on it: {"conv", "cli", "t", "seq", "area", "slot",
         # "files" (what its branch changed)}; kept in owners.json across restarts (Pool.save_owners).
         self.convs: dict[int, dict] = {}
+        # Author acceptance: issue -> {"entry", "tries", "verdict", "sample", "url", "independent"};
+        # the independent sample's results ({"t", "issue", "agree"}); its rate (1 in sample_n,
+        # 0 = the config's), the sample index escalation last counted from, and the count
+        # of issues the 1-in-N rule has seen.
+        self.accept_author: dict[int, dict] = {}
+        self.samples: list[dict] = []
+        self.sample_n = 0
+        self.sample_since = 0
+        self.sample_count = 0
+        self.accept_ready_since: dict[int, float] = {}  # issue -> first seen ready for acceptance
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
         # still shows stage:pr, and PR #131 was merged again 2 s later on the same head.
@@ -1080,6 +1111,8 @@ def plan(
                 continue  # the live environment lacks a file only the owner has (check_files)
             live_of[n] = live
             ready.append(n)
+        if cfg.author_accept:
+            ready = plan_author_accept(st, book, cfg, now, ready, live_of, units)
         size = max(1, cfg.accept_batch)
         accept_long = len(book.accept_ready) > 2 * size
         families = [f"tst:accept{k}" for k in range(max(1, cfg.accept_units)) if f"tst:accept{k}" not in book.running]
@@ -1092,11 +1125,7 @@ def plan(
             chunk = take[j * per:(j + 1) * per]
             if not chunk:
                 break
-            issues = [{"n": n, "title": open_by[n]["title"], "live": live_of[n], "since": book.live_entry.get(n, ""),
-                       "pr": (book.accept_merged.get(n) or {}).get("pr"),
-                       # the checklist rows its merged change needs, as gate 7 counts them
-                       "rows": [r[0] for r in config.required_rows((book.accept_merged.get(n) or {}).get("files") or [])]}
-                      for n in chunk]
+            issues = [accept_item(book, open_by, n, live_of[n]) for n in chunk]
             sha = book.accept_target
             key = f"accept:{sha[:12]}:" + ",".join(f"{x['n']}@{x['since']}#{book.accept_rounds[x['n']]}" for x in issues)
             units.append(Unit("tester", "accept", key, families[j], None, (2, 0, -1) if accept_long else (2, 1, 0),
@@ -1303,6 +1332,49 @@ def plan(
         elif u.kind != "ux" and (why in ("tries", "family") or (why == "done" and u.kind not in ("live", "accept"))):
             stuck.append(u)
     return due, stuck
+
+
+def accept_item(book: Book, open_by: dict, n: int, live: bool) -> dict:
+    """An issue as an acceptance unit's prompt lists it."""
+    m = book.accept_merged.get(n) or {}
+    return {"n": n, "title": open_by[n]["title"], "live": live, "since": book.live_entry.get(n, ""), "pr": m.get("pr"),
+            # the checklist rows its merged change needs, as gate 7 counts them
+            "rows": [r[0] for r in config.required_rows(m.get("files") or [])]}
+
+
+def plan_author_accept(st: dict, book: Book, cfg: Config, now: float, ready: list[int], live_of: dict,
+                       units: list[Unit]) -> list[int]:
+    """POOL_AUTHOR_ACCEPT: an own-accept unit (the author's conversation, resumed) for each
+    ready issue whose author can be resumed; returns the issues left for tester units:
+    the independent sample after the author verified, and those with no author to ask
+    (no conversation, two sessions without a verdict, a verdict that left rows out, or a
+    conversation busy for POOL_AUTHOR_WAIT_S)."""
+    open_by = {i["number"]: i for i in st["open"]}
+    busy = busy_convs(list(book.running.values()) + units)
+    rest = []
+    for n in accept_order(st, ready, book.live_entry, now):
+        since = book.live_entry.get(n, "")
+        a = book.accept_author.get(n) or {}
+        if a and a.get("entry") != since:
+            a = {}  # a new entry into stage:accept (a later merge): the author is asked again
+        rec = book.convs.get(n) or {}
+        conv = conv_resumable(rec)
+        if not conv or a.get("verdict") or a.get("tries", 0) >= 2:
+            rest.append(n)
+            continue
+        if {conv, (rec.get("area"), rec.get("slot"))} & busy:
+            if now - book.accept_ready_since.get(n, now) > cfg.author_wait_s:
+                rest.append(n)
+            continue
+        busy |= {conv, (rec.get("area"), rec.get("slot"))}
+        sha = book.accept_target
+        units.append(Unit("worker", "own-accept", f"oac:{n}@{since}#{a.get('tries', 0)}@{sha[:12]}", f"wrk:{n}", n,
+                          (2, 1, n), {"sha": sha, "deployed": bool(cfg.deploy_cmd),
+                                      "issues": [accept_item(book, open_by, n, live_of[n])], "resume": conv,
+                                      "cli": rec.get("cli"), "area": rec.get("area"), "slot": rec.get("slot"),
+                                      "timeout": cfg.timeouts.get("tester"),
+                                      "neighbourhood_min": cfg.accept_neighbourhood_min}))
+    return [n for n in ready if n in set(rest)]
 
 
 def admit(due: list[Unit], book: Book, cfg: Config, now: float) -> list[Unit]:
@@ -1558,6 +1630,46 @@ Your earlier worktree is gone. Follow the issuelooper-merger skill's steps for t
 5. When the rebase needs a decision about behavior you cannot make, say so on PR #{pr} (signed
    `<!-- worker -->`: the hunk and the choice) and stop; a merger or the monitor takes it from there.
 Your scratch files: {scratch(f"wrk-{seq}-{n}-")}*. Last line of your reply: AUTHOR-RESOLVED, or AUTHOR-STUCK <why>.
+Budget: hard wall-clock timeout of {timeout}."""
+
+
+def author_accept_prompt(u: Unit, seq: int, port: int, timeout: str, areas: list[str] | None = None) -> str:
+    """The author's conversation, resumed to accept its merged issue on the deployed build."""
+    x, sha = u.info["issues"][0], u.info["sha"]
+    n = x["n"]
+    tree, pre = scratch(f"wrk-{seq}-{n}-tree"), scratch(f"wrk-{seq}-{n}-")
+    where = "the deployed build" if u.info.get("deployed") else "origin/main (this repository does not deploy)"
+    rows = " ".join(x.get("rows") or []) or "(none listed: every part the issue asks for)"
+    cl = config.checklist_text()
+    minutes = u.info.get("neighbourhood_min") or 0
+    look = (
+        f"\n5. Only after an accept-verified line: spend at most {minutes:g} minutes on the screens your change touched "
+        "and around them, at the checklist's viewports and languages and across a reload, as a user would. File at "
+        "most 3 issues for what gets in a user's way there, each checked for a duplicate first (`gh issue list "
+        "--state all --search \"<key words> in:title\"`; an open one gets a comment instead), titled `UX: <what "
+        "the user sees>`, its body signed `<!-- worker -->` on the first line with the commit, viewport, language, "
+        "steps from a fresh start and what the screen shows, labelled `type:bug`"
+        + (f" and `area:<name>` when it lies in one of these areas: {', '.join(areas)}" if areas else "")
+        + ". No stage or priority label: the monitor triages it, and one in your area comes back to you.\n"
+        if minutes else "")
+    return f"""This conversation wrote the change for issue #{n} ("{x.get("title", "")}"), merged in PR #{x.get("pr") or "?"}.
+The supervisor resumed it for one step: accept it on {where} at commit {sha[:12]}, then stop.
+
+1. Extract that commit and run it on your port, $TST_PORT={port}, as the issuelooper-tester skill's rig says
+   (git -C "$SHARED_REPO_PATH" archive {sha} | tar -x -C {tree}; the worktree setup from {PROJECT}; the server in
+   the background with all three redirects{", in live mode" if x.get("live") else ", in scripted mode"}).
+2. Drive what #{n} asked for with a Playwright script ({pre}accept.py) from a fresh start, through these checklist
+   rows: {rows}. Read every screenshot. Your scripts and live check from before the merge do not count: only this build.
+3. Comment once on #{n}: first line `<!-- worker -->`, second line `{AUTHOR_ACCEPT}`, then what you ran and what you
+   saw (quote the screen), a line `rows: <ids>` with the rows you ran, a line `skip: <id> <why>` for each that cannot
+   apply, and a last line of its own: `accept-verified: <what ran>` only when every part works on this build,
+   `accept-blocked: <what is missing>` when you could not run the check at all, neither when something is wrong
+   (say what: it comes back to you as a fix). A tester who did not write it checks a sample of these verdicts, and
+   one it cannot reproduce counts against the loop.
+4. For a verified issue, save the script as $LOGDIR/accept/test_accept_{n}.py: what a user sees, one page, waits on
+   what the page shows; no source reads, line counts or fixed sleeps.{look}
+Do not change code or open a pull request in this step. Stop the server, remove {tree}, and stop.
+{cl}
 Budget: hard wall-clock timeout of {timeout}."""
 
 
@@ -2133,7 +2245,7 @@ class Session(threading.Thread):
             # conversation with a few minutes to commit and release: workers that ran
             # their full timeout were a quarter of all worker time, and most of them
             # ended with nothing saved.
-            report = self.unit.kind in REPORTS
+            report = self.unit.kind in REPORTS or self.unit.kind == "own-accept"
             if role == "worker" and self.unit.kind == "implement" and cfg.wrap_s():
                 wrap_at, wrap_budget = start + cfg.wrap_s(), cfg.worker_wrap_budget_s
             elif report and cfg.report_wrap:
@@ -2212,6 +2324,9 @@ class Session(threading.Thread):
                                 f"Time is almost up. Within the next few minutes write $LOGDIR/{REPORTS[self.unit.kind]} "
                                 "as it stands, its first line `Score: N/100` on what you saw so far, file what is "
                                 "ready to file (within your limit), stop every server you started, and stop."
+                                if self.unit.kind in REPORTS else
+                                f"Time is almost up. Post your verdict comment on #{self.unit.number} now, as your "
+                                f"prompt says (`{AUTHOR_ACCEPT}` and the verdict line), stop the server, and stop."
                                 if report else
                                 "Time is almost up. Within the next few minutes: if your sweep is green, "
                                 "push and open (or update) the pull request as your skill says; otherwise "
@@ -2449,7 +2564,7 @@ class Session(threading.Thread):
         results file), so a quota error on the closing turn needs no resume. Unknown
         counts as not done."""
         u = self.unit
-        if u.role == "worker" and not (self.dir / "claim").exists():
+        if u.role == "worker" and u.kind == "implement" and not (self.dir / "claim").exists():
             return True  # the agent released its claim
         if u.kind in REPORTS:
             return (self.dir / REPORTS[u.kind]).exists()
@@ -2475,6 +2590,11 @@ class Session(threading.Thread):
             return False
         labels = {lab.get("name") for lab in data.get("labels") or []}
         is_open = data.get("state") == "OPEN"
+        if u.kind == "own-accept":
+            return not is_open or any(
+                AUTHOR_ACCEPT in (c.get("body") or "")
+                and claimlib.parse_time(c.get("createdAt") or "1970-01-01T00:00:00Z").timestamp() > self.started
+                for c in data.get("comments") or [])
         if u.role == "worker":
             return not is_open or claimlib.DOING not in labels
         if u.role == "merger":
@@ -2589,6 +2709,11 @@ class Session(threading.Thread):
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
                                    bool(cfg.accept_guard))
+        elif u.role == "worker" and u.kind == "own-accept":
+            self.port = self.pool.take_port()
+            env.update(TST_PORT=str(self.port))
+            prompt = author_accept_prompt(u, self.seq, self.port, self.timeout(), [a["name"] for a in config.areas()]
+                                          if hasattr(config, "areas") else None)
         elif u.role == "worker" and u.kind == "resolve":
             env.update(RESOLVE_PR=str(u.number), RESOLVE_BRANCH=u.info.get("branch") or f"issue-{u.info['issue']}")
             prompt = author_resolve_prompt(u, self.seq, self.timeout(), self.main_commits(u.info.get("branch") or ""))
@@ -3635,7 +3760,7 @@ class Pool:
                 b.last_spec_t = self.clock()
             if u.info.get("idle") or u.kind == "spec":
                 b.extra_runs += 1
-            if u.kind == "accept":
+            if u.kind in ("accept", "own-accept"):
                 for x in u.info["issues"]:
                     b.accept_held[x["n"]] = u.key
             w = Session(self, u, self.seq)
@@ -3668,7 +3793,7 @@ class Pool:
         with self.lock:
             b = self.book
             b.running.pop(u.family, None)
-            if u.kind == "accept":
+            if u.kind in ("accept", "own-accept"):
                 b.accept_settling.add(u.key)  # its issues stay held until settled, below
             self.sessions.pop(u.family, None)
             self.ports.discard(w.port)
@@ -3749,6 +3874,18 @@ class Pool:
             self.record_conv(w)
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
             self.settle_live(u)
+        if u.kind == "own-accept":
+            try:
+                if not outcome.startswith("startup crash"):
+                    # A session cut by quota or a stop may have posted its verdict; one that did
+                    # not is asked again without counting it.
+                    self.settle_author(u, w.started, w.dir, count=not outcome.startswith(NOT_A_FAILURE))
+            finally:
+                with self.lock:
+                    x = u.info["issues"][0]
+                    if self.book.accept_held.get(x["n"]) == u.key:
+                        del self.book.accept_held[x["n"]]
+                    self.book.accept_settling.discard(u.key)
         if u.kind == "accept":
             try:
                 if outcome == "ok" or outcome.startswith(("timed out", "failed")):
@@ -3797,7 +3934,7 @@ class Pool:
                                   "files": w.branch_files or prev.get("files") or []}
         self.save_owners()
 
-    OWNED = ("convs", "author_runs")
+    OWNED = ("convs", "author_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""
@@ -4922,6 +5059,13 @@ class Pool:
             if r.returncode == 0:
                 b.accept_in[n] = target
                 ready.append(n)
+        for n in ready:
+            b.accept_ready_since.setdefault(n, now)
+        for n in set(b.accept_ready_since) - set(ready):
+            del b.accept_ready_since[n]
+        for n in set(b.accept_author) - set(waiting):
+            if n not in b.accept_merged:
+                b.accept_author.pop(n, None)  # settled or gone: its record ends with its merge record
         for n in set(b.accept_merged) - set(waiting):
             if now - b.accept_merged[n]["t"] > 600:  # after_merge's entry precedes the label's poll
                 b.accept_merged.pop(n, None)
@@ -5041,7 +5185,136 @@ class Pool:
                 self.failed_try(n)
                 how = "handback"
             self.log("accept_settled", issue=n, verdict=how)
+            a = self.book.accept_author.get(n) or {}
+            if a.get("sample") and a.get("verdict") == "verified" and "independent" not in a and how != "blocked":
+                a["independent"] = how
+                self.record_sample(n, how == "verified")
         return verified
+
+    def sample_every(self) -> int:
+        """N in "1 in N" of the independent acceptance sample now (escalation lowers it)."""
+        return self.book.sample_n or self.cfg.accept_sample
+
+    def sample_pick(self, labels: set) -> bool:
+        """Whether an issue the author verified also gets an independent check: always for
+        an owner request or a P0, else 1 in N."""
+        if labels & {"owner-request", "P0"}:
+            return True
+        n = self.sample_every()
+        if n <= 0:
+            return False
+        with self.lock:
+            self.book.sample_count += 1
+            return (self.book.sample_count - 1) % n == 0
+
+    def sample_stats(self) -> dict:
+        b = self.book
+        window = b.samples[b.sample_since:][-max(1, self.cfg.accept_window):]
+        bad = sum(1 for x in window if not x.get("agree"))
+        return {"every": self.sample_every(), "samples": len(b.samples), "window": len(window),
+                "disagree": bad, "rate": round(bad / len(window), 3) if window else None,
+                "disagree_all": sum(1 for x in b.samples if not x.get("agree"))}
+
+    def record_sample(self, n: int, agree: bool) -> None:
+        """An independent check of an issue its author verified: agree or not. Over
+        POOL_ACCEPT_ESCALATE_AT disagreeing in the last POOL_ACCEPT_WINDOW (once five or more
+        are in), the sample rate doubles and the monitor is told."""
+        with self.lock:
+            self.book.samples.append({"t": round(self.clock(), 1), "issue": n, "agree": agree})
+        stats = self.sample_stats()
+        self.log("accept_sample", issue=n, agree=agree, **stats)
+        every = stats["every"]
+        if (stats["window"] >= min(5, self.cfg.accept_window) and stats["rate"] is not None
+                and stats["rate"] > self.cfg.accept_escalate_at and every > 1):
+            new = max(1, every // 2)
+            with self.lock:
+                self.book.sample_n, self.book.sample_since = new, len(self.book.samples)
+            self.log("accept_escalate", every=new, rate=stats["rate"], window=stats["window"])
+            self.event(f"independent acceptance disagreed with the authors on {stats['disagree']} of the last "
+                       f"{stats['window']} sampled issues ({stats['rate']:.0%}, over {self.cfg.accept_escalate_at:.0%}): "
+                       f"the sample goes from 1 in {every} to 1 in {new}. Look at what the authors verified that the "
+                       "testers could not reproduce")
+        self.save_owners()
+
+    def settle_author(self, u: Unit, started: float, logdir: pathlib.Path, count: bool = True) -> None:
+        """Act on the author's own acceptance verdict (POOL_AUTHOR_ACCEPT), as settle_accept
+        does on a tester's: accept-verified closes the issue, or, when it is in the sample,
+        leaves it at stage:accept for an independent tester; accept-blocked goes to the
+        owner; a reported failure goes back to stage:triage (a second one, to the owner);
+        no verdict asks again, twice, then a tester. A verified that leaves out a row it
+        needs goes to a tester."""
+        x = u.info["issues"][0]
+        n, entry = x["n"], x.get("since") or ""
+        with self.lock:
+            a = self.book.accept_author.get(n)
+            if not a or a.get("entry") != entry:
+                a = self.book.accept_author[n] = {"entry": entry, "tries": 0}
+        try:
+            login = bare_login(claimlib.loop_login())
+            r = self.gh("issue", "view", str(n), "--json", "state,labels,comments")
+            data = json.loads(r.stdout) if r.returncode == 0 else None
+        except (claimlib.GhError, OSError, ValueError, subprocess.SubprocessError):
+            data = None
+        if not isinstance(data, dict):
+            self.event(f"#{n}: the author's acceptance check finished, and the issue could not be read; asked again")
+            return
+        labels = {y.get("name") for y in data.get("labels") or []}
+        stage = next((s for s in ACCEPTING if s in labels), "")
+        if data.get("state") != "OPEN" or not stage:
+            return
+        start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+        comments = [c for c in data.get("comments") or []
+                    if bare_login(str((c.get("author") or {}).get("login") or "")) == login]
+        verdicts = [c for c in comments if str(c.get("body", "")).lstrip().startswith("<!-- worker -->")
+                    and AUTHOR_ACCEPT in str(c.get("body", "")) and str(c.get("createdAt", "")) >= max(entry, start)]
+        if not verdicts:
+            a["tries"] = a.get("tries", 0) + int(count)
+            self.log("accept_settled", issue=n, verdict="no verdict", by="author")
+            self.save_owners()
+            return
+        body, url = str(verdicts[-1].get("body", "")), verdicts[-1].get("url", "")
+        if ACCEPT_BLOCKED.search(body):
+            self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:owner")
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\nThe author could not run the acceptance check ({url}): it needs what that comment "
+                    "names, which only the owner can provide. Waiting at stage:owner.")
+            self.event(f"#{n}: the author's acceptance check could not run (accept-blocked); moved to stage:owner.")
+            how = "blocked"
+        elif ACCEPT_VERIFIED.search(body) and unchecked_rows(body, x.get("rows") or []):
+            how = "rows missing"  # a tester checks it, through every row
+        elif ACCEPT_VERIFIED.search(body):
+            sampled = self.sample_pick(labels)
+            how = "verified, sampled" if sampled else "verified"
+            a.update(sample=sampled, url=url)
+            if sampled:
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\n{ACCEPT_SAMPLE}\nThe author verified it on the deployed build ({url}). It is in "
+                        f"the independent sample (owner requests, P0, and 1 in {self.sample_every()} of the rest), so a "
+                        "tester who did not write it checks it too before it closes.")
+            else:
+                self.gh("issue", "edit", str(n), "--remove-label", stage)
+                self.gh("issue", "close", str(n), "--reason", "completed", "--comment",
+                        f"<!-- merger -->\nClosed: the author's acceptance check on the deployed build passed ({url}); "
+                        f"it was not drawn for the independent sample (1 in {self.sample_every()}).")
+                self.accept_chore(logdir, [n], {n: x.get("title", "")})
+        elif any(ACCEPT_HANDBACK in str(c.get("body", "")) or LIVE_HANDBACK in str(c.get("body", "")) for c in comments):
+            self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:owner")
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\n{ACCEPT_HANDBACK}\nThe author's acceptance check failed again ({url}), after a "
+                    "second fix. Whether the acceptance holds as written is the owner's call. Waiting at stage:owner.")
+            self.event(f"#{n}: its acceptance check failed after a second fix; moved to stage:owner.")
+            how = "owner"
+        else:
+            self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:triage")
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\n{ACCEPT_HANDBACK}\nBack to stage:triage: the author's own acceptance check on the "
+                    f"deployed build did not show the behavior ({url}). The next worker starts from what that comment saw.")
+            self.event(f"#{n}: the author's acceptance check failed on the deployed build; handed back to stage:triage.")
+            self.failed_try(n)
+            how = "handback"
+        a["verdict"] = how.split(",")[0]
+        self.log("accept_settled", issue=n, verdict=how, by="author")
+        self.save_owners()
 
     def accept_chore(self, logdir: pathlib.Path, verified: list[int], titles: dict[int, str] | None = None) -> None:
         """One chore issue for the scripts of the issues this acceptance unit verified
@@ -5428,7 +5701,8 @@ class Pool:
             "main_check": self.main_check_last,
             "train": {"running": self.train_running, "queue": sorted(self.book.train)},
             "accept": {"ready": self.book.accept_ready, "build": self.book.accept_target[:12],
-                       "held": sorted(self.book.accept_held)},
+                       "held": sorted(self.book.accept_held),
+                       **({"sample": self.sample_stats()} if self.cfg.author_accept else {})},
             "missing_files": self.book.missing,
             "ux_scores": self.ux_scores[-10:],
         }

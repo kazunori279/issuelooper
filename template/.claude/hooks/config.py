@@ -119,6 +119,12 @@ KEYS = {
     ("accept", "guard_timeout_s"): "POOL_ACCEPT_GUARD_S",
     ("accept", "units"): "POOL_ACCEPT_UNITS",
     ("accept", "chore_priority"): "POOL_ACCEPT_CHORE_PRIORITY",
+    ("accept", "author"): "POOL_AUTHOR_ACCEPT",
+    ("accept", "sample"): "POOL_ACCEPT_SAMPLE",
+    ("accept", "escalate_at"): "POOL_ACCEPT_ESCALATE_AT",
+    ("accept", "window"): "POOL_ACCEPT_WINDOW",
+    ("accept", "neighbourhood_min"): "POOL_ACCEPT_NEIGHBOURHOOD_MIN",
+    ("accept", "author_wait_s"): "POOL_AUTHOR_WAIT_S",
 }
 # [accept] keys that make up the checklist, carried together in $ACCEPT_CHECKLIST.
 CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers", "no_skip")
