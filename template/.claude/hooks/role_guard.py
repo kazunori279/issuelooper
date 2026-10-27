@@ -775,7 +775,8 @@ def kill_by_pattern_check(command: str) -> None:
             "contains its prompt, so a pattern that names your server can match, and kill, "
             "this session too.\n\n"
             "Stop a server by its port or its PID instead: `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, or start it "
-            "with `... & echo $! > $ISSUELOOPER_TMP/<name>.pid` and later `kill $(cat $ISSUELOOPER_TMP/<name>.pid)`."
+            "with `nohup ... > <log> 2>&1 < /dev/null & echo $! > $ISSUELOOPER_TMP/<name>.pid` and later "
+            "`kill $(cat $ISSUELOOPER_TMP/<name>.pid)`."
         )
 
 

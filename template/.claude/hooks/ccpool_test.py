@@ -2347,6 +2347,9 @@ def test_explorers_fill_the_idle_slots() -> None:
     h.now += 3601
     check("an hour later the rotation goes on, from the first again", [u.info.get("focus") for u in h.step()],
           ["phone 320 px"])
+    u = ccpool.Unit("tester", "explore", "exp:a:9", "tst:exp7", None, (5, 9), {})
+    h.pool.book.family_starts["tst:exp7"] = 99
+    check("explorers, like UX runs, are not stopped by the family cap", h.pool.book.why_not(u, h.pool.cfg), "")
     busy = Rig(state([iss(n, ["stage:triage", "P1"]) for n in range(1, 5)]), global_cap=4, explore=True,
                explore_focuses=focuses)
     check("no free slot: no explorer", sorted(u.kind for u in busy.step()), ["implement"] * 4)

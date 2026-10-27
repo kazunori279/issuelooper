@@ -60,7 +60,10 @@ UNITS
           PR reads UNKNOWN, so the resolved head is merged before main moves again.
           A PR whose POOL_MERGER_MAX (3) merger sessions each ended without a merge
           (main moved on and it conflicted again) goes back to a worker instead
-          (handback, no agent).
+          (handback, no agent). With POOL_AUTHOR_RESOLVE the author's recorded
+          conversation (Book.convs, owners.json) is resumed for it first: a worker
+          "resolve" unit with the merger's steps and time limit; the merger comes when
+          there is none to resume or after POOL_AUTHOR_RESOLVE_MAX author sessions.
   tester  (agent) with POOL_LIVE=1, one per stage:live issue each time it enters
           stage:live (the live check against the real services); with POOL_UX=1, a
           UX run at most every POOL_UX_GAP_MIN minutes, on the deployed sha (or on
@@ -95,6 +98,15 @@ UNITS
           usual gates), and the supervisor runs that command on each deploy in the main
           lane, with no model: a failing test files `Regression of #N` (P1), once while
           it is open, after a rerun that passes counts it flaky instead.
+          With POOL_AUTHOR_ACCEPT the author's conversation accepts each issue first (a
+          worker "own-accept" unit, settle_author); tester units take the independent
+          sample (owner requests, P0, 1 in POOL_ACCEPT_SAMPLE, raised when it disagrees)
+          and the issues whose author cannot be resumed. With POOL_EXPLORE the agent
+          slots the due work leaves free go to explorer units, one focus each, instead of
+          idle-time UX runs and spec checks.
+  areas   with [areas], each claimable issue is routed to an area (track_areas), and its
+          worker runs in that area's conversation, resumed (place_in_area); one session
+          at a time works an issue naming a hot file.
 
 Triage (an issue with no stage label), priorities, holds and dependencies are the
 monitor's; no unit is started for them, and none for an issue with an open blocker
@@ -113,7 +125,7 @@ PR's head and main). A key never runs twice at once, never again after a clean
 exit, and at most POOL_KEY_TRIES times after failures; a role+number family runs
 one unit at a time and fails at most POOL_FAMILY_MAX times per supervisor lifetime
 (sessions that end ok do not count; workers, bounded by claim.py's failed attempts,
-and UX runs, one family per sha, are exempt). A unit that ends held (a red main, the
+UX runs, one family per sha, and explorers are exempt). A unit that ends held (a red main, the
 guard or the review gate failing, a dirty shared checkout) spends neither and is due
 again after POOL_HOLD_RETRY_S (60). A pull request's family starts afresh when its head
 changes and when it is handed back.
@@ -1056,7 +1068,7 @@ class Book:
         # failed attempts, which the owner can reset, while a family cap cannot be reset
         # (an issue whose merged PRs each came back for the next fix hit it and could
         # not be restarted). UX runs are one family per sha.
-        if (self.family_starts[u.family] >= cfg.family_max and u.kind != "ux"
+        if (self.family_starts[u.family] >= cfg.family_max and u.kind not in ("ux", "explore")
                 and u.role != "worker"):
             return "family"
         return ""
@@ -1383,7 +1395,8 @@ def plan(
         why = book.why_not(u, cfg, now)
         if not why:
             due.append(u)
-        elif u.kind != "ux" and (why in ("tries", "family") or (why == "done" and u.kind not in ("live", "accept"))):
+        elif u.kind not in ("ux", "explore") and (why in ("tries", "family")
+                                                  or (why == "done" and u.kind not in ("live", "accept", "own-accept"))):
             stuck.append(u)
     return due, stuck
 
