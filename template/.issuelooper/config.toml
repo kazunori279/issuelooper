@@ -150,6 +150,23 @@ max = 2                      # POOL_EXPLORE_MAX: explorers at once
 per_hour = 4                 # POOL_EXPLORE_PER_HOUR: explorers started per hour at most (the model quota is shared)
 issues = 3                   # POOL_EXPLORE_ISSUES: findings one explorer files at most
 
+# Area ownership: named areas of the app, each with path globs (`*` crosses /) and its hot files
+# (`hot = true`: all of its paths). An issue goes to the area its `area:<name>` label names, else
+# the one its last branch or the names in its body point to, and is worked in that area's
+# conversation, resumed issue after issue. Issues with no clear area go to any worker. No
+# [areas.<name>] table = off.
+[areas]
+refresh_after = 6            # POOL_AREA_REFRESH: a fresh conversation for the area after this many issues, seeded with
+                             # the notes the old one keeps
+refresh_tokens = 0           # POOL_AREA_REFRESH_TOKENS: or once its context reaches this many tokens (0 = not measured)
+conversations = 2            # POOL_AREA_CONVERSATIONS: conversations one area runs at once at most
+second_at = 3                # POOL_AREA_SECOND_AT: a second starts only while this many issues wait in the area, for an
+                             # issue whose files do not overlap the first's
+hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file
+# [areas.ui]
+# paths = ["src/static/*"]
+# hot = ["src/static/app.js"]
+
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project

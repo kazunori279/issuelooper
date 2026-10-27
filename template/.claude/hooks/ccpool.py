@@ -433,6 +433,17 @@ class Config:
     explore_per_hour: int = 4
     explore_issues: int = 3
     areas: list = dataclasses.field(default_factory=list)  # [areas] (config.areas): {"name", "paths", "hot"}
+    # Area ownership ([areas]): an issue routed to an area is worked in that area's
+    # conversation, resumed issue after issue, at most area_conversations of them at once (a
+    # second only when area_second_at issues wait there and its files do not overlap the
+    # first's); a fresh conversation, seeded with the old one's notes, after area_refresh
+    # issues or area_refresh_tokens of context. With area_hot_lock, one session at a time
+    # works an issue that names an area's hot file. c52 PR #143 waited 5 h 40 min on live.py.
+    area_refresh: int = 6
+    area_refresh_tokens: int = 0
+    area_conversations: int = 2
+    area_second_at: int = 3
+    area_hot_lock: bool = True
     unknown_s: float = 300
     split_after: int = 4
     starve_after: int = 2  # conflicts left to a merger on the same files before a P0/P1 PR is starving
@@ -587,6 +598,11 @@ class Config:
             explore_per_hour=env_int("POOL_EXPLORE_PER_HOUR", 4),
             explore_issues=env_int("POOL_EXPLORE_ISSUES", 3),
             areas=config.areas(),
+            area_refresh=env_int("POOL_AREA_REFRESH", 6),
+            area_refresh_tokens=env_int("POOL_AREA_REFRESH_TOKENS", 0),
+            area_conversations=env_int("POOL_AREA_CONVERSATIONS", 2),
+            area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
+            area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
             starve_after=env_int("POOL_STARVE_AFTER", 2),
@@ -917,6 +933,12 @@ def conv_resumable(rec: dict | None, role: str = "worker") -> str:
     return rec["conv"] if rec.get("cli") == cli.name and cli.can_resume(rec["conv"]) else ""
 
 
+def holding(book: "Book", cfg: "Config", now: float, units) -> list:
+    """The units that hold a conversation, an area slot or a hot file: the running ones and
+    the planned ones that are due (a planned unit whose key is done holds nothing)."""
+    return list(book.running.values()) + [u for u in units if not book.why_not(u, cfg, now)]
+
+
 def busy_convs(units) -> set:
     """Conversations, and (area, slot) pairs, that running or planned units hold."""
     out = set()
@@ -972,6 +994,13 @@ class Book:
         self.sample_since = 0
         self.sample_count = 0
         self.accept_ready_since: dict[int, float] = {}  # issue -> first seen ready for acceptance
+        # Areas (Pool.track_areas): issue -> its area ('' none) and the files it names (for the
+        # hot-file lock); issue -> (updatedAt, area, files) last worked out; area -> its
+        # conversations by slot: {"conv", "cli", "issues", "notes", "tokens", "t"}.
+        self.issue_area: dict[int, str] = {}
+        self.issue_files: dict[int, list] = {}
+        self.area_cache: dict[int, tuple] = {}
+        self.area_slots: dict[str, list] = {}
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
         # still shows stage:pr, and PR #131 was merged again 2 s later on the same head.
@@ -1039,6 +1068,7 @@ def plan(
     """(units to start, in admission order; units that are due but exhausted).
     ux_sha is the commit a UX run would test (Pool.ux_target)."""
     units: list[Unit] = []
+    claimable: list[dict] = []  # worker units are made after the loop, in priority order (areas)
     open_numbers = {i["number"] for i in st["open"]}
     done = accepted(st)
     pr_of: dict[int, dict] = {}
@@ -1062,17 +1092,7 @@ def plan(
                 memo and memo[:2] == (i["updated"], main) and now - memo[2] < cfg.unclaimable_retry_s
             ):
                 continue
-            units.append(
-                Unit(
-                    "worker",
-                    "implement",
-                    f"wrk:{n}@{i['updated']}",
-                    f"wrk:{n}",
-                    n,
-                    (4, priority(labels), n),
-                    {"title": i["title"]},
-                )
-            )
+            claimable.append(i)
         elif claimlib.DOING in labels:
             if (
                 n not in pr_of
@@ -1108,6 +1128,15 @@ def plan(
                 Unit("tester", "live", key, f"tst:live{n}", n, (2, 1, n),
                      {"title": i["title"], "base": base, "since": since})
             )
+
+    queue = collections.Counter(book.issue_area.get(i["number"]) for i in claimable)
+    for i in sorted(claimable, key=lambda i: (priority(i["labels"]), i["number"])):
+        n = i["number"]
+        where = place_in_area(n, book, cfg, holding(book, cfg, now, units), queue) if cfg.areas else {}
+        if where is None:
+            continue  # its area's conversations are busy, or its hot file is being worked on
+        units.append(Unit("worker", "implement", f"wrk:{n}@{i['updated']}", f"wrk:{n}", n,
+                          (4, priority(i["labels"]), n), {"title": i["title"], **where}))
 
     open_by = {i["number"]: i for i in st["open"]}
     accept_long = False  # the acceptance queue is over two batches: it goes before idle-time runs
@@ -1260,7 +1289,7 @@ def plan(
               and conv_resumable(book.convs.get(n))
               and not {conv_resumable(book.convs.get(n)),
                        ((book.convs.get(n) or {}).get("area"), (book.convs.get(n) or {}).get("slot"))}
-              & busy_convs(list(book.running.values()) + units)):
+              & busy_convs(holding(book, cfg, now, units))):
             # The author knows the change: its conversation is resumed with the conflict
             # (proposal: the worker owns its issue end to end). A merger re-read the issue,
             # the PR and main from scratch: c58, 32 sessions, median 14.5 min.
@@ -1272,6 +1301,7 @@ def plan(
                      {**info, "resume": rec["conv"], "cli": rec.get("cli"), "area": rec.get("area"),
                       "slot": rec.get("slot"), "files": rec.get("files") or [],
                       "conflicts": sorted(hard[-1][1]) if hard else [],
+                      "hot": [f for f in rec.get("files") or [] if config.is_hot(f, cfg.areas)] if cfg.area_hot_lock else [],
                       "red": book.rebase_failed.get(pr["number"]) == pr["head"],
                       "timeout": cfg.timeouts.get("merger")})
             )
@@ -1358,6 +1388,47 @@ def plan(
     return due, stuck
 
 
+def area_notes(area: str, slot: int) -> str:
+    """Where an area conversation keeps its notes for the next one (under scratch)."""
+    return scratch(f"areas/{area}-{slot}.md")
+
+
+def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) -> dict | None:
+    """Where issue n's worker runs ([areas]): {} for no area, else {"area", "slot", "resume",
+    "files", "hot", "notes"}; None while it must wait. An issue naming a hot file waits
+    while another session works one (POOL_AREA_HOT_LOCK). The area's conversation in a
+    free slot is resumed, unless it is due for a refresh (POOL_AREA_REFRESH issues, or
+    POOL_AREA_REFRESH_TOKENS of context): then a fresh one starts with the notes. A second
+    slot opens only while POOL_AREA_SECOND_AT issues wait in the area and the issue's
+    files do not overlap those of the area's running work. active: holding()."""
+    files = set(book.issue_files.get(n) or [])
+    hot = {f for f in files if config.is_hot(f, cfg.areas)} if cfg.area_hot_lock else set()
+    if hot & {f for u in active if u.role == "worker" for f in u.info.get("hot") or []}:
+        return None
+    area = book.issue_area.get(n) or ""
+    if not area:
+        return {"hot": sorted(hot)} if hot else {}
+    mine = [u for u in active if u.info.get("area") == area]
+    busy = {u.info.get("slot") for u in mine} | {s for x in busy_convs(active) if isinstance(x, tuple) and x[0] == area
+                                                for s in [x[1]]}
+    slots = book.area_slots.get(area) or []
+    for k in range(max(1, cfg.area_conversations)):
+        if k in busy:
+            continue
+        if k and (queue[area] < cfg.area_second_at or not files
+                  or files & {f for u in mine for f in u.info.get("files") or []}):
+            break
+        slot = slots[k] if k < len(slots) else {}
+        refresh = bool(slot) and (slot.get("issues", 0) >= cfg.area_refresh > 0 or
+                                  (cfg.area_refresh_tokens and slot.get("tokens", 0) >= cfg.area_refresh_tokens))
+        conv = "" if refresh else conv_resumable(slot)
+        if conv and conv in busy_convs(active):
+            continue
+        return {"area": area, "slot": k, "resume": conv or None, "files": sorted(files), "hot": sorted(hot),
+                "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh}
+    return None
+
+
 def plan_explorers(book: Book, cfg: Config, now: float, sha: str, units: list[Unit]) -> list[Unit]:
     """Explorer units for the agent slots the due work leaves free (with no global cap: only
     while no worker is due), up to POOL_EXPLORE_MAX running and POOL_EXPLORE_PER_HOUR
@@ -1396,7 +1467,7 @@ def plan_author_accept(st: dict, book: Book, cfg: Config, now: float, ready: lis
     (no conversation, two sessions without a verdict, a verdict that left rows out, or a
     conversation busy for POOL_AUTHOR_WAIT_S)."""
     open_by = {i["number"]: i for i in st["open"]}
-    busy = busy_convs(list(book.running.values()) + units)
+    busy = busy_convs(holding(book, cfg, now, units))
     rest = []
     for n in accept_order(st, ready, book.live_entry, now):
         since = book.live_entry.get(n, "")
@@ -1487,11 +1558,9 @@ MAP_FILES, MAP_TOKENS = 8, 12
 MAP_EXCLUDE = (":!.claude", ":!.agents", ":!.issuelooper", ":!.githooks", ":!*.lock")
 
 
-def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern: str = "") -> str:
-    """Files on `ref` that mention the issue's backticked names (and the requirement ids
-    id_pattern matches), most names first: `path (lines): name@line, ...`. A starting
-    point for the worker: on some models workers read 39 files a session, half of them
-    rereads, and ran 8 searches."""
+def name_hits(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern: str = "") -> dict[str, dict[str, int]]:
+    """path -> {name: first line} for the files on `ref` that mention the issue's backticked
+    names (and the requirement ids id_pattern matches)."""
     found = MAP_TOKEN.findall(text)
     if id_pattern:
         try:
@@ -1510,6 +1579,15 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
             parts = line.split(":", 3)  # ref:path:line:text
             if len(parts) >= 3 and parts[2].isdigit():
                 hits.setdefault(parts[1], {}).setdefault(t, int(parts[2]))
+    return hits
+
+
+def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern: str = "") -> str:
+    """Files on `ref` that mention the issue's backticked names (and the requirement ids
+    id_pattern matches), most names first: `path (lines): name@line, ...`. A starting
+    point for the worker: on some models workers read 39 files a session, half of them
+    rereads, and ran 8 searches."""
+    hits = name_hits(root, text, ref, id_pattern)
     rows = []
     for path, names in sorted(hits.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:MAP_FILES]:
         r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{path}"], capture_output=True,
@@ -1642,6 +1720,33 @@ from a merger session, and any write to a PR but #{pr}.
 
 Do not read, rebase or merge any other pull request.
 Budget: hard wall-clock timeout of {timeout}."""
+
+
+def area_text(u: Unit, cfg: "Config") -> str:
+    """What a worker in an area's conversation is told on top of its issue ([areas])."""
+    area = u.info.get("area")
+    if not area:
+        hot = u.info.get("hot") or []
+        return (f"\nWhile you work, no other session works an issue naming {', '.join(f'`{h}`' for h in hot)} "
+                "(hot files, one session at a time).\n" if hot else "")
+    a = next((x for x in cfg.areas if x["name"] == area), {"paths": []})
+    notes = u.info.get("notes") or area_notes(area, u.info.get("slot") or 0)
+    text = (f"\nYou are the conversation for the app's `{area}` area ({', '.join(a['paths'])}). "
+            + ("The supervisor resumed you with its next issue: you keep what you learned on the earlier ones. "
+               "Your earlier worktree is gone; start a new one at the path below.\n"
+               if not u.info.get("fresh") else "This is a fresh conversation for the area.\n"))
+    if u.info.get("fresh"):
+        try:
+            old = pathlib.Path(notes).read_text(errors="replace").strip()[:3000]
+        except OSError:
+            old = ""
+        if old:
+            text += "The area's previous conversation left these notes:\n" + "\n".join("    " + ln for ln in old.splitlines()) + "\n"
+    if u.info.get("hot"):
+        text += f"Its hot files you touch ({', '.join(f'`{h}`' for h in u.info['hot'])}) are yours alone while you work.\n"
+    return text + (f"Before your last line, rewrite the area's notes at {notes}: at most 30 lines on where things are in "
+                   "this area, its conventions and its traps, for the next issue here (it may go to a fresh "
+                   "conversation).\n")
 
 
 def author_resolve_prompt(u: Unit, seq: int, timeout: str, commits: str) -> str:
@@ -2771,6 +2876,9 @@ class Session(threading.Thread):
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
                                    bool(cfg.accept_guard))
+            if u.info.get("area") or u.info.get("hot"):
+                pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
+                prompt += "\n" + area_text(u, cfg)
         elif u.role == "worker" and u.kind == "own-accept":
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
@@ -3706,6 +3814,8 @@ class Pool:
                       if o != pr and not (mine and mine["rank"] < s["rank"])]
         for other, s in others:
             shared = files & s["files"]
+            if self.cfg.areas and self.cfg.area_hot_lock:
+                shared = {f for f in shared if not config.is_hot(f, self.cfg.areas)}  # the areas serialize these
             if shared and ranges and self.cfg.starve_overlap:
                 shared = {f for f in shared
                           if hunks_overlap(ranges(f), self.starve_ranges(other, f), self.cfg.starve_margin)}
@@ -3996,9 +4106,21 @@ class Pool:
             self.book.convs[n] = {"conv": conv, "cli": w.cli.name, "t": round(self.clock(), 1), "seq": w.seq,
                                   "area": u.info.get("area", prev.get("area")), "slot": u.info.get("slot", prev.get("slot")),
                                   "files": w.branch_files or prev.get("files") or []}
+            area, k = u.info.get("area"), u.info.get("slot")
+            if u.kind == "implement" and area and k is not None and (w.dir / "claim.out").exists():
+                slots = self.book.area_slots.setdefault(area, [])
+                while len(slots) <= k:
+                    slots.append({})
+                old = slots[k]
+                resumed = bool(u.info.get("resume")) and old.get("conv") == u.info.get("resume")
+                slots[k] = {"conv": conv, "cli": w.cli.name, "issues": (old.get("issues", 0) if resumed else 0) + 1,
+                            "notes": u.info.get("notes") or area_notes(area, k), "t": round(self.clock(), 1),
+                            "tokens": w.cli.context_tokens(w.events())}
+                self.log("area_conversation", area=area, slot=k, conversation=conv, issues=slots[k]["issues"],
+                         tokens=slots[k]["tokens"], resumed=resumed)
         self.save_owners()
 
-    OWNED = ("convs", "author_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count")
+    OWNED = ("convs", "author_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""
@@ -5137,6 +5259,60 @@ class Pool:
                 b.accept_rounds.pop(n, None)
         b.accept_ready, b.accept_target = ready, target
 
+    def track_areas(self, st: dict) -> None:
+        """Route each claimable issue to an area ([areas]): an `area:<name>` label (the
+        monitor's override), else the area most of the files its last branch changed lie in,
+        else the area whose files most of the issue's backticked names and named paths occur
+        in on origin/main (the worker prompt's file map), when one area leads. Also the
+        files it names (named paths, and files with two or more of its names), for the
+        hot-file lock. Worked out once per issue update; git reads, so outside the lock."""
+        b, table = self.book, self.cfg.areas
+        if not table:
+            b.issue_area, b.issue_files = {}, {}
+            return
+        names = {a["name"] for a in table}
+        seen = set()
+        for i in st["open"]:
+            labels = set(i["labels"])
+            if not labels & CLAIMABLE or labels & (HOLDS | IGNORED):
+                continue
+            n = i["number"]
+            seen.add(n)
+            cached = b.area_cache.get(n)
+            if not cached or cached[0] != i["updated"]:
+                try:
+                    cached = b.area_cache[n] = (i["updated"], *self.route(i))
+                except (OSError, subprocess.SubprocessError):
+                    cached = (i["updated"], "", [])
+            label = next((x[5:] for x in sorted(labels) if x.startswith("area:") and x[5:] in names), "")
+            b.issue_area[n], b.issue_files[n] = label or cached[1], cached[2]
+        for d in (b.issue_area, b.issue_files, b.area_cache):
+            for n in set(d) - seen:
+                del d[n]
+
+    def route(self, issue: dict) -> tuple[str, list]:
+        """(area, files) for one issue: see track_areas."""
+        table, n = self.cfg.areas, issue["number"]
+        prev = (self.book.convs.get(n) or {}).get("files") or []
+        if prev:
+            votes = collections.Counter(config.area_of(f, table) for f in prev if config.area_of(f, table))
+            top = votes.most_common(2)
+            if top and (len(top) == 1 or top[0][1] > top[1][1]):
+                return top[0][0], sorted(prev)
+        text = (issue.get("body") or "") + "\n" + issue.get("title", "")
+        hits = name_hits(repo_root(), text, id_pattern=self.cfg.map_id_pattern)
+        named = {m for m in re.findall(r"[\w./-]+\.\w{1,5}\b", text) if config.area_of(m, table)}
+        score: collections.Counter = collections.Counter()
+        for path, found in hits.items():
+            if config.area_of(path, table):
+                score[config.area_of(path, table)] += len(found)
+        for path in named:
+            score[config.area_of(path, table)] += 3
+        files = sorted(named | {p for p, found in hits.items() if len(found) >= 2})
+        top = score.most_common(2)
+        area = top[0][0] if top and (len(top) == 1 or top[0][1] > top[1][1]) else ""
+        return area, files
+
     def accept_merge_info(self, n: int) -> dict:
         """Issue n's merged PR from GitHub: {"pr", "sha", "live", "t"} ("sha" empty when unread)."""
         r = self.gh("pr", "list", "--state", "merged", "--head", f"issue-{n}", "--json", "number,mergeCommit,files",
@@ -5717,6 +5893,7 @@ class Pool:
         self.last_fetch = now
         good, _ = self.deployments()
         self.track_accept(st)  # git and gh reads: outside the lock
+        self.track_areas(st)
         with self.lock:
             self.track_live(st)
             self.track_holds(st, now)
@@ -5768,6 +5945,13 @@ class Pool:
                        "held": sorted(self.book.accept_held),
                        **({"sample": self.sample_stats()} if self.cfg.author_accept else {})},
             "missing_files": self.book.missing,
+            **({"areas": {a["name"]: {
+                "queue": sum(1 for x in self.book.issue_area.values() if x == a["name"]),
+                "slots": [{"issues": sl.get("issues", 0), "tokens": sl.get("tokens", 0),
+                           "busy": any(u.info.get("area") == a["name"] and u.info.get("slot") == k
+                                       for u in self.book.running.values())}
+                          for k, sl in enumerate(self.book.area_slots.get(a["name"]) or [])]}
+                for a in self.cfg.areas}} if self.cfg.areas else {}),
             **({"explore": {"running": [u.info.get("focus") for u in self.book.running.values() if u.kind == "explore"],
                             "last_hour": sum(1 for t in self.book.explore_times if now - t < 3600),
                             "per_hour": self.cfg.explore_per_hour}} if self.cfg.explore else {}),

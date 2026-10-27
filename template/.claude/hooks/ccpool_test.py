@@ -2360,6 +2360,76 @@ def test_explorers_fill_the_idle_slots() -> None:
                                     "`area:<name>`", "live, cards", "explore_report.md", "provisional")), True)
 
 
+AREAS = [{"name": "live", "paths": ["src/live.py", "src/js/live*"], "hot": ["src/live.py"]},
+         {"name": "cards", "paths": ["src/js/cards/*"], "hot": []}]
+
+
+def test_areas_route_issues_to_their_conversations() -> None:
+    """Proposal §2: several "arm A"s in parallel. c58 PR #144 starved on live.py and other PRs
+    were held 89 times in an hour on app.js and live.py; arm A, one session, had the least
+    duplication and no handoffs."""
+    old_cli = os.environ.get("CCROLE_WORKER_CLI")
+    os.environ["CCROLE_WORKER_CLI"] = "claude"
+    try:
+        h = Rig(state([iss(n, ["stage:triage", "P1"]) for n in (1, 2, 3, 4, 5)]), areas=AREAS, area_second_at=3)
+        h.pool.track_areas = lambda st: None
+        b = h.pool.book
+        b.issue_area = {1: "live", 2: "live", 3: "cards", 4: "", 5: "live"}
+        b.issue_files = {1: ["src/live.py"], 2: ["src/live.py", "src/js/live_a.js"], 3: ["src/js/cards/map.js"],
+                         5: ["src/js/live_b.js"]}
+        started = {u.number: u for u in h.step()}
+        check("an area's first issue starts its conversation in slot 0; one in another area and one with no area "
+              "start too; one naming the same hot file waits; with three waiting, a second conversation takes "
+              "the one whose files do not overlap",
+              {n: (u.info.get("area"), u.info.get("slot"), u.info.get("resume")) for n, u in started.items()},
+              {1: ("live", 0, None), 3: ("cards", 0, None), 4: (None, None, None), 5: ("live", 1, None)})
+        check("the hot file is held by its session", started[1].info["hot"], ["src/live.py"])
+        prompt = ccpool.area_text(started[1], h.pool.cfg)
+        check("an area worker is told its area, its hot file, and to keep the area's notes",
+              ("`live` area" in prompt, "`src/live.py`" in prompt, f"{SCRATCH}/areas/live-0.md" in prompt), (True, True, True))
+        h.finish(started[1].key)
+        b.area_slots["live"] = [{"conv": "s-live", "cli": "claude", "issues": 1}]
+        nxt = h.step()
+        check("the area's idle conversation is resumed with its next issue (the hot file is free again)",
+              [(u.number, u.info.get("slot"), u.info.get("resume")) for u in nxt], [(2, 0, "s-live")])
+        h.finish(nxt[0].key)
+        b.area_slots["live"][0]["issues"] = 6
+        pathlib.Path(SCRATCH, "areas").mkdir(exist_ok=True)
+        pathlib.Path(SCRATCH, "areas", "live-0.md").write_text("main.py: the session loop is in run_turn().\n")
+        h.st = state([iss(n, ["stage:triage", "P1"], updated="2026-10-09T11:00:00Z") for n in (2,)] +
+                     [iss(n, ["stage:triage", "P1"]) for n in (3, 4, 5)])
+        fresh = [u for u in h.step() if u.number == 2]
+        check("after POOL_AREA_REFRESH issues: a fresh conversation, seeded with the old one's notes",
+              (fresh[0].info.get("resume"), fresh[0].info.get("refresh"),
+               "the session loop is in run_turn()" in ccpool.area_text(fresh[0], h.pool.cfg)), (None, True, True))
+    finally:
+        if old_cli is None:
+            os.environ.pop("CCROLE_WORKER_CLI", None)
+        else:
+            os.environ["CCROLE_WORKER_CLI"] = old_cli
+    h = Rig(state([iss(7, ["stage:triage"]), iss(8, ["stage:triage", "area:cards"]), iss(9, ["stage:triage"],
+                                                                                         body="Fix `play` in src/js/live_audio.js")]),
+            areas=AREAS)
+    h.pool.book.convs[7] = {"files": ["src/js/cards/a.js", "src/js/cards/b.js", "src/live.py"]}
+    real = ccpool.name_hits
+    ccpool.name_hits = lambda root, text, ref="origin/main", id_pattern="": (
+        {"src/live.py": {"play": 3}, "src/js/live_audio.js": {"play": 9}} if "play" in text else {})
+    try:
+        h.pool.track_areas(h.st)
+    finally:
+        ccpool.name_hits = real
+    b = h.pool.book
+    check("routing: the files its last branch changed; the monitor's area: label; the names and paths it gives",
+          (b.issue_area[7], b.issue_area[8], b.issue_area[9], b.issue_files[9]),
+          ("cards", "cards", "live", ["src/js/live_audio.js"]))
+    h.pool.starving[11] = {"files": {"src/live.py", "src/x.py"}, "since": NOW, "rank": (1, NOW, 11), "ranges": {}}
+    check("with areas on, a starving PR holds nothing for a hot file (one session at a time works those)",
+          (h.pool.starve_hold(12, {"src/live.py"}), h.pool.starve_hold(12, {"src/x.py"}).startswith("held")), ("", True))
+    off = Rig(state([iss(1, ["stage:triage"]), iss(2, ["stage:triage"])]))
+    off.pool.book.issue_area, off.pool.book.issue_files = {1: "live", 2: "live"}, {1: ["src/live.py"], 2: ["src/live.py"]}
+    check("no [areas]: every claimable issue gets a worker, as before", sorted(u.number for u in off.step()), [1, 2])
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""
