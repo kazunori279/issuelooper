@@ -34,12 +34,17 @@ and prints `sweep record: <path>`. A red run prints no green line and exits 1.
 With --affected and `[sweep] affected = "<command with {tests}>"` (SWEEP_AFFECTED), it
 runs that command with only the tests the commit's change touches, from where it
 forked off origin/main: the test files it changes; Python test files that import a
-module it changes; test files that name a file it changes that is not Python (its name
-or stem: the JS, HTML or CSS an e2e test drives); and the tests that SWEEP_AFFECTED_MAP
-(a file of `<glob>: <test> <test> ...` lines) maps its files to. It runs the whole
-suite instead when that selection is empty, or the change touches the suite's own
-setup (SWEEP_AFFECTED_FULL globs, default conftest.py, pyproject.toml, lock files,
-Makefile, package.json, fixtures, .issuelooper/ and .claude/). The record and the run's
+module it changes; test files that name a non-Python file it changes (its name or
+stem); for a change to a UI file (JS, HTML, CSS), also every browser test (a test file
+that uses Playwright's page), since a page test reaches the change through the page,
+not by its file name; and the tests that SWEEP_AFFECTED_MAP (a file of `<glob>: <test>
+<test> ...` lines) maps its files to. Tests under SWEEP_AFFECTED_EXCLUDE (default
+tests/accept/: the merge train runs the acceptance guard) are left out unless the change
+edits them. It runs the whole suite instead when that selection is empty, when it would
+take more than SWEEP_AFFECTED_BROWSER_CAP (10) browser test files (the full sweep is
+cheaper then), or when the change touches the suite's own setup (SWEEP_AFFECTED_FULL
+globs, default conftest.py, pyproject.toml, lock files, Makefile, package.json,
+fixtures, .issuelooper/ and .claude/). The record and the run's
 line say which: "kind": "affected" or "full", and "tests" (the selection).
 
 Every run, green or red, also appends one JSON line to `runs.jsonl` in that directory,
@@ -307,19 +312,27 @@ DEFAULT_FULL = ("conftest.py", "*/conftest.py", "pyproject.toml", "*.lock", "req
                 "package.json", "package-lock.json", "setup.cfg", "tox.ini", "pytest.ini", "*/fixtures/*",
                 ".issuelooper/*", ".claude/*")
 TEST_FILE = re.compile(r"(?:^|/)(?:test_[\w-]+|[\w-]+_test)\.py$")
+DEFAULT_EXCLUDE = ("tests/accept/",)
+UI_FILE = (".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css", ".scss", ".vue", ".svelte")
+BROWSER = re.compile(r"playwright|page\.goto\(|\bPage\b|chromium|def test_\w*\([^)]*\bpage\b")
 
 
 def select_tests(changed: list[str], tracked: list[str], read=None, mapping: str = "",
-                 full_globs: tuple[str, ...] = DEFAULT_FULL) -> tuple[list[str], str]:
+                 full_globs: tuple[str, ...] = DEFAULT_FULL, exclude: tuple[str, ...] = DEFAULT_EXCLUDE,
+                 browser_cap: int = 10) -> tuple[list[str], str]:
     """The test files a change touches (see the module docstring), and why the whole suite
-    must run instead ('' when the selection stands)."""
+    must run instead ('' when the selection stands). In cohort 55 a JS file's name pulled
+    about 13 browser tests under tests/accept into every affected sweep (110 s median,
+    against 48 s for the full sweep then); in run 10b an e2e test that drove the changed
+    code by data-testid only, not naming its file, was left out (#104)."""
     import fnmatch
     read = read or (lambda p: (ROOT / p).read_text(errors="replace"))
     for f in changed:
         if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch(os.path.basename(f), g) for g in full_globs):
             return [], f"it changes {f}, part of the suite's setup"
-    tests = [t for t in tracked if TEST_FILE.search(t)]
-    picked = {f for f in changed if TEST_FILE.search(f) and f in tests}
+    every = [t for t in tracked if TEST_FILE.search(t)]
+    tests = [t for t in every if not t.startswith(tuple(exclude))]
+    picked = {f for f in changed if TEST_FILE.search(f) and f in every}
     texts: dict[str, str] = {}
 
     def text(t: str) -> str:
@@ -329,6 +342,10 @@ def select_tests(changed: list[str], tracked: list[str], read=None, mapping: str
             except OSError:
                 texts[t] = ""
         return texts[t]
+    def browser(t: str) -> bool:
+        return bool(BROWSER.search(text(t)))
+    if any(f.endswith(UI_FILE) and not TEST_FILE.search(f) for f in changed):
+        picked |= {t for t in tests if browser(t)}
     for f in changed:
         if TEST_FILE.search(f):
             continue
@@ -354,6 +371,9 @@ def select_tests(changed: list[str], tracked: list[str], read=None, mapping: str
             picked |= {t for t in targets.split() if t in tracked}
     if not picked:
         return [], "no test is related to the change"
+    pages = [t for t in picked if t not in changed and browser(t)]
+    if len(pages) > browser_cap:
+        return [], f"it would run {len(pages)} browser test files, over {browser_cap}: the full sweep costs less"
     return sorted(picked), ""
 
 
@@ -371,7 +391,13 @@ def affected_selection(head: str | None) -> tuple[list[str], str]:
         except OSError:
             pass
     full = tuple(g.strip() for g in os.environ.get("SWEEP_AFFECTED_FULL", "").split(",") if g.strip()) or DEFAULT_FULL
-    return select_tests(changed, tracked, mapping=mapping, full_globs=full)
+    raw = os.environ.get("SWEEP_AFFECTED_EXCLUDE")
+    exclude = DEFAULT_EXCLUDE if raw is None else tuple(g.strip() for g in raw.split(",") if g.strip())
+    try:
+        cap = int(os.environ.get("SWEEP_AFFECTED_BROWSER_CAP", "") or 10)
+    except ValueError:
+        cap = 10
+    return select_tests(changed, tracked, mapping=mapping, full_globs=full, exclude=exclude, browser_cap=cap)
 
 
 def run_command(command: str, env: dict[str, str] | None = None, sink: list[str] | None = None) -> tuple[int, str]:

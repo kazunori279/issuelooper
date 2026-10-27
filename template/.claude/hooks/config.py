@@ -63,6 +63,8 @@ KEYS = {
     ("sweep", "affected"): "SWEEP_AFFECTED",
     ("sweep", "affected_map"): "SWEEP_AFFECTED_MAP",
     ("sweep", "affected_full"): "SWEEP_AFFECTED_FULL",
+    ("sweep", "affected_exclude"): "SWEEP_AFFECTED_EXCLUDE",
+    ("sweep", "affected_browser_cap"): "SWEEP_AFFECTED_BROWSER_CAP",
     ("sweep", "fast_command"): "POOL_FAST_CHECK_CMD",
     ("sweep", "main_check"): "POOL_MAIN_CHECK",
     ("deploy", "command"): "POOL_DEPLOY_CMD",

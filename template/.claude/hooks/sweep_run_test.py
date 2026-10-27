@@ -272,14 +272,26 @@ def test_affected_selection() -> None:
     texts = {"tests/unit/test_live.py": "from concierge.live import Session\n",
              "tests/unit/test_other.py": "from concierge import live, other\n",
              "tests/e2e/test_issue_7.py": "def test_x(page): ...\n",
-             "tests/e2e/test_feed_scroll.py": "# the feed (feed.js) scrolls\n",
+             "tests/e2e/test_feed_scroll.py": "def test_scroll(page): ...  # feed.js\n",
              "tests/e2e/test_settings.py": "def test_settings(page): page.goto('/#settings-feedback')\n"}
     read = lambda p: texts.get(p, "")
     sel = sweep_run.select_tests
     check("a changed module: the tests that import it, in either form",
           sel(["src/concierge/live.py"], tracked, read), (["tests/unit/test_live.py", "tests/unit/test_other.py"], ""))
-    check("a changed JS file: the tests that name it or its stem, not a longer word containing it",
-          sel(["src/concierge/static/js/feed.js"], tracked, read), (["tests/e2e/test_feed_scroll.py"], ""))
+    check("a changed JS file: every browser test, named or not (run 10b #104 drove it by data-testid)",
+          sel(["src/concierge/static/js/feed.js"], tracked, read),
+          (["tests/e2e/test_feed_scroll.py", "tests/e2e/test_issue_7.py", "tests/e2e/test_settings.py"], ""))
+    acc = tracked + ["tests/accept/test_accept_5.py"]
+    texts["tests/accept/test_accept_5.py"] = "from concierge.live import Session\ndef test_a(page): ...\n"
+    check("tests/accept is left out (the train runs the guard), unless the change edits it",
+          (sel(["src/concierge/live.py"], acc, read)[0], sel(["src/concierge/static/js/feed.js"], acc, read)[0],
+           sel(["tests/accept/test_accept_5.py"], acc, read)[0]),
+          (["tests/unit/test_live.py", "tests/unit/test_other.py"],
+           ["tests/e2e/test_feed_scroll.py", "tests/e2e/test_issue_7.py", "tests/e2e/test_settings.py"],
+           ["tests/accept/test_accept_5.py"]))
+    check("more browser test files than the cap: the full sweep, which costs less",
+          sel(["src/concierge/static/js/feed.js"], tracked, read, browser_cap=2),
+          ([], "it would run 3 browser test files, over 2: the full sweep costs less"))
     check("a changed test file is selected itself", sel(["tests/e2e/test_issue_7.py"], tracked, read)[0],
           ["tests/e2e/test_issue_7.py"])
     check("the project's map adds its tests",
