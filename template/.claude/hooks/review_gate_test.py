@@ -300,6 +300,27 @@ try:
                                                       "    assert subprocess.run(['ruff', 'format', '--check', '.']).returncode == 0"])])
     check("a formatter run as a test: rejected", (rg.review(7, hand=False), record("c7" * 20)["verdict"]), (1, "reject"))
 
+    # Run 10b #47: a rejection told the worker to undo a status label the issue and spec §11
+    # ask for. The reviewer now sees the issue, and the author's answer gets the same head
+    # reviewed again.
+    (GHDIR / "issue-108.json").write_text(json.dumps({"body": "While reconnecting the pill reads Reconnecting "
+                                                              "(R-CONN-3 in spec section 11)."}))
+    label = [("src/i18n.js", ["error: 'Reconnecting',"])]
+    serve(8, "c8" * 20, label)
+    REPLY["value"] = '{"verdict": "reject", "reason": "keep Error", "findings": []}'
+    check("a reject; the prompt carries the issue's text and the rule that the spec wins",
+          (rg.review(8, hand=False), "pill reads Reconnecting" in PROMPTS[-1], "whatever you would prefer" in PROMPTS[-1]),
+          (1, True, True))
+    asked = len(PROMPTS)
+    check("the same head without an answer: the reject stands, judge not asked", (rg.review(8), len(PROMPTS)), (1, asked))
+    (GHDIR / "comments-8.json").write_text(json.dumps([{"body": "<!-- worker -->\nR-CONN-3 asks for Reconnecting.",
+                                                         "created_at": "2099-01-01T00:00:00Z", "user": {"login": "bot"}}]))
+    REPLY["value"] = '{"verdict": "pass", "reason": "the spec asks for it"}'
+    check("the author's answer citing the spec: the same head is reviewed again, with the answer",
+          (rg.review(8), len(PROMPTS), "R-CONN-3 asks for Reconnecting." in PROMPTS[-1]), (0, asked + 1, True))
+    writes()
+    PROMPTS.clear()
+
     prod = [("src/a.py", ["price = item.get('price') or 19.99"])]
     serve(2, "b1" * 20, prod, branch="issue-42")
     REPLY["value"] = '{"verdict": "pass", "reason": "fine"}'

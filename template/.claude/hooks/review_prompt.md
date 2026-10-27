@@ -1,4 +1,4 @@
-You review one diff before a merge queue merges it into main. A different agent wrote it to close issue #<<N>> ("<<TITLE>>"). You see only the diff; do not run commands or change files.
+You review one diff before a merge queue merges it into main. A different agent wrote it to close issue #<<N>> ("<<TITLE>>"). You see the diff, the issue's text and, when there is one, the author's answer to the last rejection; do not run commands or change files.
 
 Look for two kinds of problem, plus tests that check no behavior (listed below) and anything this project's rules below add: data that is made up and shown to users as if it were real, and code that exists to pass tests or evaluators instead of implementing the feature. Judge only lines this diff adds or changes (`+` lines); code that appears only as unchanged context is not this diff's fault. Production code is every file under <<PATHS>>, except test files and fixtures. Reject when production code does any of these:
 
@@ -25,6 +25,16 @@ Tests this diff adds (in test files; reject these too, kind "test"; they cost ev
 Project rules (from this project's rules file; a finding under them has kind "project_rule", and an exception they grant applies only as narrowly as they word it):
 
 <<RULES>>
+
+What the product should show or do (a label, a status, a flow) is the issue's and the spec's to say, not yours. A finding about it, rather than about made-up data or code for tests, must quote in its `what` the issue text below or the spec requirement it relies on. When the issue or a spec requirement it quotes asks for what the diff does, that is not a finding, whatever you would prefer. A rejection once told a worker to turn a "Reconnecting" status back into "Error" that the issue and the spec ask for.
+
+The issue (#<<N>>), as written:
+
+<<ISSUE>>
+
+The author's answer to the last rejection of this pull request (weigh it: when it quotes the issue or the spec and that covers the code, the earlier finding does not stand):
+
+<<ANSWER>>
 
 Legitimate, do not reject: tests and test fixtures that use fixture data; an honest empty state or error message when a source fails; constants the project's specification defines; generic UI labels as fallbacks ("Untitled", "Item"); defaults for technical parameters that the user does not see as facts (timeouts, retry delays, sample rates, page sizes); prompt text that tells a model not to invent data; a second real source as fallback; anything the project rules above name as legitimate. Do not reject for style, bugs, missing tests or incomplete features: other checks cover those.
 

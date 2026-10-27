@@ -244,7 +244,11 @@ GitHub closes the PR), run `python3 .claude/hooks/sweep_locked.py --update-pr <P
 instead of the plain sweep (it rewrites Sweep SHA and the green line in the
 body), and with `[devcheck]` on `python3 .claude/hooks/devcheck.py --script <...> --update-pr <PR>`
 (it rewrites the Live check line), fix the body if a gate named something in it,
-and move the issue to `stage:pr` as above. Never open a second PR.
+and move the issue to `stage:pr` as above. Never open a second PR. A review-gate
+rejection that asks for something the issue or the spec contradicts is answered, not
+obeyed: comment on the PR, signed `<!-- worker -->`, quoting the requirement (the spec
+section or the issue's words), leave the code as it is, and move the issue back to
+`stage:pr`; the next review reads your answer and the spec wins.
 
 That is the whole GitHub footprint of a normal unit: the PR and one label edit.
 

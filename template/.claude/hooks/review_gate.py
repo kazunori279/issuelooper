@@ -766,12 +766,15 @@ def parse_verdict(reply) -> dict:
     }
 
 
-def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "") -> str:
+def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "",
+                 issue_text: str = "", answer: str = "") -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
         "N": str(n or "?"),
         "TITLE": title,
+        "ISSUE": issue_text.strip() or "(not readable)",
+        "ANSWER": answer.strip() or "(none)",
         "PATHS": ", ".join(f"`{p}`" for p in PATHS) or "the repository",
         "RULES": rules.strip() or NO_RULES,
         "LONG": str(LONG_FN),
@@ -831,7 +834,10 @@ def hand_back(repo: str, pr: int, issue: int | None, v: dict) -> None:
         "",
         "Fix this on this branch, re-sweep, push and update the PR body; the review runs "
         "again on the new head. Show an honest empty state or error instead of invented "
-        "data, and remove code that treats test or sample inputs specially.",
+        "data, and remove code that treats test or sample inputs specially. If this rejection "
+        "asks for something the issue or the spec contradicts, do not change the code: answer "
+        "here, signed `<!-- worker -->`, quoting the requirement, and move the issue back to "
+        "stage:pr; the next review reads your answer.",
     ]
     gh_write("POST", f"repos/{repo}/issues/{pr}/comments", {"body": "\n".join(lines)})
     if issue:
@@ -870,6 +876,34 @@ def owner_override(repo: str, pr: int, head: str) -> dict | None:
                 return {"by": (c.get("user") or {}).get("login", ""), "reason": m.group(2).strip()[:300],
                         "comment": c.get("id")}
     return None
+
+
+def issue_body(repo: str, issue: int | None) -> str:
+    """The issue's body, for the reviewer to check a product claim against ('' unread)."""
+    if not issue:
+        return ""
+    try:
+        return str(json.loads(gh_get(f"repos/{repo}/issues/{issue}")).get("body") or "")[:4000]
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired, AttributeError):
+        return ""
+
+
+def author_answer(repo: str, pr: int, since: float) -> str:
+    """The newest worker-signed comment on the PR made after `since` (a rejection's time):
+    the author's answer to it, such as a spec requirement that asks for what was rejected."""
+    try:
+        comments = json.loads(gh_get(f"repos/{repo}/issues/{pr}/comments?per_page=100"))
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+        return ""
+    for c in reversed(comments if isinstance(comments, list) else []):
+        body = str((c or {}).get("body") or "")
+        try:
+            at = claimlib.parse_time(str(c.get("created_at") or "")).timestamp()
+        except ValueError:
+            continue
+        if body.lstrip().startswith("<!-- worker -->") and at > since:
+            return body[:2000]
+    return ""
 
 
 def pr_issue(info: dict) -> int | None:
@@ -922,7 +956,10 @@ def review(pr: int, hand: bool = True) -> int:
     override = owner_override(repo, pr, head)
     if override:
         return done("override", **override)
-    if old and old.get("verdict") in ("reject", "owner"):
+    if old and old.get("verdict") == "owner" or (
+            old and old.get("verdict") == "reject" and not author_answer(repo, pr, float(old.get("t") or 0))):
+        # A reject stands until the author answers it on the PR (run 10b #47: the review
+        # contradicted the spec); then the same head is reviewed again, with the answer.
         print(f"review_gate: PR #{pr} head {head[:12]} already reviewed: {old['verdict']}")
         return 1
     errors = int(old.get("errors") or 0) if old and old.get("verdict") == "error" else 0
@@ -980,6 +1017,9 @@ def review(pr: int, hand: bool = True) -> int:
         return contents[path]
 
     rules, extra = load_rules()
+    last_reject = max((float(r.get("t") or 0) for r in earlier if r.get("verdict") == "reject"), default=0.0)
+    answer = author_answer(repo, pr, last_reject) if last_reject else ""
+    issue_text = issue_body(repo, issue)
     flags = prescan(files, fixture_tokens(config.repo_root()), extra)
     longfn = long_functions(files, content_at)
     # Only logged, never a reason to reject.
@@ -1002,7 +1042,8 @@ def review(pr: int, hand: bool = True) -> int:
         text, cut = cap_diff(shown, MAX_CHARS, prod_limit)
         gone = left_out(shown, text) if cut else []
         prompt = build_prompt(
-            issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone)
+            issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone),
+            issue_text, answer,
         )
         size = len(prompt.encode())
         if size <= PROMPT_BYTES or prod_limit <= MAX_CHARS:
