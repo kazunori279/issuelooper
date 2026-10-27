@@ -755,6 +755,7 @@ if args[:2] == ["issue", "view"]:
     bodies = state.get("comments", {}).get(args[2], [])
     print(json.dumps({
         "labels": [{"name": n} for n in names],
+        "body": state.get("bodies", {}).get(args[2], ""),
         "comments": [{"body": b, "authorAssociation": "NONE" if b.startswith("[stranger]") else "OWNER"}
                      for b in bodies],
     }))
@@ -802,6 +803,7 @@ def with_fake_gh(
     prs: dict | None = None,
     comments: dict | None = None,
     sleep: float = 0,
+    bodies: dict | None = None,
 ):
     """A PATH with a stub `gh` on it, plus the path of its call marker."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="role-guard-gh-"))
@@ -816,6 +818,7 @@ def with_fake_gh(
             "sleep": sleep,
             "prs": prs or {},
             "comments": comments or {},
+            "bodies": bodies or {},
         }
     ))
     called = tmp / "called"
@@ -2291,6 +2294,28 @@ def test_a_product_change_does_not_close_its_issue_on_merge() -> None:
     env, _ = with_fake_gh(labels={"90": ["stage:accept"]}, comments={"90": [
         "<!-- tester -->\naccept-verified: script at 320 px"]})
     check("with it, it may", run("gh issue close 90", role="monitor", extra_env=env)[0], "allow")
+
+
+def test_only_an_acceptance_chore_adds_tests_under_tests_accept() -> None:
+    """Cohort 55: 117 of tests/accept's 138 files were workers' tests of their own issues,
+    and the guard took 14 minutes on every deploy."""
+    head = "4" * 40
+    body = (f"<!-- worker -->\nFixes #90\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
+            "- **Fail-before:** waived - owner ruling\n")
+
+    def merge(files, bodies=None):
+        env, _ = with_fake_gh(prs={"95": {"headRefOid": head, "body": body, "files": files}}, linked={"95": ["90"]},
+                              bodies=bodies)
+        return run("gh pr merge 95 --squash", role="merger", extra_env=env)
+
+    added = [{"path": "tests/accept/fixture_90.json", "changeType": "ADDED"}]  # any file (Gate 1 reads .py)
+    verdict, reason = merge(added)
+    check("a worker's PR that adds a file under tests/accept/ is refused, and told where tests go",
+          (verdict, "tests/e2e" in reason), ("refuse", True))
+    check("the acceptance chore's PR may add them",
+          merge(added, bodies={"90": "<!-- merger -->\n<!-- accept-chore -->\nThe tester verified #5"})[0], "allow")
+    check("changing an existing guard test is not adding one",
+          merge([{"path": "tests/accept/fixture_5.json", "changeType": "MODIFIED"}])[0], "allow")
 
 
 def test_devcheck_survives_a_rebase_that_only_moves_the_branch() -> None:

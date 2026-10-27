@@ -1211,8 +1211,12 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
         log.write_text("")
         pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept_guard="pytest tests/accept"),
                            fetcher=state, spawn=False)
-        pool.accept_chore(logdir, [5, 6, 7])
+        (logdir / "accept/test_accept_8.py").write_text("print(len(open('src/a.py').read().splitlines()))\n")
+        pool.accept_chore(logdir, [5, 6, 7, 8], {8: "Split src/app.js: it is where parallel work collides"})
         created = [x for x in log.read_text().splitlines() if x.startswith("issue create")]
+        check("the chore carries the marker the guard looks for, and asks for lean tests; a split issue is left out",
+              (ccpool.ACCEPT_CHORE in created[0], "never fixed sleeps" in created[0], "never a server started" in created[0],
+               "#8" in created[0]), (True, True, True, False))
         check("the verified scripts become one chore issue, but not one whose test is on main already",
               ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
                "print('five')" in created[0] if created else True),
@@ -3413,6 +3417,37 @@ def test_a_consolidation_chore_when_per_issue_tests_pile_up() -> None:
         (d / "gh.log").write_text("")
         h.pool.consolidation_chore(sha)
         check("not again while one is open", "issue create" in (d / "gh.log").read_text(), False)
+        # Cohort 55: tests/accept reached 138 files and 14 minutes, and the chore counted tests/e2e only.
+        (d / "gh.list").write_text("[]")
+        (d / "gh.log").write_text("")
+        (work / "tests" / "accept").mkdir()
+        for k in range(3):
+            (work / "tests" / "accept" / f"test_accept_{k}.py").write_text("def test_a():\n    pass\n")
+        g("add", "-A")
+        g("commit", "-qm", "accept tests")
+        sha = g("rev-parse", "HEAD")
+        h.pool.cfg.consolidate_at = 0
+        h.pool.guard_seconds = 14 * 60
+        h.pool.consolidation_chore(sha)
+        check("the acceptance guard running 14 minutes files it too",
+              "issue create --title Consolidate per-issue tests: tests/accept takes 14 min" in (d / "gh.log").read_text(), True)
+        (d / "gh.log").write_text("")
+        h.pool.guard_seconds = 0
+        records = d / "records"
+        records.mkdir()
+        xml = records / "run-1.xml"
+        xml.write_text('<testsuites><testsuite><testcase classname="tests.e2e.test_page" time="200"/>'
+                       '<testcase classname="tests.e2e.test_shell" time="150"/>'
+                       '<testcase classname="tests.unit.test_app" time="5"/></testsuite></testsuites>')
+        (records / "runs.jsonl").write_text(json.dumps({"kind": "full", "junit": [str(xml)]}) + "\n")
+        os.environ["SWEEP_RECORD_DIR"] = str(records)
+        try:
+            check("a suite's runtime from the junit of the latest full sweep",
+                  round(h.pool.suite_minutes()["tests/e2e"], 2), round(350 / 60, 2))
+            h.pool.consolidation_chore(sha)
+            check("tests/e2e over five minutes files it", "tests/e2e takes 6 min" in (d / "gh.log").read_text(), True)
+        finally:
+            os.environ.pop("SWEEP_RECORD_DIR", None)
     finally:
         if old is None:
             os.environ.pop("SHARED_REPO_PATH", None)
@@ -3508,8 +3543,8 @@ def test_worker_prompt_says_refs_and_the_checklist() -> None:
           ("changes src/ writes `Refs #5`" in " ".join(text.split()), "# accept-rows: <ids>" in text,
            "lang:ja" in text), (True, True, True))
     guarded = ccpool.worker_prompt(claim, "1", "45m", "u", accept="src/", guard=True)
-    check("with the guard on, an accept test rather than a new e2e file",
-          "tests/accept/test_accept_5.py" in guarded, True)
+    check("with the guard on, workers are told tests/accept is not theirs (cohort 55: 117 of 138 files)",
+          ("Never add a file under tests/accept/" in guarded, "tests/accept/test_accept_5.py" in guarded), (True, False))
     plain = ccpool.worker_prompt(claim, "1", "45m", "u")
     check("without them, neither", ("Refs #5" in plain, "accept-rows" in plain), (False, False))
 

@@ -259,6 +259,32 @@ ACCEPT_EVIDENCE = re.compile(r"(?im)^[ \t>*-]*(?:accept|live)-verified:[ \t]*\S"
 CLOSING_REF = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#(\d+)\b")
 
 
+# Only the chore that turns tester-verified scripts into tests adds files under
+# tests/accept/; its issue carries this marker (ccpool.ACCEPT_CHORE). In cohort 55, 117 of
+# its 138 files were workers' tests of their own issues, and it took 14 minutes.
+ACCEPT_CHORE = "<!-- accept-chore -->"
+ACCEPT_TESTS = "tests/accept/"
+
+
+def is_accept_chore(issues: list[str], repo: str) -> bool:
+    """Whether one of these issues is an acceptance chore (its body has the marker)."""
+    for n in list(dict.fromkeys(issues))[:5]:
+        data = gh_json(["gh", "issue", "view", str(n), "--json", "body"], repo)
+        if isinstance(data, dict) and ACCEPT_CHORE in str(data.get("body") or ""):
+            return True
+    return False
+
+
+def refuse_accept_tests(added: list[str]) -> None:
+    block(
+        f"This pull request adds {', '.join(f'`{p}`' for p in added[:3])} under `{ACCEPT_TESTS}`.\n\n"
+        "That directory holds only the scripts an independent tester verified, added by an acceptance chore "
+        "(an issue the supervisor files with `" + ACCEPT_CHORE + "`). The supervisor runs it on every merge "
+        "batch and deploy, so each file there costs every later merge. Put your test in tests/e2e or "
+        "tests/unit, extending the test of the same flow where there is one."
+    )
+
+
 def accept_on() -> bool:
     """POOL_ACCEPT (on unless 0) with [accept] paths set."""
     return os.environ.get("POOL_ACCEPT", "1").strip().lower() not in ("0", "off", "false", "no") \
@@ -1690,6 +1716,13 @@ def check_pr_merge(command: str) -> None:
             if product:
                 refuse_closing_product_change(", ".join(f"#{n}" for n in closing), product)
 
+        # New files under tests/accept/ come only from an acceptance chore.
+        added = [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
+                 if isinstance(f, dict) and str(f.get("changeType") or "").upper() == "ADDED"
+                 and str(f.get("path") or "").startswith(ACCEPT_TESTS)]
+        if added and not is_accept_chore(pr_issues(data, body), repo):
+            refuse_accept_tests(added)
+
         # Gate 6: the protected paths are the owner's.
         protected = protected_paths()
         touched = [
@@ -2157,12 +2190,13 @@ def pr_issues(data: dict, body: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def branch_paths(where: str | None = None, head: str = "HEAD") -> list[str]:
-    """Files a branch changes since it left origin/main, from the worktree `where` (the
-    guard's own directory when None); [] when git cannot say."""
+def branch_paths(where: str | None = None, head: str = "HEAD", added_only: bool = False) -> list[str]:
+    """Files a branch changes (or only adds) since it left origin/main, from the worktree
+    `where` (the guard's own directory when None); [] when git cannot say."""
     try:
         done = subprocess.run(
-            ["git", *(["-C", where] if where else []), "diff", "--name-only", f"origin/main...{head}"],
+            ["git", *(["-C", where] if where else []), "diff", "--name-only",
+             *(["--diff-filter=A"] if added_only else []), f"origin/main...{head}"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -2175,7 +2209,7 @@ def branch_paths(where: str | None = None, head: str = "HEAD") -> list[str]:
 PR_HEAD = re.compile(r"(?:--head|-H)[=\s]+[\"']?([\w./-]+)")
 
 
-def pr_create_paths(command: str, cwd: str | None) -> list[str]:
+def pr_create_paths(command: str, cwd: str | None, added_only: bool = False) -> list[str]:
     """What the branch of a `gh pr create` changes: from the worktree the command runs
     in, else from `--head`'s branch on origin. The guard runs in its own directory (for
     agy the shared checkout, on main), so `cd <worktree> && gh pr create` was diffed
@@ -2183,9 +2217,9 @@ def pr_create_paths(command: str, cwd: str | None) -> list[str]:
     where = command_dir(command, cwd, ("gh", "pr", "create"))
     shared = get_shared_repo_dir()
     if where and not (shared and os.path.realpath(where) == os.path.realpath(shared)):
-        return branch_paths(where)
+        return branch_paths(where, added_only=added_only)
     m = PR_HEAD.search(command)
-    return branch_paths(shared or None, f"origin/{m.group(1)}") if m else []
+    return branch_paths(shared or None, f"origin/{m.group(1)}", added_only) if m else []
 
 
 FAIL_BEFORE_HOW = (
@@ -2457,6 +2491,11 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
             "the full check suite was measured against the head commit being submitted.\n\n"
             "Run the sweep at the current head and add `- **Sweep SHA:** <HEAD sha>` to the PR body."
         )
+
+    # New files under tests/accept/ come only from an acceptance chore.
+    added = [p for p in pr_create_paths(command, cwd, added_only=True) if p.startswith(ACCEPT_TESTS)]
+    if added and not is_accept_chore([n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body), ""):
+        refuse_accept_tests(added)
 
     # Gate 4 for the acceptance check, before the PR exists rather than at its merge.
     closing_refs = CLOSING_REF.findall(body)

@@ -88,9 +88,13 @@ By default the supervisor merges through a merge train. Each PR's own sweep (the
 worker's, a merger's, the supervisor's re-sweep) then runs only the tests its change
 touches, when the project sets `[sweep] affected = "<command with {tests}>"`
 (`[sweep] affected_map` adds tests for paths; a change it cannot map, or one to an
-`[sweep] affected_full` path, runs the whole suite). A PR that passes the review gate
+`[sweep] affected_full` path, runs the whole suite). A change to a UI file (JS, HTML,
+CSS) selects every browser test, since a page test reaches the change through the page
+rather than by the file's name (run 10b #104). Over `[sweep] affected_browser_cap` (10)
+browser test files, the whole suite runs instead, which costs less. tests/accept is
+left out (`[sweep] affected_exclude`), since the train runs the guard. A PR that passes the review gate
 and the merge gates waits in a queue. The supervisor merges up to `[pool] train_size`
-(4) of them, P0 first, onto `main` in a worktree and runs the whole suite on that tree
+(6), as many as are queued, P0 first, onto `main` in a worktree and runs the whole suite on that tree
 once. Green: they merge in that order, each checked to leave `main` with the tree the
 train ran, and that run is `main`'s check. Red: the failing tests run again on the
 same tree (a pass makes them flaky), then on `main` alone (the same tests running and
@@ -176,8 +180,12 @@ while that issue is open. With the merge train, its full check runs the guard to
 after the sweep and on the same merged tree, and a guard failure is bisected and
 handed back like a sweep failure. The sweep keeps `POOL_MAIN_CHECK_S` and the guard
 gets `[accept] guard_timeout_s` (1200). A deploy of a main the train checked this way
-is not guarded again. Workers write a new issue's acceptance behavior as such a
-test, rather than as a new `tests/e2e/test_issue_<N>.py`.
+is not guarded again. Only the chore's PR may add files under `tests/accept/` (the
+guard checks its issue for the chore's marker); workers keep their own tests in
+tests/e2e or tests/unit. In cohort 55, workers' own tests made 117 of its 138 files
+and the guard took 14 minutes. The chore asks for one compact test per issue: scripted
+mode, the suite's shared app server, one page, no fixed sleeps, no source-text checks.
+Split issues get no guard test.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
@@ -195,8 +203,10 @@ files wait until it lands (`POOL_STARVE_AFTER`, at most `POOL_STARVE_HOLD_S`, 60
 a file that keeps
 conflicting gets an issue to split it (the review gate summarizes the blocks such a
 split moves verbatim, so its diff fits), `POOL_CONSOLIDATE_AT` (40) per-issue test files
-(`POOL_CONSOLIDATE_GLOB`, `tests/e2e/test_issue_*.py`) on `main` get one chore to merge or
-parametrize them by flow (not while one is open), and a deploy that lost a race with another
+under one of `POOL_CONSOLIDATE_GLOB` (`tests/e2e/test_issue_*.py`, `tests/accept/test_accept_*.py`)
+on `main`, or one of their directories taking `POOL_CONSOLIDATE_MIN` (5) minutes to run (from
+the latest full sweep's junit, and for tests/accept the guard's last run), get one chore to
+merge or parametrize them by flow (not while one is open), and a deploy that lost a race with another
 `git fetch` is tried again. Servers and test runs a session left running in its
 scratch paths are killed when it ends. Issues blocked by an open issue (a `Blocked by:` line
 or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the

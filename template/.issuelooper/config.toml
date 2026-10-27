@@ -34,6 +34,10 @@ affected = ""                # SWEEP_AFFECTED: with the merge train on, a PR hea
 affected_map = ""            # SWEEP_AFFECTED_MAP: optional file of "<glob>: <test file> ..." lines adding tests
 affected_full = ""           # SWEEP_AFFECTED_FULL: globs that force the full sweep (default: conftest.py,
                              # pyproject.toml, lock files, Makefile, package.json, fixtures, .issuelooper/, .claude/)
+# affected_exclude = ["tests/accept/"]   # SWEEP_AFFECTED_EXCLUDE: test dirs an affected sweep leaves out unless the
+                             # change edits them (the merge train runs the acceptance guard)
+# affected_browser_cap = 10  # SWEEP_AFFECTED_BROWSER_CAP: a UI change selects every browser test; over this many
+                             # files, the full sweep runs instead
 format = ""                  # SWEEP_FORMAT: the formatter (e.g. "uv run ruff format src tests") a worker's or
                              # merger's sweep runs first on a clean checkout; when it changes files, the sweep
                              # stops and names them, to commit and sweep again. The supervisor's sweeps never run it
@@ -135,7 +139,7 @@ tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
 merge_train = true           # POOL_MERGE_TRAIN: PRs that pass the gates wait in a queue; one run of the whole
                              # suite on main with a batch of them merged decides the batch and is main's check.
                              # Off (or no [sweep] command): each PR merges on its own after the quick check
-train_size = 4               # POOL_TRAIN_SIZE: PRs in one train at most
+train_size = 6               # POOL_TRAIN_SIZE: PRs in one train at most (it takes what is queued, up to this)
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
 

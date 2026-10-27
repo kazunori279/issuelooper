@@ -366,8 +366,9 @@ class Config:
     deploy_grace_s: float = 300
     key_tries: int = 2
     family_max: int = 6
-    consolidate_glob: str = "tests/e2e/test_issue_*.py"  # per-issue test files counted for the chore
-    consolidate_at: int = 40  # that many on main: one chore to merge or parametrize them by flow (0 = off)
+    consolidate_glob: str = "tests/e2e/test_issue_*.py,tests/accept/test_accept_*.py"  # per-issue tests, counted
+    consolidate_at: int = 40  # that many on main under one glob: one chore to merge them by flow (0 = off)
+    consolidate_min: float = 5  # or a glob's directory takes this many minutes to run (0 = off)
     flaky_merges: int = 10  # merges a recorded flaky test has to be fixed or deleted in (0 = no deadline)
     hold_retry_s: float = 60  # a unit that ended held is due again after this, without spending a try
     crash_max: int = 3
@@ -428,7 +429,9 @@ class Config:
     # full sweep of main with a batch of them merged decides the batch; that sweep is also
     # main's check. Off: each PR merges on its own after the merged-tree check.
     merge_train: bool = False
-    train_size: int = 4  # PRs in one train at most
+    # PRs in one train at most; a train takes what is queued, up to this. With the guard in the
+    # train's check each train costs more, and the queue fills while one runs.
+    train_size: int = 6
     # The acceptance check: issues whose PR changed accept_paths (and needs:live issues)
     # wait at stage:accept after the merge for a tester's check (settle_accept).
     accept: bool = False
@@ -490,8 +493,9 @@ class Config:
             family_max=env_int("POOL_FAMILY_MAX", 6),
             hold_retry_s=float(e("POOL_HOLD_RETRY_S", "") or 60),
             flaky_merges=env_int("POOL_FLAKY_MERGES", 10),
-            consolidate_glob=e("POOL_CONSOLIDATE_GLOB", "") or "tests/e2e/test_issue_*.py",
+            consolidate_glob=e("POOL_CONSOLIDATE_GLOB", "") or "tests/e2e/test_issue_*.py,tests/accept/test_accept_*.py",
             consolidate_at=env_int("POOL_CONSOLIDATE_AT", 40),
+            consolidate_min=float(e("POOL_CONSOLIDATE_MIN", "") or 5),
             crash_max=env_int("POOL_CRASH_MAX", 3),
             crash_pause_s=float(e("POOL_CRASH_PAUSE_S", "120")),
             quota_resumes=env_int("POOL_QUOTA_RESUMES", 8),
@@ -543,7 +547,7 @@ class Config:
             gh_rate_wait_s=float(e("POOL_GH_RATE_WAIT_S", "") or 30),
             red_hold=env_flag("POOL_RED_HOLD", True),
             merge_train=env_flag("POOL_MERGE_TRAIN", True) and bool(e("SWEEP_COMMAND", "").strip()),
-            train_size=env_int("POOL_TRAIN_SIZE", 4),
+            train_size=env_int("POOL_TRAIN_SIZE", 6),
             accept=env_flag("POOL_ACCEPT", True) and bool(config.accept_paths()),
             accept_paths=config.accept_paths(),
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
@@ -719,6 +723,9 @@ def failing_tests(out: str) -> list[str]:
 FAST_TIMEOUT = "the fast check timed out after"
 # In a `Flaky test:` issue's body or comment: these tests failed and passed at one commit.
 FLAKY_MARK = "<!-- flaky: failed and passed at one commit -->"
+# In the body of the chore that turns verified acceptance scripts into tests/accept/: the
+# one kind of PR that may add files there (role_guard ACCEPT_CHORE).
+ACCEPT_CHORE = "<!-- accept-chore -->"
 # On the comment that says a recorded flaky test is past its deadline (once per test).
 FLAKY_DEADLINE = "<!-- flaky: past its deadline -->"
 # The machine, not the code: a check that failed this way says nothing about the PR. In
@@ -1303,11 +1310,11 @@ def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live:
         f"\nA pull request that changes {accept} writes `Refs #{n}`, not `Fixes`: after the merge #{n}\n"
         "waits at stage:accept until a tester who did not write it checks it on the deployed build.\n"
         if accept else "")
-    if accept and guard:
+    if guard:
         accept_text += (
-            f"When #{n}'s acceptance is behavior a user drives, write its test as tests/accept/test_accept_{n}.py\n"
-            f"(Playwright, scripted mode) instead of a new tests/e2e/test_issue_{n}.py: the supervisor runs\n"
-            "tests/accept/ against every deploy.\n")
+            "Never add a file under tests/accept/: it holds only the scripts a tester verified, which come in\n"
+            "through acceptance chores. Your tests go in tests/e2e or tests/unit, extending the test of the same\n"
+            "flow where there is one.\n")
     if devcheck and checklist:
         accept_text += (
             "\nYour live check (devcheck.py) covers the acceptance checklist rows your change triggers.\n"
@@ -3095,6 +3102,7 @@ class Pool:
         self.train_red_main: tuple = ()  # (main, heads) of a train that failed only where main fails
         self.guard_sha = ""  # the last build the acceptance guard ran on (guard_due)
         self.guard_checked: set[str] = set()  # mains the train checked with the guard (no second run)
+        self.guard_seconds = 0.0  # how long the acceptance guard last ran (consolidation_chore)
         self.main_green = ""  # the last main whose full check was green
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
@@ -3398,7 +3406,7 @@ class Pool:
             try:
                 if outcome == "ok" or outcome.startswith(("timed out", "failed")):
                     verified = self.settle_accept(u, w.started, outcome == "ok")  # a timed-out one may have settled some
-                    self.accept_chore(w.dir, verified)
+                    self.accept_chore(w.dir, verified, {x["n"]: x.get("title", "") for x in u.info["issues"]})
             finally:
                 with self.lock:
                     for x in u.info["issues"]:
@@ -3752,18 +3760,61 @@ class Pool:
                        f"{self.cfg.flaky_merges} merges: #{n} says so, at P1")
             self.flaky_known = (0.0, self.flaky_known[1])  # its comments changed
 
+    def suite_minutes(self) -> dict[str, float]:
+        """Minutes each test directory took in the latest full sweep with a junit report
+        (sweep/runs.jsonl, [sweep] junit), and tests/accept the acceptance guard's last run."""
+        out: dict[str, float] = collections.defaultdict(float)
+        runs = config.record_dirs("sweep")[0] / "runs.jsonl"
+        try:
+            lines = runs.read_text(errors="replace").splitlines()[-200:]
+        except OSError:
+            lines = []
+        for ln in reversed(lines):
+            try:
+                rec = json.loads(ln)
+            except ValueError:
+                continue
+            if rec.get("kind") != "full" or not rec.get("junit"):
+                continue
+            import xml.etree.ElementTree as ET
+            for path in rec["junit"]:
+                try:
+                    cases = ET.parse(path).getroot().iter("testcase")
+                except (OSError, ET.ParseError):
+                    continue
+                for c in cases:
+                    parts = str(c.get("classname") or "").split(".")
+                    for k in range(1, len(parts)):
+                        out["/".join(parts[:k])] += float(c.get("time") or 0) / 60
+            break
+        if self.guard_seconds:
+            out["tests/accept"] = self.guard_seconds / 60
+        return dict(out)
+
     def consolidation_chore(self, sha: str) -> None:
-        """File one chore when main holds POOL_CONSOLIDATE_AT (40) per-issue test files
-        (POOL_CONSOLIDATE_GLOB): merge or parametrize them by flow. Not while one is open.
-        On cohort 52's final main, 104 of 251 e2e tests were a coverage subset of another,
-        most of them one new test_issue_<N>.py per issue for a flow that already had one."""
-        if not self.cfg.consolidate_at:
+        """File one chore when main holds POOL_CONSOLIDATE_AT (40) files under one of the
+        POOL_CONSOLIDATE_GLOB globs, or when one of their directories takes
+        POOL_CONSOLIDATE_MIN (5) minutes to run: merge or parametrize them by flow. Not while
+        one is open. On cohort 52's final main, 104 of 251 e2e tests were a coverage subset
+        of another; in cohort 55 tests/accept reached 138 files and 14 minutes, and the chore
+        looked at tests/e2e only."""
+        if not self.cfg.consolidate_at and not self.cfg.consolidate_min:
             return
         r = subprocess.run(["git", "-C", str(repo_root()), "ls-tree", "-r", "--name-only", sha],
                            capture_output=True, text=True, timeout=60)
         listed = r.stdout.split() if r.returncode == 0 else []
-        files = [f for f in listed if fnmatch.fnmatch(f, self.cfg.consolidate_glob)]
-        if len(files) < self.cfg.consolidate_at:
+        globs = [g.strip() for g in self.cfg.consolidate_glob.split(",") if g.strip()]
+        why, files = [], []
+        for g in globs:
+            hit = [f for f in listed if fnmatch.fnmatch(f, g)]
+            if self.cfg.consolidate_at and len(hit) >= self.cfg.consolidate_at:
+                why.append(f"{len(hit)} {g} files")
+                files += hit
+        minutes = self.suite_minutes() if self.cfg.consolidate_min else {}
+        for d in dict.fromkeys(os.path.dirname(g) for g in globs):
+            if minutes.get(d, 0) >= self.cfg.consolidate_min > 0:
+                why.append(f"{d} takes {minutes[d]:.0f} min")
+        if not why:
             return
         o = self.gh("issue", "list", "--state", "open", "--search", "Consolidate per-issue tests in:title",
                     "--json", "number,title")
@@ -3774,8 +3825,9 @@ class Pool:
         except ValueError:
             return
         body = (
-            f"<!-- merger -->\nmain at {sha[:8]} has {len(files)} files matching `{self.cfg.consolidate_glob}`, one per "
-            "issue. Many test a flow that another file already tests, and every sweep runs them all.\n\n"
+            f"<!-- merger -->\nmain at {sha[:8]}: {'; '.join(why)}. Per-issue test files pile up (`"
+            + "`, `".join(globs) + "`): many test a flow that another file already tests, and every sweep, merge "
+            "train or deploy runs them all.\n\n"
             "Merge or parametrize them by flow, without losing what they check:\n"
             "- **delete** a test whose steps and assertions another test already covers (a strict subset), and any "
             "test that checks no behavior (a lint or file-layout check, a source-text grep, a page that only loads);\n"
@@ -3783,14 +3835,16 @@ class Pool:
             "- **parametrize** copies of one test across viewports, languages or settings into one test;\n"
             "- **replace** a structural check (a grep of JS or HTML source) with a test that drives the behavior.\n\n"
             "Keep every assertion that is not covered elsewhere. Do it in a few PRs, one flow each, with the sweep "
-            "green after each; give the merged tests flow names (`test_settings.py`, `test_reload.py`)."
+            "green after each; give the merged tests flow names (`test_settings.py`, `test_reload.py`). Slow tests: "
+            "share the suite's app server (one per session, not per file), one browser page per test, and wait on "
+            "what the page shows instead of fixed sleeps."
         )
-        title = f"Consolidate per-issue tests: {len(files)} {self.cfg.consolidate_glob} files"
+        title = f"Consolidate per-issue tests: {'; '.join(why)}"[:200]
         c = self.gh("issue", "create", "--title", title, "--label", "P2", "--label", "stage:triage", "--body", body)
         m = re.search(r"/issues/(\d+)", c.stdout)
-        self.log("consolidate_filed", files=len(files), ok=bool(m))
+        self.log("consolidate_filed", files=len(files), why=why, ok=bool(m))
         if m:
-            self.event(f"filed #{m.group(1)}: consolidate {len(files)} per-issue test files by flow")
+            self.event(f"filed #{m.group(1)}: consolidate per-issue tests by flow ({'; '.join(why)})")
 
     def merges_since(self, at: str) -> int:
         """Commits on origin/main since an ISO time: the merges (each lands as one squash commit)."""
@@ -4101,11 +4155,13 @@ class Pool:
         or pytest finding no test there)."""
         if not self.cfg.accept_guard or not (pathlib.Path(wt) / "tests" / "accept").is_dir():
             return True, ""
+        t0 = time.time()
         try:
             r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.accept_guard_s, cwd=wt,
                                env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, str(exc)
+        self.guard_seconds = time.time() - t0
         out = r.stdout + r.stderr
         if r.returncode == 5 and "no tests ran" in out:
             return True, ""  # tests/accept/ holds no test yet
@@ -4559,16 +4615,19 @@ class Pool:
             self.log("accept_settled", issue=n, verdict=how)
         return verified
 
-    def accept_chore(self, logdir: pathlib.Path, verified: list[int]) -> None:
+    def accept_chore(self, logdir: pathlib.Path, verified: list[int], titles: dict[int, str] | None = None) -> None:
         """One chore issue for the scripts of the issues this acceptance unit verified
         ($LOGDIR/accept/test_accept_<N>.py), with [accept] guard set: a worker turns them
         into tests/accept/test_accept_<N>.py through the usual gates. Not for an issue
-        whose test is already on main (its own worker wrote one)."""
+        whose test is already on main, nor for a split issue: its acceptance is that
+        nothing changed, and in cohort 55 its scripts became six line-count tests."""
         if not self.cfg.accept_guard or not verified:
             return
         self.git("fetch", "-q", "origin", "main")
         found = []
         for n in verified:
+            if str((titles or {}).get(n, "")).startswith("Split "):
+                continue
             path = logdir / "accept" / f"test_accept_{n}.py"
             if path.is_file() and self.git("cat-file", "-e", f"origin/main:tests/accept/test_accept_{n}.py").returncode:
                 found.append((n, path.read_text(errors="replace")))
@@ -4576,11 +4635,19 @@ class Pool:
             return
         names = ", ".join(f"#{n}" for n, _ in found)
         body = (
-            f"<!-- merger -->\nThe tester verified {names} on the deployed build with these scripts. Add each as "
-            "`tests/accept/test_accept_<N>.py`: Playwright, in scripted mode wherever the issue does not need live "
-            "mode, starting the app the way the project's e2e tests do, and keeping every check the script makes. "
-            "The supervisor runs `tests/accept/` against each deploy with no model, and a failure files "
-            "`Regression of #N`; such a test guards what the tester saw work.\n"
+            f"<!-- merger -->\n{ACCEPT_CHORE}\nThe tester verified {names} on the deployed build with these scripts. "
+            "Add each as `tests/accept/test_accept_<N>.py`, one compact test per issue that keeps what the user "
+            "sees the script check:\n"
+            "- scripted mode, unless the issue needs live mode;\n"
+            "- the suite's shared app server (the session fixture the e2e tests use; move it to a conftest the "
+            "accept tests see if needed), never a server started per file;\n"
+            "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
+            "`wait_for_selector`), never fixed sleeps;\n"
+            "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
+            "- well under 100 lines, a few seconds to run.\n\n"
+            "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
+            "`Regression of #N`. In cohort 55 that suite reached 288 tests and 14 minutes: 126 of 138 files started "
+            "their own server and all slept. Only this chore's PR may add files there.\n"
         )
         for n, text in found:
             room = 60000 - len(body)

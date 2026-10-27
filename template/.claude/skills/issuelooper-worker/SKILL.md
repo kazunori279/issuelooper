@@ -90,10 +90,10 @@ approach. Read the way a careful engineer with a short budget does:
 Then write the test. When a test of the same flow already exists, extend or
 parametrize it (a new case, a new viewport or language); otherwise put it **in a
 new file of its own**, named `test_issue_$N.py` in the suite
-`.issuelooper/project.md` names for this kind of change. With `[accept] guard` set,
-a behavior a user drives that is the issue's acceptance goes in
-`tests/accept/test_accept_$N.py` instead (Playwright, scripted mode): the supervisor
-runs `tests/accept/` against every deploy, so it guards the fix from then on. Never append to a shared
+`.issuelooper/project.md` names for this kind of change. Never add a file under
+`tests/accept/`: it holds only the scripts an independent tester verified, added by an
+acceptance chore (an issue the supervisor files), and the guard refuses any other PR
+that adds one; the supervisor runs that directory on every merge batch. Never append to a shared
 catch-all test file: every worker appending to the same file is what makes pull
 requests conflict. A test drives the behavior; the review gate rejects these:
 lint or structure written as a test (`ruff format --check`, Makefile greps, line
