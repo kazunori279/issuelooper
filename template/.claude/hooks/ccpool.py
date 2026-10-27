@@ -5411,27 +5411,61 @@ class Pool:
                 del d[n]
 
     def route(self, issue: dict) -> tuple[str, list]:
-        """(area, files) for one issue: see track_areas."""
+        """(area, files) for one issue: see track_areas. Scores, the area that leads wins
+        (a tie: no area):
+        - a word of the area's `words` in the title, as a whole word: 6;
+        - a requirement id in the text with a prefix in the area's `ids` (R-SET-2 for
+          "R-SET"): 4 per id;
+        - each file the issue's last branch changed in the area: 2;
+        - a path the text names in the area: 3;
+        - each of the issue's names found in the area's files on origin/main: 1, split
+          among the areas it is found in.
+        Files [areas] shared lists count for nothing. Run 12 sent live and tools issues to
+        settings and shell: a strings table (i18n.js), the feed and the stylesheet name every
+        card and tool, so "Route card" (#20) went to settings on one hit in i18n.js."""
         table, n = self.cfg.areas, issue["number"]
-        prev = (self.book.convs.get(n) or {}).get("files") or []
-        if prev:
-            votes = collections.Counter(config.area_of(f, table) for f in prev if config.area_of(f, table))
-            top = votes.most_common(2)
-            if top and (len(top) == 1 or top[0][1] > top[1][1]):
-                return top[0][0], sorted(prev)
-        text = (issue.get("body") or "") + "\n" + issue.get("title", "")
-        hits = name_hits(repo_root(), text, id_pattern=self.cfg.map_id_pattern)
-        named = {m for m in re.findall(r"[\w./-]+\.\w{1,5}\b", text) if config.area_of(m, table)}
+        shared = config.area_shared()
+
+        def area(path: str) -> str:
+            return "" if any(config.path_matches(path, g) for g in shared) else config.area_of(path, table)
+        title = issue.get("title", "")
+        text = (issue.get("body") or "") + "\n" + title
         score: collections.Counter = collections.Counter()
-        for path, found in hits.items():
-            if config.area_of(path, table):
-                score[config.area_of(path, table)] += len(found)
-        for path in named:
-            score[config.area_of(path, table)] += 3
-        files = sorted(named | {p for p, found in hits.items() if len(found) >= 2})
+        for a in table:
+            if any(re.search(rf"(?i)(?<![\w-]){re.escape(w)}(?![\w-])", title) for w in a.get("words") or []):
+                score[a["name"]] += 6
+        try:
+            found = set(re.findall(self.cfg.map_id_pattern or r"\b[A-Z]+-[A-Z]+-\d+\b", text))
+        except re.error:
+            found = set()
+        for rid in found:
+            for a in table:
+                if any(rid.startswith(pfx.rstrip("-") + "-") for pfx in a.get("ids") or []):
+                    score[a["name"]] += 4
+        prev = [f for f in (self.book.convs.get(n) or {}).get("files") or [] if area(f)]
+        for f in prev:
+            score[area(f)] += 2
+        named = {m for m in re.findall(r"[\w./-]+\.\w{1,5}\b", text) if area(m)}
+        for f in named:
+            score[area(f)] += 3
+        hits = name_hits(repo_root(), text, id_pattern=self.cfg.map_id_pattern)
+        by_name: dict[str, set] = collections.defaultdict(set)
+        for path, names in hits.items():
+            if area(path):
+                for t in names:
+                    by_name[t].add(area(path))
+        for t, areas in by_name.items():
+            for a in areas:
+                score[a] += 1 / len(areas)
+        # The files it names, for the hot-file lock: shared ones included (a hot file is often shared).
+        def known(path: str) -> bool:
+            return bool(config.area_of(path, table)) or config.is_hot(path, table)
+        named_all = {m for m in re.findall(r"[\w./-]+\.\w{1,5}\b", text) if known(m)}
+        prev_all = [f for f in (self.book.convs.get(n) or {}).get("files") or [] if known(f)]
+        files = sorted(named_all | set(prev_all) | {p for p, names in hits.items() if len(names) >= 2 and known(p)})
         top = score.most_common(2)
-        area = top[0][0] if top and (len(top) == 1 or top[0][1] > top[1][1]) else ""
-        return area, files
+        best = top[0][0] if top and top[0][1] > 0 and (len(top) == 1 or top[0][1] > top[1][1]) else ""
+        return best, files
 
     def accept_merge_info(self, n: int) -> dict:
         """Issue n's merged PR from GitHub: {"pr", "sha", "live", "t"} ("sha" empty when unread)."""

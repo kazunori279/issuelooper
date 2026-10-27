@@ -2495,6 +2495,63 @@ def test_areas_route_issues_to_their_conversations() -> None:
     check("no [areas]: every claimable issue gets a worker, as before", sorted(u.number for u in off.step()), [1, 2])
 
 
+CONCIERGE_AREAS = [
+    {"name": "live", "paths": ["src/concierge/main.py", "src/concierge/static/js/audio.js"], "hot": ["src/concierge/main.py"],
+     "words": ["live mode", "voice", "microphone"], "ids": ["R-RUN", "R-CONV"]},
+    {"name": "settings", "paths": ["src/concierge/static/js/settings.js", "src/concierge/static/js/i18n.js"], "hot": [],
+     "words": ["setting", "language", "profile"], "ids": ["R-SET", "R-LANG"]},
+    {"name": "cards", "paths": ["src/concierge/static/js/cards/*", "src/concierge/static/css/*"], "hot": [],
+     "words": ["card", "map"], "ids": ["R-WEB", "R-MAP", "R-ROUTE", "R-WX"]},
+    {"name": "shell", "paths": ["src/concierge/static/index.html", "src/concierge/static/style.css",
+                                "src/concierge/static/js/app.js", "src/concierge/static/js/feed.js"],
+     "hot": ["src/concierge/static/js/app.js"], "words": ["layout", "top bar"], "ids": ["R-LAYOUT"]},
+    {"name": "tools", "paths": ["src/concierge/tools/*", "src/concierge/weather.py"], "hot": [], "words": ["tool"], "ids": []},
+]
+
+
+def test_routing_follows_the_words_ids_and_specific_files() -> None:
+    """Run 12 routed #20 (Route card) to settings on one hit in i18n.js, and live and tools
+    issues (#7, #8, #9) to settings and shell, through files that name every card."""
+    hits = {  # what name_hits found on run 12's main at 08:22 UTC
+        7: {"src/concierge/static/css/weather.css": {"weather": 1}, "src/concierge/static/index.html": {"weather": 1},
+            "src/concierge/static/js/cards/weather.js": {"weather": 1}, "src/concierge/static/js/feed.js": {"weather": 1},
+            "src/concierge/static/js/i18n.js": {"weather": 1}, "src/concierge/static/style.css": {"weather": 1}},
+        8: {"src/concierge/static/js/cards/web_search.js": {"R-WEB-1": 1, "web_search": 1},
+            "src/concierge/static/js/feed.js": {"web_search": 1}, "src/concierge/static/js/i18n.js": {"web_search": 1},
+            "src/concierge/static/style.css": {"web_search": 1}},
+        20: {"src/concierge/static/js/i18n.js": {"maps_route": 1}},
+        50: {"src/concierge/static/js/settings.js": {"setting-language": 1}}}
+    issues = [iss(7, ["stage:triage"], title="Live mode: weather tool", body="Give the live agent the `weather` tool."),
+              iss(8, ["stage:triage"], title="Live mode: web search tool", body="Give the live agent the `web_search` tool."),
+              iss(20, ["stage:triage"], title="Route card", body="Render `maps_route` results as a route card (R-ROUTE-1)."),
+              iss(50, ["stage:triage"], title="Japanese labels in the picker", body="R-LANG-1: `setting-language`.")]
+    old = os.environ.get("POOL_AREA_SHARED")
+    os.environ["POOL_AREA_SHARED"] = ("src/concierge/static/js/i18n.js,src/concierge/static/js/feed.js,"
+                                      "src/concierge/static/style.css,src/concierge/static/index.html")
+    real = ccpool.name_hits
+    try:
+        h = Rig(state(issues), areas=CONCIERGE_AREAS, map_id_pattern=r"\bR-[A-Z]+-\d+\b|\bA-\d+\b")
+        h.pool.book.convs[8] = {"files": ["src/concierge/main.py", "src/concierge/tools/__init__.py",
+                                          "src/concierge/tools/web_search.py", "tests/unit/test_issue_8.py"]}
+        by_title = {i["title"]: i["number"] for i in issues}
+        ccpool.name_hits = lambda root, text, ref="origin/main", id_pattern="": hits[
+            next(n for t, n in by_title.items() if t in text)]
+        h.pool.track_areas(h.st)
+        b = h.pool.book
+        check("#20 Route card: cards (title word, R-ROUTE id), not settings through i18n.js", b.issue_area[20], "cards")
+        check("#8 web search tool after a branch in tools/: tools, not settings", b.issue_area[8], "tools")
+        check("#7 live and tools tie: no area, any worker, not shell", b.issue_area[7], "")
+        check("a settings issue by its words and id", b.issue_area[50], "settings")
+        check("the hot-file lock still sees the files it names (shared ones included)",
+              "src/concierge/main.py" in b.issue_files[8], True)
+    finally:
+        ccpool.name_hits = real
+        if old is None:
+            os.environ.pop("POOL_AREA_SHARED", None)
+        else:
+            os.environ["POOL_AREA_SHARED"] = old
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""

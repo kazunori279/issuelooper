@@ -165,9 +165,13 @@ second_at = 3                # POOL_AREA_SECOND_AT: conversation k (from 0) star
 lend_at = 4                  # POOL_AREA_LEND_AT: with every conversation of the area busy, this many waiting there send
                              # the rest to ordinary workers (0 = they wait)
 hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file
+# shared = []                # POOL_AREA_SHARED: files many areas touch (a strings table, the stylesheet); routing
+                             # ignores them
 # [areas.ui]
 # paths = ["src/static/*"]
 # hot = ["src/static/app.js"]
+# words = ["layout", "button"]   # whole words in an issue's title that name this area (they weigh most)
+# ids = ["R-UI"]             # requirement id prefixes ([spec] id_pattern) that belong to it
 
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge

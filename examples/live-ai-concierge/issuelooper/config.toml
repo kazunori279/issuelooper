@@ -142,21 +142,35 @@ conversations = 3            # POOL_AREA_CONVERSATIONS
 second_at = 3                # POOL_AREA_SECOND_AT
 lend_at = 4                  # POOL_AREA_LEND_AT: run 12 queued 9 settings issues behind one conversation
 hot_lock = true              # POOL_AREA_HOT_LOCK
+shared = ["src/concierge/static/js/i18n.js", "src/concierge/static/js/feed.js", "src/concierge/static/style.css",
+          "src/concierge/static/index.html", "src/concierge/static/js/app.js"]
+                             # POOL_AREA_SHARED: files that name every card and tool; routing ignores them (run 12 sent
+                             # "Route card" to settings on one hit in i18n.js). Each area's `words` (whole words in the
+                             # title) and `ids` (requirement prefixes) weigh most
 [areas.live]
 paths = ["src/concierge/main.py", "src/concierge/sessions.py", "src/concierge/memory.py",
          "src/concierge/static/js/audio.js", "src/concierge/static/js/*live*"]
 hot = ["src/concierge/main.py"]
+words = ["live mode", "live session", "voice", "microphone", "mic", "barge-in", "interrupt", "speaking"]
+ids = ["R-RUN", "R-CONV", "R-NF"]
 [areas.settings]
 paths = ["src/concierge/static/js/settings.js", "src/concierge/static/js/i18n.js", "src/concierge/static/js/volume.js",
          "src/concierge/static/css/settings*"]
+words = ["setting", "settings", "language", "japanese", "profile", "profiles", "memory", "remember", "location"]
+ids = ["R-SET", "R-LANG", "R-PROF", "R-MEM"]
 [areas.cards]
 paths = ["src/concierge/static/js/cards/*", "src/concierge/static/css/*"]
+words = ["card", "cards", "map", "maps", "pin", "chip"]
+ids = ["R-WEB", "R-MAP", "R-WX", "R-ROUTE", "R-PLACE", "R-IMG", "R-YT"]
 [areas.shell]
 paths = ["src/concierge/static/index.html", "src/concierge/static/style.css", "src/concierge/static/js/app.js",
          "src/concierge/static/js/feed.js", "src/concierge/static/js/composer.js"]
 hot = ["src/concierge/static/js/app.js", "src/concierge/static/index.html", "src/concierge/static/style.css"]
+words = ["layout", "top bar", "feed", "scroll", "history", "starter", "narrow", "two-column"]
+ids = ["R-LAYOUT", "R-HIST"]
 [areas.tools]
 paths = ["src/concierge/tools/*", "src/concierge/weather.py", "src/concierge/scripted.py"]
+words = ["tool", "tools"]
 
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge

@@ -100,6 +100,7 @@ KEYS = {
     ("areas", "second_at"): "POOL_AREA_SECOND_AT",
     ("areas", "hot_lock"): "POOL_AREA_HOT_LOCK",
     ("areas", "lend_at"): "POOL_AREA_LEND_AT",
+    ("areas", "shared"): "POOL_AREA_SHARED",
     ("review", "enabled"): "REVIEW_GATE",
     ("review", "rules"): "REVIEW_RULES",
     ("review", "production_paths"): "REVIEW_PATHS",
@@ -309,9 +310,17 @@ def areas() -> list[dict]:
         paths = [str(x) for x in (body.get("paths") or []) if str(x).strip()]
         hot = body.get("hot") or []
         hot = paths if hot is True else [str(x) for x in (hot if isinstance(hot, list) else [hot]) if str(x).strip()]
+        words = [str(x).strip() for x in (body.get("words") or []) if str(x).strip()]
+        ids = [str(x).strip() for x in (body.get("ids") or []) if str(x).strip()]
         if paths:
-            out.append({"name": str(name), "paths": paths, "hot": hot})
+            out.append({"name": str(name), "paths": paths, "hot": hot, "words": words, "ids": ids})
     return out
+
+
+def area_shared() -> list[str]:
+    """[areas] shared: globs of files many areas touch (a strings table, the stylesheet, the
+    feed that renders every card); routing ignores them."""
+    return [x.strip() for x in os.environ.get("POOL_AREA_SHARED", "").split(",") if x.strip()]
 
 
 def area_of(path: str, table: list[dict] | None = None) -> str:
