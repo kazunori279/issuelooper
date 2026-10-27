@@ -1817,12 +1817,14 @@ UNWALKED = {".git", ".venv", "node_modules", "__pycache__"}
 OTHER_ROOT = re.compile(r"^issuelooper-.+-[0-9a-f]{8}$")
 
 
-def prune_scratch(root: pathlib.Path | None = None, stale_s: float = 2 * 86400) -> list[str]:
+def prune_scratch(root: pathlib.Path | None = None, stale_s: float = 2 * 86400,
+                  others: bool | None = None) -> list[str]:
     """Remove what earlier runs left in scratch, once it is older than stale_s (nothing
     in it changed since): this repository's session worktrees and files (wrk-, mrg-,
-    tst-, main-, fresh-), its live-check and UX output, and, when its scratch root is a
-    default one (issuelooper-<name>-<hash> in the temporary directory), the other default
-    roots beside it. A stale worktree that still holds work not on its remote (a
+    tst-, main-, fresh-), its live-check and UX output, and, only with others
+    (POOL_PRUNE_OTHER_ROOTS, off by default) and a default scratch root
+    (issuelooper-<name>-<hash> in the temporary directory), the other default roots
+    beside it: run 11's start removed 36 roots of other loops on the machine. A stale worktree that still holds work not on its remote (a
     supervisor that crashed never saved it) leaves <wt>-rescued.diff first, unless one
     is there; a rescued diff itself goes only once stale. The records the merge gates
     read (sweep/, review/, devcheck/*.json) stay. Run when nothing of this repository's
@@ -1877,7 +1879,9 @@ def prune_scratch(root: pathlib.Path | None = None, stale_s: float = 2 * 86400) 
                         remove(p)
         subprocess.run(["git", "-C", str(repo_root()), "worktree", "prune"], capture_output=True)
     parent = root.parent
-    if OTHER_ROOT.match(root.name) and parent.is_dir():
+    if others is None:
+        others = env_flag("POOL_PRUNE_OTHER_ROOTS")
+    if others and OTHER_ROOT.match(root.name) and parent.is_dir():
         for p in parent.iterdir():
             if (OTHER_ROOT.match(p.name) and p.is_dir() and p.resolve() != root.resolve()
                     and now - newest(p) > stale_s):

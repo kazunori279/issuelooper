@@ -4117,6 +4117,8 @@ def test_scratch_from_earlier_runs_is_pruned() -> None:
             (r / "sweep").mkdir(parents=True)
         age(stale_root)
         ccpool.prune_scratch(root)
+        check("other repositories' roots are left alone by default (run 11 removed 36)",
+              (stale_root.exists(), busy_root.exists()), (True, True))
         left = sorted(p.name for p in root.iterdir())
         check("fresh work stays: a dirty worktree, a rescued diff, a session directory; records stay",
               [n for n in left if n in ("wrk-1-5-wt", "wrk-4-8-wt-rescued.diff", "main-abc", "sweep", "review")],
@@ -4133,7 +4135,8 @@ def test_scratch_from_earlier_runs_is_pruned() -> None:
         check("old live-check and UX output goes, new stays",
               ((root / "devcheck/out/old").exists(), (root / "devcheck/out/new").exists(), (root / "ux/old").exists()),
               (False, True, False))
-        check("another repository's root untouched for two days goes, a busy one stays",
+        ccpool.prune_scratch(root, others=True)
+        check("with POOL_PRUNE_OTHER_ROOTS, another repository's root untouched for two days goes, a busy one stays",
               (stale_root.exists(), busy_root.exists()), (False, True))
         check("git forgets the removed worktrees", sum(f"{root}/wrk-" in ln for ln in g("worktree", "list").splitlines()), 1)
         custom = d / "scratch"

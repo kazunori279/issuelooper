@@ -102,6 +102,7 @@ KEYS = {
     ("pool", "tester_timeout"): "POOL_TIMEOUT_TESTER",
     ("pool", "tester_port_base"): "TST_PORT",
     ("pool", "run_dir"): "ISSUELOOPER_RUN",
+    ("pool", "prune_other_roots"): "POOL_PRUNE_OTHER_ROOTS",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",
     ("guard", "protected_paths"): "GUARD_PROTECTED_PATHS",
     ("guard", "background_check"): "GUARD_BACKGROUND",
