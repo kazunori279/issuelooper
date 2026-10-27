@@ -262,6 +262,23 @@ def test_an_author_resolving_its_pr_stays_on_it() -> None:
           run("git push origin HEAD:issue-8", role="worker", host=AGY)[0], "allow")
 
 
+def test_sessions_do_not_read_the_loops_logs() -> None:
+    # Run 12: UX run 3 copied the previous run's score from its report; run 4 grepped run 2's stream.
+    env = {"LOGDIR": "/repo/.issuelooper/run/pool/0182-tester-ux_abc"}
+    for cmd in ('find .issuelooper/run -name "*ux_report*"',
+                'grep -m 5 journeys.py "$SHARED_REPO_PATH/.issuelooper/run/pool/0096-tester-ux_df2/session.jsonl"',
+                'tail -n 30 "$ISSUELOOPER_TMP/guard.last"', 'ls -la "$ISSUELOOPER_TMP/guard-runs"'):
+        check(f"a tester reading {cmd!r} is refused", run(cmd, role="tester", host=AGY, extra_env=env)[0], "refuse")
+    for cmd in ("cat > $LOGDIR/ux_report.md <<EOF\nScore: provisional\nEOF",
+                "head -3 /repo/.issuelooper/run/pool/0182-tester-ux_abc/ux_report.md",
+                "uv run python ux/journeys.py --port 8021 --out $SHARED_REPO_PATH/.ux/abc"):
+        check(f"its own $LOGDIR and the app are fine: {cmd!r}", run(cmd, role="tester", host=AGY, extra_env=env)[0],
+              "allow")
+    check("the monitor reads the logs as before", run("tail .issuelooper/run/pool/pool.jsonl", role="monitor")[0], "allow")
+    check("off with GUARD_LOOP_LOGS=0",
+          run("tail .issuelooper/run/pool/pool.jsonl", role="worker", extra_env={"GUARD_LOOP_LOGS": "0"})[0], "allow")
+
+
 def test_arguments_are_refused_at_once() -> None:
     # `role_guard.py check-pr 98` used to wait on stdin until a watchdog killed it.
     proc = subprocess.Popen([sys.executable, str(GUARD), "check-pr", "98"], stdin=subprocess.PIPE,

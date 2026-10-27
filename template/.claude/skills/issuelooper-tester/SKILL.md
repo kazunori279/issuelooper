@@ -86,8 +86,10 @@ only, as a person would: at the viewports and languages that apply, across a rel
 with screenshots after each step, read through contact sheets. Judge them on the UX
 run's scale (step 2). File at most the number your prompt gives, each checked for a
 duplicate as in UX run step 3, labelled `area:<name>` when it lies in one of the areas
-your prompt lists. Write `$LOGDIR/explore_report.md` as you go: its first line
-`Score: N/100` for this focus, then what you checked and each finding's disposition.
+your prompt lists, titled `Explore (<focus in two or three words>): <what the user
+sees>`. Write `$LOGDIR/explore_report.md` as you go: its first line `Score: provisional`
+until you have walked the focus, then `Score: N/100` for this focus, then what you
+checked and each finding's disposition.
 Stop the server and remove `$T`.
 
 ## Acceptance check
@@ -257,7 +259,7 @@ gh issue list --state all --search "<two or three key words> in:title" --json nu
 ```
 
 Before the first search, list the open UX issues once
-(`gh issue list --state open --search "UX: in:title" --limit 200 --json number,title`)
+(`gh issue list --state open --search "UX OR Explore in:title" --limit 200 --json number,title`)
 and compare what each describes the user seeing, not its wording: most repeats
 are the same symptom under another title.
 
@@ -288,11 +290,15 @@ A worker turns the steps into a failing test, so make them exact.
 
 Write `$LOGDIR/ux_report.md`. Its first line is `Score: N/100`: N is the 0-100
 score a user would give the app, on the scale in step 2; the supervisor reads that
-line and the owner follows it from run to run. Write it first right after the journeys
-ran (`Score: N/100 (provisional)`), and update it as you read and file: a run cut short
-(a quota wait, the time limit) still reports. Near the end of your budget the supervisor
+line and the owner follows it from run to run. Write the report at the start with the
+first line `Score: provisional`, and update it as you read and file: a run cut short (a
+quota wait, the time limit) still reports what it saw. Replace that line with
+`Score: N/100` only after the journeys and your probes ran and you read the screenshots;
+the supervisor logs nothing for a provisional line, and a number written before that
+(the previous run's, say) is not a score. Near the end of your budget the supervisor
 sends you a turn that asks for the report now; do that before anything else. Do not
-read the loop's own code or sleep-poll: neither is part of a UX run. Then the commit, the journeys you
+read the loop's own code or logs (`.issuelooper/run`, other sessions' reports; the guard
+refuses them), and do not sleep-poll: none of that is part of a UX run. Then the commit, the journeys you
 ran (and which you added or changed this run), every finding with its disposition
 (`filed #N`, `already #N`, `not filed: <why>`), and anything you could not test.
 

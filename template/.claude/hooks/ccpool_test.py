@@ -2340,7 +2340,25 @@ def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
     rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
     check("a run without a report is logged as such, with how it ended",
           (rec["score"], rec["missing"], rec["outcome"]), (None, "no report in ux_report.md", "timed out after 60m"))
-    check("a provisional score counts", ccpool.SCORE_LINE.search("Score: 64/100 (provisional)").group(1), "64")
+    for text, want in (("Score: 58/100 (provisional)\n", (None, "only a provisional score")),
+                       ("Score: provisional\n\nJourneys running.", (None, "only a provisional score")),
+                       ("# UX run\n**Score:** 61 / 100\n", (61, "")), ("No score here.\n", (None, "no `Score: N/100` line"))):
+        (w.dir / "ux_report.md").write_text(text)
+        check(f"run 12 copied the previous 58 as a provisional score: {text[:24]!r}",
+              ccpool.score_detail(w.dir / "ux_report.md"), want)
+    pool.finished(w, "timed out after 60m")
+    rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
+    check("a provisional score is logged as no score, with why", (rec["score"], rec["missing"]),
+          (None, "no `Score: N/100` line in ux_report.md"))
+    (w.dir / "ux_report.md").write_text("Score: 58/100 (provisional)\n")
+    pool.finished(w, "timed out after 60m")
+    rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
+    check("... and the reason says provisional", (rec["score"], rec["missing"]),
+          (None, "only a provisional score in ux_report.md"))
+    prompt = ccpool.tester_prompt(ccpool.Unit("tester", "ux", "ux:a", "f", None, (2,), {"sha": "a" * 40}), 8021, "60m",
+                                  previous={"score": 58, "sha": "b" * 40})
+    check("the prompt asks for `Score: provisional` until the journeys ran, and never the previous score",
+          ("`Score: provisional`" in prompt, "never copy it" in prompt, ".issuelooper/run" in prompt), (True, True, True))
 
 
 def test_explorers_fill_the_idle_slots() -> None:

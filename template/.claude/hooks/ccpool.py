@@ -1848,6 +1848,27 @@ SCORE_LINE = re.compile(r"(?i)\bscore\b\W*(\d{1,3})\s*/\s*100\b")
 REPORTS = {"ux": "ux_report.md", "spec": "spec_report.md", "explore": "explore_report.md"}
 
 
+PROVISIONAL = re.compile(r"(?i)\bprovisional\b|\bnot (?:yet )?(?:measured|scored)\b")
+
+
+def score_detail(report: pathlib.Path) -> tuple[int | None, str]:
+    """(N from the report's final `Score: N/100`, '') or (None, why): no report, only a
+    provisional score (a score line that says `provisional`, or `Score: provisional`), or
+    no score line. Run 12: UX runs 3-5 wrote "Score: 58/100 (provisional)", the previous
+    run's score, before running anything; all three timed out and 58 was logged for each."""
+    try:
+        lines = report.read_text(errors="replace").splitlines()[:10]
+    except OSError:
+        return None, "no report"
+    for ln in lines:
+        if re.search(r"(?i)\bscore\b", ln) and PROVISIONAL.search(ln):
+            return None, "only a provisional score"
+        m = SCORE_LINE.search(ln)
+        if m and int(m.group(1)) <= 100:
+            return int(m.group(1)), ""
+    return None, "no `Score: N/100` line"
+
+
 def ux_score(report: pathlib.Path) -> int | None:
     """N from a UX report's `Score: N/100` (asked for on its first line; looked for in the
     first ten), or None when it has none."""
@@ -1931,8 +1952,10 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             f"File at most {u.info.get('issues', 3)} new findings, each checked for a duplicate as in UX run step 3, "
             "signed `<!-- tester -->`"
             + (f", labelled `area:<name>` when it lies in one of these areas: {', '.join(areas)}" if areas else "")
-            + ". Write $LOGDIR/explore_report.md: its first line `Score: N/100` for this focus, written as soon as "
-            "you have looked (provisional) and updated as you go, then what you checked and each finding's "
+            + ". Title each `Explore (<the focus in two or three words>): <what the user sees>`, so it reads apart "
+            "from a UX run's. Write $LOGDIR/explore_report.md now, its first line `Score: provisional`, and update "
+            "it as you go; once you have walked the focus, replace that line with `Score: N/100` for this focus "
+            "(only then: a number before that is not a score), then what you checked and each finding's "
             "disposition (`filed #N`, `already #N`, `not filed: <why>`)."
             + rules
         )
@@ -1964,10 +1987,13 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         f"({PROJECT} says where it is) as a harsh UX reviewer, and file at most five new "
         "findings. Write the run's report to $LOGDIR/ux_report.md. Its first line must be "
         "`Score: N/100`, N being the 0-100 score a user would give the app on the skill's scale; "
-        "the supervisor reads that line. Write it as soon as the first journeys have run (a provisional "
-        "score) and update it as you go, so a run cut short still reports."
-        + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: a score 10 or "
-           "more above it needs what the skill's step 4 asks."
+        "the supervisor reads that line. Write the report at the start with the first line `Score: provisional` "
+        "and update it as you go, so a run cut short still reports what it saw; replace that line with "
+        "`Score: N/100` only after the journeys and your probes have run and you have read the screenshots. "
+        "The loop's logs (.issuelooper/run, other sessions' reports) are not part of your unit: never read "
+        "them, and never take a score from them."
+        + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: never copy it; "
+           "a score 10 or more above it needs what the skill's step 4 asks."
            if previous and previous.get("score") is not None else "")
         + rules
     )
@@ -2502,8 +2528,10 @@ class Session(threading.Thread):
                             soft = hard = time.time() + budget
                             resume(conv, "wrap-up", (
                                 f"Time is almost up. Within the next few minutes write $LOGDIR/{REPORTS[self.unit.kind]} "
-                                "as it stands, its first line `Score: N/100` on what you saw so far, file what is "
-                                "ready to file (within your limit), stop every server you started, and stop."
+                                "as it stands: its first line `Score: N/100` only if you ran the journeys (or walked "
+                                "your focus) and read the screenshots, else `Score: provisional` and what you did not "
+                                "get to. File what is ready to file (within your limit), stop every server you "
+                                "started, and stop."
                                 if self.unit.kind in REPORTS else
                                 f"Time is almost up. Post your verdict comment on #{self.unit.number} now, as your "
                                 f"prompt says (`{AUTHOR_ACCEPT}` and the verdict line), stop the server, and stop."
@@ -4177,7 +4205,7 @@ class Pool:
         and the dashboard. 7 of 10 reports in one run had none, so a run's score could not
         be followed. Only whole-app UX runs make the dashboard's series."""
         name = REPORTS[w.unit.kind]
-        score = ux_score(w.dir / name)
+        score, why = score_detail(w.dir / name)
         kind = "ux_score" if w.unit.kind == "ux" else "explore_score"
         rec = {"t": round(self.clock(), 1), "sha": str(w.unit.info.get("sha", ""))[:12], "score": score}
         if w.unit.kind == "ux":
@@ -4185,7 +4213,6 @@ class Pool:
                 self.ux_scores = (self.ux_scores + [rec])[-20:]
         extra = {"focus": w.unit.info.get("focus")} if w.unit.kind == "explore" else {}
         if score is None:
-            why = "no report" if not (w.dir / name).exists() else "no `Score: N/100` line"
             self.log(kind, session=w.seq, sha=rec["sha"], score=None, missing=f"{why} in {name}",
                      outcome=outcome, **extra)
             self.event(f"{w.unit.kind} run {w.seq} at {rec['sha']} ended {outcome or 'without a score'}: {why} in {name}")

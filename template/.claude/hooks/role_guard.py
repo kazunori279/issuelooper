@@ -901,6 +901,31 @@ def background_check(command: str) -> None:
         )
 
 
+# The loop's own logs: the supervisor's run directory (other sessions' streams and reports)
+# and the guard's records. Run 12: UX run 3 found the previous run's ux_report.md there and
+# copied its score; run 4 spent its time grepping run 2's session.jsonl and guard.last.
+LOOP_LOGS = re.compile(r"\.issuelooper/run\b|\bguard-runs\b|\bguard\.last\b|\bpool\.jsonl\b|\bsession\.jsonl\b")
+
+
+def loop_logs_check(command: str) -> None:
+    """A worker, merger or tester does not read the loop's logs; its own $LOGDIR is fine."""
+    if os.environ.get("GUARD_LOOP_LOGS", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    text = command
+    own = os.environ.get("LOGDIR", "").strip()
+    for mine in [own, os.path.realpath(own) if own else "", "${LOGDIR}", "$LOGDIR"]:
+        if mine:
+            text = text.replace(mine, "")
+    m = LOOP_LOGS.search(text)
+    if m:
+        block(
+            f"This reads the loop's own logs (`{m.group(0)}`): other sessions' streams, reports and the guard's "
+            "records. They are not part of your unit, and what they say (an earlier score, another session's "
+            "steps) is not evidence about the app or your issue. Write your own files under `$LOGDIR`, and work "
+            "from your prompt, the issue, the repository and the running app."
+        )
+
+
 # One `git` call: its global options (-C <dir>, -c <k=v>, --long[=v]) and its subcommand.
 GIT_CALL = re.compile(
     r"""\bgit((?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)|--[\w-]+(?:=\S+)?))*)\s+([a-z][\w-]*)"""
@@ -2749,6 +2774,8 @@ def main(raw: str) -> None:
     kill_by_pattern_check(command)
     if role:
         background_check(command)
+    if role in ("worker", "merger", "tester"):
+        loop_logs_check(command)
     if role in ROLES:
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
         git_checkout_check(command, cwd or None)
