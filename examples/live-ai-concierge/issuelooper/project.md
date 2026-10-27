@@ -23,6 +23,10 @@ comment on the issue for the owner.
   fixtures `server_url` and `page` in `tests/e2e/conftest.py` start the app in
   scripted mode on a free port). Everything else: `tests/unit/test_issue_<N>.py`.
 - Never append to `test_page.py`, `test_shell.py` or `test_app.py`.
+- The server keeps conversations (REQUIREMENTS §6), and every test on `server_url` shares
+  them. A test that needs no earlier conversation (an empty feed after a reload, a first
+  visit, "Clear conversation" then reload) uses `fresh_server_url`: an app of its own with
+  an empty sessions database. Acceptance guards (tests/accept/) do the same.
 - One file: `uv run pytest -q <file>`. Lint: `uv run ruff check src tests`.
 
 ## Run the app on a port

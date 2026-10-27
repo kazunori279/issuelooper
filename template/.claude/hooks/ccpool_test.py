@@ -1402,6 +1402,8 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
                "print('five')" in created[0] if created else True),
               (["issue create --title Acceptance tests for #6"], True, False))
+        check("the chore asks each guard to make its own fresh state (cohort 60's test_accept_38)",
+              ("a fresh state the test makes itself" in created[0], "never an assumption that" in created[0]), (True, True))
         check("filed as a chore at P1 (run 11: four sat unclaimed at P2, one without type:chore)",
               ("--label type:chore --label P1 --label stage:triage" in created[0]), True)
         log.write_text("")

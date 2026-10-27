@@ -101,7 +101,12 @@ requests conflict. A test drives the behavior; the review gate rejects these:
 lint or structure written as a test (`ruff format --check`, Makefile greps, line
 counts of "split into modules"), greps of JS or HTML source text, and
 presence-only tests (`test_page_loads`). Use the suite's existing fixtures; add
-to a conftest only what several tests need. The cases test the issue's
+to a conftest only what several tests need. Each test starts from a state it makes
+itself (its own browser context; a fresh server-side conversation or user when the
+app keeps them, through the fixture `.issuelooper/project.md` names), never from
+another test's leftovers. When your issue changes behavior an acceptance guard in
+`tests/accept/` asserts, update that guard and add `Guard change: <path>: <why>` to
+the PR body (the review gate checks it against the issue and the spec). The cases test the issue's
 acceptance, not what the code does now. For a report of something a user saw, a
 case reproduces what the user did and asserts the symptom the report names, so it
 fails if that symptom comes back. Never change what an existing test expects (if

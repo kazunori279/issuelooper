@@ -130,7 +130,10 @@ accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en 
 4. For an issue you verified, save the script as `$LOGDIR/accept/test_accept_<N>.py`.
    It becomes the issue's regression test, so keep only what a user sees: no reads of
    source files, line counts or file structure (a split issue's script is not saved
-   at all), one page, waits on what the page shows rather than fixed sleeps.
+   at all), one page, waits on what the page shows rather than fixed sleeps. It starts
+   from a fresh state it makes itself: its own browser context, and a fresh server-side
+   conversation or user when the app keeps them (`.issuelooper/project.md` names the
+   fixture); never another test's leftovers or an empty history taken for granted.
 
 Write `$LOGDIR/accept_report.md`, one line per issue: its number and verdict
 (`verified`, `failed: <what>`, `blocked: <what>`). Then stop the server and remove `$T`.

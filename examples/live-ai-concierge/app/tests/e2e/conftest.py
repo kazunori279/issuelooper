@@ -19,12 +19,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="session")
-def server_url(tmp_path_factory):
+def _serve(db_dir: pathlib.Path, own_db: bool = False):
+    """Start the app on a free port, its sessions database in db_dir (own_db: whatever
+    SESSIONS_DB says); yield its URL."""
     port = _free_port()
     env = dict(os.environ)
     env.setdefault("CONCIERGE_SCRIPT", str(REPO / "spec/fixtures/script.json"))
-    env.setdefault("SESSIONS_DB", str(tmp_path_factory.mktemp("db") / "sessions.db"))
+    if own_db:
+        env["SESSIONS_DB"] = str(db_dir / "sessions.db")
+    else:
+        env.setdefault("SESSIONS_DB", str(db_dir / "sessions.db"))
     # The Maps key accepts only fixed origins, never this random port, so the suite runs
     # the key-less path (R-MAP-3). Set here, not removed: load_dotenv() keeps a value
     # that is already in the environment, even an empty one.
@@ -58,6 +62,21 @@ def server_url(tmp_path_factory):
     except subprocess.TimeoutExpired:
         stop(signal.SIGKILL)
         proc.wait(timeout=10)
+
+
+@pytest.fixture(scope="session")
+def server_url(tmp_path_factory):
+    """One app for the whole suite: tests share its conversations (REQUIREMENTS §6)."""
+    yield from _serve(tmp_path_factory.mktemp("db"))
+
+
+@pytest.fixture
+def fresh_server_url(tmp_path):
+    """An app of this test's own, with an empty sessions database: for a test that needs
+    no earlier conversation (an empty feed after a reload, a first visit). The server owns
+    conversation identity, so on the shared server a reload resumes whatever the tests
+    before it said."""
+    yield from _serve(tmp_path, own_db=True)
 
 
 @pytest.fixture(scope="session")
