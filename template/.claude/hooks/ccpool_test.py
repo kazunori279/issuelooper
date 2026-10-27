@@ -1246,6 +1246,8 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
                "print('five')" in created[0] if created else True),
               (["issue create --title Acceptance tests for #6"], True, False))
+        check("filed as a chore at P1 (run 11: four sat unclaimed at P2, one without type:chore)",
+              ("--label type:chore --label P1 --label stage:triage" in created[0]), True)
         log.write_text("")
         pool.cfg.accept_guard = ""
         pool.accept_chore(logdir, [6])
@@ -3485,7 +3487,7 @@ def test_a_consolidation_chore_when_per_issue_tests_pile_up() -> None:
         h.pool.consolidation_chore(sha)
         log = (d / "gh.log").read_text()
         check("at the threshold: one chore, P2, with what to delete, merge, parametrize or replace",
-              ("issue create --title Consolidate per-issue tests: 3 tests/e2e/test_issue_*.py files --label P2" in log,
+              ("issue create --title Consolidate per-issue tests: 3 tests/e2e/test_issue_*.py files --label type:chore --label P2" in log,
                all(w in log for w in ("**delete**", "**merge**", "**parametrize**", "**replace**"))), (True, True))
         (d / "gh.list").write_text(json.dumps([{"number": 300, "title": "Consolidate per-issue tests: 3 files"}]))
         (d / "gh.log").write_text("")

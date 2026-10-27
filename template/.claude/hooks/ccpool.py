@@ -449,6 +449,9 @@ class Config:
     accept_units: int = 2  # acceptance units side by side at most (c55: one at a time fell an hour behind)
     accept_guard_s: float = 1200  # [accept] guard's time limit, in the train's check and after a deploy
     accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
+    # The priority acceptance chores are filed at. Run 11: four chores sat unclaimed at P2
+    # behind the P1 queue (one also lacked type:chore, which the monitor added to the rest).
+    accept_chore_priority: str = "P1"
     gh_rate_wait_s: float = 30  # first wait after GitHub's secondary rate limit refused a gh call; doubles, 3 retries
     repo: str = ""
     review_cmd: str = f"{sys.executable} {HERE / 'review_gate.py'}"
@@ -567,6 +570,7 @@ class Config:
             accept_units=env_int("POOL_ACCEPT_UNITS", 2),
             accept_guard_s=float(e("POOL_ACCEPT_GUARD_S", "") or 1200),
             accept_guard=e("ACCEPT_GUARD", "").strip(),
+            accept_chore_priority=e("POOL_ACCEPT_CHORE_PRIORITY", "").strip() or "P1",
             repo=e("GH_REPO", ""),
             review_cmd=e("POOL_REVIEW_CMD", f"{sys.executable} {HERE / 'review_gate.py'}"),
             guard_cmd=e("POOL_GUARD_CMD", f"{sys.executable} {HERE / 'role_guard.py'}"),
@@ -3993,7 +3997,7 @@ class Pool:
             "what the page shows instead of fixed sleeps."
         )
         title = f"Consolidate per-issue tests: {'; '.join(why)}"[:200]
-        c = self.gh("issue", "create", "--title", title, "--label", "P2", "--label", "stage:triage", "--body", body)
+        c = self.file_issue(title, ["type:chore", "P2", "stage:triage"], body)
         m = re.search(r"/issues/(\d+)", c.stdout)
         self.log("consolidate_filed", files=len(files), why=why, ok=bool(m))
         if m:
@@ -4831,12 +4835,23 @@ class Pool:
                 continue
             body += (f"\n### #{n}\n\n```python\n" + text[: min(12000, room - 200)].replace("```", "'" * 3)
                      + "\n```\n")
-        r = self.gh("issue", "create", "--title", f"Acceptance tests for {names}"[:200], "--label", "P2",
-                    "--label", "stage:triage", "--body", body)
+        r = self.file_issue(f"Acceptance tests for {names}", ["type:chore", self.cfg.accept_chore_priority,
+                                                              "stage:triage"], body)
         m = re.search(r"/issues/(\d+)", r.stdout)
         self.log("accept_chore", issues=[n for n, _ in found], ok=bool(m))
         if m:
             self.event(f"filed #{m.group(1)}: turn the acceptance scripts of {names} into tests/accept/ guards")
+
+    def file_issue(self, title: str, labels: list[str], body: str) -> subprocess.CompletedProcess:
+        """`gh issue create` with these labels; a label the repository lacks (one installed
+        before it existed) is dropped and the issue filed without it, rather than not at all."""
+        def create(names: list[str]) -> subprocess.CompletedProcess:
+            return self.gh("issue", "create", "--title", title[:200], *[a for lab in names for a in ("--label", lab)],
+                           "--body", body)
+        r = create(labels)
+        if r.returncode != 0 and re.search(r"(?i)label", r.stderr) and "not found" in r.stderr.lower():
+            r = create([lab for lab in labels if lab.startswith(("stage:", "P"))])
+        return r
 
     def guard_due(self, st: dict) -> None:
         """Run [accept] guard (tests/accept/) on each new build, the deployed sha or main

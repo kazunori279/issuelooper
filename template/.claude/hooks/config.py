@@ -112,6 +112,7 @@ KEYS = {
     ("accept", "guard"): "ACCEPT_GUARD",
     ("accept", "guard_timeout_s"): "POOL_ACCEPT_GUARD_S",
     ("accept", "units"): "POOL_ACCEPT_UNITS",
+    ("accept", "chore_priority"): "POOL_ACCEPT_CHORE_PRIORITY",
 }
 # [accept] keys that make up the checklist, carried together in $ACCEPT_CHECKLIST.
 CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers", "no_skip")

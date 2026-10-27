@@ -68,6 +68,8 @@ guard = ""                   # ACCEPT_GUARD: runs tests/accept/ (e.g. "uv run py
                              # with no model; a failing test files `Regression of #N`. The scripts of verified issues
                              # become a chore issue for those tests. With the merge train, its full check runs this
                              # too, after the sweep, and a deploy of a main it checked is not guarded again. Empty = off
+chore_priority = "P1"        # POOL_ACCEPT_CHORE_PRIORITY: the priority of the chore (type:chore) that turns verified
+                             # scripts into tests/accept/; at P2 behind a P1 queue they sat unclaimed
 guard_timeout_s = 1200       # POOL_ACCEPT_GUARD_S: the guard's time limit (the train's check: the sweep's
                              # POOL_MAIN_CHECK_S plus this)
 # The acceptance checklist the worker's live check (devcheck.py, merge gate 7) and the
