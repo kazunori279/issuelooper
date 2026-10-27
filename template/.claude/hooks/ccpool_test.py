@@ -1150,6 +1150,31 @@ def test_acceptance_verdicts_settle_themselves() -> None:
           (calls, pool.book.accept_rounds[9]), ([], 1))
     calls, pool, _ = settle([], finished=False)
     check("a unit that timed out leaves an issue without a verdict for its retry", pool.book.accept_rounds[9], 0)
+    # Cohort 55: 13 of 79 issues the tester verified failed the harness QA. A verdict must name
+    # the checklist rows the merged change needs.
+    unit.info["issues"][0]["rows"] = ["viewport:320x640", "lang:ja", "always:reload-mid-task"]
+    calls, pool, verified = settle([tester("rows: viewport:320x640 always:reload-mid-task\nskip: lang:ja the change has no "
+                                           "text\naccept-verified: script")])
+    check("every row named or skipped with a reason: verified", verified, [9])
+    calls, pool, verified = settle([tester("rows: viewport:1280x800 lang:ja\naccept-verified: script")])
+    check("an accept-verified that leaves out rows is not verified: a fresh session checks again, naming them",
+          (verified, ccpool.ACCEPT_RETRY in calls[0], "viewport:320x640" in calls[0], pool.book.accept_rounds[9]),
+          ([], True, True, 1))
+    calls, pool, verified = settle([mark(ccpool.ACCEPT_RETRY), tester("rows: lang:ja\naccept-verified: script")])
+    check("left out again: back to stage:triage", (verified, calls[0]),
+          ([], "issue edit 9 --remove-label stage:accept --add-label stage:triage"))
+    restore = with_env({"ACCEPT_CHECKLIST": json.dumps({"languages": ["ja"], "viewports": ["320x640"],
+                                                        "always": ["reload mid-task and after"], "no_skip": ["lang:ja"]})})
+    try:
+        calls, pool, verified = settle([tester("rows: viewport:320x640 always:reload-mid-task\nskip: lang:ja no "
+                                               "Japanese font\naccept-verified: script")])
+        check("a skip of a no_skip row does not count", verified, [])
+    finally:
+        restore()
+    prompt = ccpool.tester_prompt(unit, 8021, "60m")
+    check("the prompt lists each issue's rows and asks for the rows line",
+          ("rows: viewport:320x640 lang:ja always:reload-mid-task" in prompt, "`rows: <ids>`" in prompt), (True, True))
+    del unit.info["issues"][0]["rows"]
 
 
 def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
@@ -1820,7 +1845,7 @@ n = len(open(calls).read().splitlines())
 print(json.dumps({"event": "init", "conversation_id": "conv-1"}))
 if n <= int(os.environ["FAKE_429_TIMES"]):
     print(json.dumps({"event": "result", "result": {"conversation_id": "conv-1", "status": "ERROR",
-          "response": "", "error": os.environ.get("FAKE_429_TEXT",
+          "response": os.environ.get("FAKE_429_RESPONSE", ""), "error": os.environ.get("FAKE_429_TEXT",
           "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): TPM quota exhausted.")}}))
     sys.exit(1)
 print(json.dumps({"event": "result", "result": {"response": "done"}}))
@@ -1843,7 +1868,8 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "se
 """
 
 
-def run_429_session(times: int, labels: list[str], text: str = "", resumes_max: int = 3, cli: str = "agy"):
+def run_429_session(times: int, labels: list[str], text: str = "", resumes_max: int = 3, cli: str = "agy",
+                    response: str = ""):
     """A merger unit whose CLI exits on a 429 `times` times; the fake gh shows the issue
     with `labels` (stage:pr still on it: the work is not done)."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-429-"))
@@ -1874,6 +1900,8 @@ def run_429_session(times: int, labels: list[str], text: str = "", resumes_max: 
     env = dict(w.env(), FAKE_CALLS=str(d / "calls"), FAKE_429_TIMES=str(times), CCROLE_MERGER_CLI=cli)
     if text:
         env["FAKE_429_TEXT"] = text
+    if response:
+        env["FAKE_429_RESPONSE"] = response
     rc, _, timed_out = w.session("do it", env)
     run_429_session.last = w
     calls = [json.loads(x) for x in (d / "calls").read_text().splitlines()]
@@ -2098,6 +2126,10 @@ def test_ux_journeys_and_score() -> None:
     check("no journeys script: the tester keeps its own per repository, not in a shared /tmp/ux",
           (f"{SCRATCH}/ux/journeys.py" in own, "/tmp/ux/" in own), (True, False))
     given = ccpool.tester_prompt(ux, 8021, "60m", "ux/journeys.py")
+    check("the previous run's score is in the prompt, with the drift rule (c55: 12-15 points over the audit)",
+          ("previous UX run scored 75 at bbbbbbbbbbbb" in ccpool.tester_prompt(ux, 8021, "60m", previous={"score": 75,
+                                                                                                        "sha": "b" * 40}),
+           "previous UX run" in given), (True, False))
     check("the project's script: run it from the tree, write none, probes in a scratch file",
           ("`ux/journeys.py`, from your extracted tree" in given, "do not write a journeys file" in given,
            f"{SCRATCH}/tst-8021-probes.py" in given, f"{SCRATCH}/ux/" in given), (True, True, True, False))
@@ -2288,6 +2320,14 @@ def test_resume_after_quota_exit() -> None:
     )
     waits = [x for x in (run_429_session.last.dir / "resumes.log").read_text().splitlines() if "quota wait" in x]
     check("each resume waits first", len(waits), 2)
+    # Run 10b: six sessions cut off by the TPM quota had some interim text in the result,
+    # were neither resumed nor counted as quota, and spent a failed attempt each.
+    said = "I will wait for the test task to complete.\nI will wait for the test to complete.\n"
+    rc, timed_out, calls, resumes, _ = run_429_session(1, ["stage:pr"], text=capacity, response=said)
+    check("a 429 after some interim text, the CLI exited 3: resumed like any quota exit", (rc, len(calls)), (0, 2))
+    rc, _, calls, _, _ = run_429_session(9, ["stage:pr"], text=capacity, response=said)
+    check("and once the resumes are spent, it counts as a quota error, not a failure",
+          (rc, run_429_session.last.ended_on_quota()), (1, True))
     rc, _, calls, resumes, _ = run_429_session(1, [])
     check(
         "the work is already on GitHub: no resume",

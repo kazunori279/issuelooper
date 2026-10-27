@@ -95,23 +95,22 @@ issues at once.
 
 ## 3. What happens
 
-In our six-hour test run of this sample (every role on `gemini-4-argon-high`, an
-owner who only answered questions):
+In a six-hour test run of this sample with every role on `gemini-3.8-flash-high`
+(run 10b; the config above names `gemini-4-argon-high`, so expect other times and
+scores with it), and an owner who only answered questions:
 
-- **The first hour:** 16 workers take the issues by priority; 27 of the 54 seed
-  issues closed in the first hour, most of them in scripted mode. Live mode is built
-  in stages (typed text through ADK in #1, then the model's voice, the microphone,
-  voice input, and the live tools for the cards); #1 merged after about half an
-  hour, and the other live issues wait for it. Each `needs:live` issue merges with
-  `Refs #N` and closes after a tester's live check against the real model (15 of
-  15 passed on the first try).
-- **UX runs from the start:** the first one walked the starting app 7 minutes in and
-  filed five issues. Each run takes 20 minutes to an hour, so one is almost always
-  going; nine runs filed 32 issues, which became a growing share of the work.
-- **By the end:** all 54 seed issues closed in 5 hours 10 minutes (P0 in 4 hours 35
-  minutes), with 81 merges and 39 deploys. The tester scored the final app 68 of 100:
-  every journey worked, including barge-in, reconnects, Japanese and profiles; the
-  maps in the places and route cards were still drawn without the Google map.
+- **The first hour:** 16 workers take the issues by priority, and 27 pull requests
+  merged in the first hour. Live mode is built in stages (typed text through ADK in
+  #1, then the model's voice, the microphone, voice input, and the live tools for the
+  cards), and the other live issues wait for #1. Each change to the app merges with
+  `Refs #N` and closes only after a tester who did not write it accepts it on the
+  deployed build, so closes trail merges: 10 seed issues closed in the first hour.
+- **UX runs from the start:** each run walks the deployed app and files at most five
+  findings. On Flash the UX tester was lenient: eight runs filed four issues and
+  scored the app 92 twice. A stronger model files more.
+- **By the end:** 52 of the 54 seed issues closed (all P0 in 3 hours 33 minutes, all
+  P1 in 3 hours 53 minutes), with 69 merges. We scored the final app 74 of 100 by
+  `ux/rubric.md`.
 - **When the workers run out of issues:** extra UX runs and spec checks, one
   requirement at a time, make the next work. With 16 sessions that did not happen
   within six hours.

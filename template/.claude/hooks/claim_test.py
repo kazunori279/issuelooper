@@ -398,10 +398,10 @@ def test_refusal_says_what_failed() -> None:
     "another worker claimed it first" though nobody had."""
     repo = Repo([issue(5, ["stage:triage", "P1"])])
     res = repo.run("claim", "--loop", "7", "--issue", "5", FAKE_GH_UNLISTED="5")
-    check("missing from GitHub's list of open issues: exit 3, said so",
-          (res.returncode, "not in GitHub's list of open issues" in res.stderr, "claimed it first" in res.stderr),
-          (3, True, False))
-    check("and nothing written", repo.load()["writes"], [])
+    check("missing from GitHub's list of open issues (it lags a new issue): read directly and claimed "
+          "(run 10b: five new chores ended unclaimable)", (res.returncode, json.loads(res.stdout or "{}").get("issue")),
+          (0, 5))
+    repo = Repo([issue(5, ["stage:triage", "P1"])])
     res = repo.run("claim", "--loop", "7", "--issue", "5", FAKE_GH_HIDE_AFTER="1000")
     check("its own claim comment not in the re-read: said so",
           (res.returncode, "own claim comment was not in GitHub's re-read" in res.stderr,

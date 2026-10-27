@@ -94,7 +94,9 @@ issue:
    closing too much, a half-translated second language, voice but not typed (or
    the reverse), scripted but not live.
 3. Read every screenshot. Then comment once on the issue, signed `<!-- tester -->`:
-   what you ran, what you saw (quote the screen), and a last line of its own:
+   what you ran, what you saw (quote the screen), a line `rows: <ids>` naming the
+   checklist rows you ran (your prompt lists the ones the issue's change needs), a line
+   `skip: <id> <why>` for each that cannot apply, and a last line of its own:
 
 ```
 accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en and ja, scripted mode>
@@ -219,8 +221,13 @@ in either run counts as a major: it could not be done, or its screenshot shows t
 wrong result (an answer that ignores what was set, such as the saved location; a
 reply under another question; a status stuck on thinking). Scripted journeys
 cannot show these: in one cohort the tester scored 91-95 while an outside audit of
-the same deploys found 7-19 live majors. A run that files nothing new
-still reports every defect it saw, with the issue that already tracks it.
+the same deploys found 7-19 live majors. In the scripted journeys, each of these is a
+major too: a step the journeys record as "could not do it"; a card or map that is
+gone after a reload (the journeys check it); a status still on Thinking or Listening
+after the turn is over. One cohort's UX runs scored 12-15 points above the outside
+audit and never caught "maps vanish after reload", a major in every late audit. A run
+that files nothing new still reports every defect it saw, with the issue that already
+tracks it.
 
 ### 3. File at most five
 
@@ -266,4 +273,11 @@ score a user would give the app, on the scale in step 2; the supervisor reads th
 line and the owner follows it from run to run. Then the commit, the journeys you
 ran (and which you added or changed this run), every finding with its disposition
 (`filed #N`, `already #N`, `not filed: <why>`), and anything you could not test.
+
+Your prompt names the previous run's score. A score 10 or more above it, on the same
+journeys, needs a reason the owner can check: list what improved since that run, each
+with the screenshot that shows it and the issue whose fix explains it. What you
+cannot list that way, take off the score. Scores drift up from run to run when nothing
+holds them; the outside audit does not.
+
 Then stop the server and remove `$T`.

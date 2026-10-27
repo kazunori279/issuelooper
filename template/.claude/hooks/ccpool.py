@@ -1014,7 +1014,10 @@ def plan(
             if not chunk:
                 break
             issues = [{"n": n, "title": open_by[n]["title"], "live": live_of[n], "since": book.live_entry.get(n, ""),
-                       "pr": (book.accept_merged.get(n) or {}).get("pr")} for n in chunk]
+                       "pr": (book.accept_merged.get(n) or {}).get("pr"),
+                       # the checklist rows its merged change needs, as gate 7 counts them
+                       "rows": [r[0] for r in config.required_rows((book.accept_merged.get(n) or {}).get("files") or [])]}
+                      for n in chunk]
             sha = book.accept_target
             key = f"accept:{sha[:12]}:" + ",".join(f"{x['n']}@{x['since']}#{book.accept_rounds[x['n']]}" for x in issues)
             units.append(Unit("tester", "accept", key, families[j], None, (2, 0, -1) if accept_long else (2, 1, 0),
@@ -1319,7 +1322,8 @@ def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live:
         accept_text += (
             "\nYour live check (devcheck.py) covers the acceptance checklist rows your change triggers.\n"
             "Declare them in the script, `# accept-rows: <ids>`, and a row that cannot apply as\n"
-            "`# accept-skip: <id> <why>`; merge gate 7 refuses a check that misses one.\n"
+            "`# accept-skip: <id> <why>`; merge gate 7 refuses a check that misses one. A row that needs a\n"
+            f"device (a microphone) is no reason to skip: {PROJECT}, *Live check*, says how to fake it.\n"
             + "\n".join("    " + ln for ln in checklist.splitlines()) + "\n")
     devcheck_text = (" and, for a change a user can see, a passing live check\n"
                      "   (devcheck.py) of it") if devcheck else ""
@@ -1447,7 +1451,7 @@ def ux_score(report: pathlib.Path) -> int | None:
     return None
 
 
-def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
+def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous: dict | None = None) -> str:
     rules = (
         f"\n\nYour port is $TST_PORT={port}, yours alone (never the port the project's own run "
         f"command uses; scratch files and any app database under {scratch(f'tst-{port}-')}*). Stop every "
@@ -1478,6 +1482,7 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
         rows = "\n".join(
             f"  #{x['n']} \"{x['title']}\"" + (f", merged in PR #{x['pr']}" if x.get("pr") else "")
             + (", in live mode" if x.get("live") else "")
+            + (f"; rows: {' '.join(x['rows'])}" if x.get("rows") else "")
             for x in u.info["issues"])
         cl = config.checklist_text()
         return (
@@ -1491,7 +1496,10 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
             "the checklist rows its change needs. Then comment once on that issue, signed `<!-- tester -->`: "
             "what you ran and what you saw (quote the screen), ending with a line of its own, "
             "`accept-verified: <what ran>` when every part works, or `accept-blocked: <what is missing>` when "
-            "you could not run the check at all; neither when something is wrong or missing (say what)."
+            "you could not run the check at all; neither when something is wrong or missing (say what). Before "
+            "that line, name the checklist rows you ran on a line `rows: <ids>`, and a row that cannot apply on a "
+            "line `skip: <id> <why>`: an accept-verified that leaves out a row listed for the issue counts as "
+            "not verified."
             + (f"\n\n{cl}" if cl else "")
             + "\n\nSave the script of each issue you verify as $LOGDIR/accept/test_accept_<N>.py, and write "
             "$LOGDIR/accept_report.md, one line per issue: its number and verdict."
@@ -1530,6 +1538,9 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "") -> str:
         "findings. Write the run's report to $LOGDIR/ux_report.md. Its first line must be "
         "`Score: N/100`, N being the 0-100 score a user would give the app on the skill's scale; "
         "the supervisor reads that line."
+        + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: a score 10 or "
+           "more above it needs what the skill's step 4 asks."
+           if previous and previous.get("score") is not None else "")
         + rules
     )
 
@@ -1624,6 +1635,21 @@ def is_test(path: str) -> bool:
     return (path.startswith(("tests/", "test/")) or "/tests/" in path or "/test/" in path
             or name.startswith("test_") or ".test." in name or ".spec." in name
             or name.rsplit(".", 1)[0].endswith("_test"))
+
+
+ACCEPT_SKIP = re.compile(r"(?im)^[ \t>*-]*skip:[ \t]*(\S+?):?[ \t]+\S")
+ACCEPT_SKIP_LINE = re.compile(r"(?im)^[ \t>*-]*skip:.*$")
+
+
+def unchecked_rows(body: str, rows: list[str]) -> list[str]:
+    """The checklist rows (ids) a verdict comment neither names nor skips with a reason. A
+    skip of a row in [accept] no_skip does not count. In cohort 55, 13 of 79 issues the
+    tester verified failed the harness QA."""
+    text = ACCEPT_SKIP_LINE.sub("", body).lower()  # a skip line names its row without running it
+    no_skip = config.checklist()["no_skip"]
+    skipped = {m.group(1).lower() for m in ACCEPT_SKIP.finditer(body)} - {r.lower() for r in no_skip}
+    named = {r for r in rows if re.search(rf"(?<![\w:-]){re.escape(r.lower())}(?![\w-])", text)}
+    return [r for r in rows if r not in named and r.lower() not in skipped]
 
 
 def touches_live(paths) -> bool:
@@ -2061,7 +2087,7 @@ class Session(threading.Thread):
                 # wait doubles from POOL_QUOTA_WAIT_S up to POOL_QUOTA_WAIT_MAX_S: a
                 # capacity shortage can last hours, and every session retrying at once
                 # is the load the error asks to reduce.
-                conv = self.quota_stalled(quiet=0)
+                conv = self.quota_stalled(quiet=0, exited=True)
                 if conv and quota_k < cfg.quota_resumes and not self.work_done():
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
                     self.pool.quota_seen(role)
@@ -2148,15 +2174,32 @@ class Session(threading.Thread):
         """Whether the CLI is retrying a failed model call inside the turn (agent_cli)."""
         return self.cli.in_model_retry(self.events())
 
-    def quota_stalled(self, quiet: float = 60):
+    def quota_stalled(self, quiet: float = 60, exited: bool = False):
         """The session id when the stream's last event is a result that ended on a
-        quota error and nothing has been written for `quiet` s, else None."""
+        quota error and nothing has been written for `quiet` s, else None. exited: the
+        CLI exited with an error, so a result whose error is a quota error ended on it,
+        whatever text came before (cut_by_quota)."""
         if not (self.dir / "session.jsonl").exists() or self.quiet_s() < quiet:
             return None
         events = self.events()
-        if not events or not self.cli.quota_result(events[-1]):
+        if not events or not (self.cli.quota_result(events[-1]) or (exited and self.cut_by_quota(events[-1]))):
             return None
         return self.cli.session_id(events)
+
+    def cut_by_quota(self, e: dict) -> bool:
+        """A result whose error, not its text, is a quota error. A turn the quota cut off
+        can carry some interim text ("I will wait for the test to complete."), which
+        quota_result takes for an answer; only for a CLI that exited with an error does
+        this say the turn did not finish. In run 10b six sessions ended so, were neither
+        resumed nor counted as quota, and counted as failed attempts."""
+        if not self.cli.is_result(e):
+            return False
+        last = dict(e)
+        if isinstance(last.get("result"), dict):
+            last["result"] = {k: v for k, v in last["result"].items() if k != "response"}
+        else:
+            last.pop("result", None)
+        return bool(self.cli.quota.search(json.dumps(last)))
 
     def ended_on_quota(self) -> bool:
         """Whether the session's last word was a quota error: its stream's last event, or,
@@ -2165,7 +2208,7 @@ class Session(threading.Thread):
         if events and self.cli.quota_result(events[-1]):
             return True
         if events and self.cli.is_result(events[-1]):
-            return False
+            return self.cut_by_quota(events[-1])  # the caller checked: the CLI exited with an error
         try:
             err = (self.dir / "session.err").read_text(errors="replace")[-3000:]
         except OSError:
@@ -2317,7 +2360,8 @@ class Session(threading.Thread):
         else:
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
-            prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys)
+            previous = next((x for x in reversed(self.pool.ux_scores) if x.get("score") is not None), None)
+            prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys, previous)
 
         rc, elapsed, timed_out = self.session(prompt, env)
         if cfg.kill_leftovers:
@@ -3985,7 +4029,7 @@ class Pool:
         if accept:
             with self.lock:
                 self.book.accept_merged[n] = {"pr": pr, "sha": merged["sha"], "t": self.clock(),
-                                              "live": needs_live or touches_live(files)}
+                                              "live": needs_live or touches_live(files), "files": files}
         self.gh(
             "issue", "comment", str(n), "--body",
             (f"<!-- merger -->\nMerged PR #{pr} (head {head[:8]}): {why}, so the supervisor landed it. "
@@ -4112,8 +4156,11 @@ class Pool:
                 if m.returncode != 0:
                     # It conflicts with main or with a PR ahead of it: it waits for a later
                     # train, and GitHub calls it CONFLICTING once those are on main.
+                    conflicts = self.git("diff", "--name-only", "--diff-filter=U", wt=wt).stdout.split()
                     self.git("merge", "--abort", wt=wt)
-                    self.log("train_skip", pr=e["pr"], why=(m.stderr or m.stdout).strip()[-200:])
+                    out = (m.stderr or m.stdout).strip()
+                    self.log("train_skip", pr=e["pr"], conflicts=conflicts[:20],
+                             why=out.splitlines()[-1][:300] if out else "")
                     continue
                 cars.append({**e, "commit": self.git("rev-parse", "HEAD", wt=wt).stdout.strip(),
                              "tree": self.git("rev-parse", "HEAD^{tree}", wt=wt).stdout.strip()})
@@ -4530,7 +4577,7 @@ class Pool:
             p = {}
         files = [str(f.get("path") or "") for f in p.get("files") or [] if isinstance(f, dict)]
         return {"pr": p.get("number"), "sha": str((p.get("mergeCommit") or {}).get("oid") or ""),
-                "live": touches_live(files), "t": self.clock()}
+                "live": touches_live(files), "t": self.clock(), "files": files}
 
     def settle_accept(self, u: Unit, started: float, finished: bool) -> list[int]:
         """Act on the acceptance tester's verdict on each issue of its batch, as settle_live
@@ -4581,6 +4628,25 @@ class Pool:
                 self.event(f"#{n}: the acceptance check could not run (accept-blocked); moved to stage:owner. "
                            "Tell the owner what is missing.")
                 how = "blocked"
+            elif ACCEPT_VERIFIED.search(body) and unchecked_rows(body, x.get("rows") or []):
+                missing = unchecked_rows(body, x.get("rows") or [])
+                retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
+                              for c in comments)
+                why = (f"The acceptance check says accept-verified ({url}) but does not name these checklist rows, "
+                       f"which the merged change needs: {', '.join(missing)}.")
+                if not retried:
+                    self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_RETRY}\n{why} A fresh "
+                            "tester session checks it once more, through every row, before it counts.")
+                    with self.lock:
+                        self.book.accept_rounds[n] += 1
+                    how = "retry (rows missing)"
+                else:
+                    self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:triage")
+                    self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_HANDBACK}\n{why} The "
+                            "second check left them out too, so it is not verified: back to stage:triage. The next "
+                            "worker checks those rows in its live check.")
+                    self.event(f"#{n}: accept-verified twice without rows {', '.join(missing[:3])}; back to stage:triage.")
+                    how = "handback (rows missing)"
             elif ACCEPT_VERIFIED.search(body):
                 self.gh("issue", "edit", str(n), "--remove-label", stage)
                 self.gh("issue", "close", str(n), "--reason", "completed", "--comment",

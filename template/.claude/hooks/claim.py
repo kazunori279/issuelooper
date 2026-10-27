@@ -324,9 +324,19 @@ def unaccepted(issues: list[dict]) -> set[int]:
     return {i["number"] for i in issues if not labels_of(i) & ACCEPTED}
 
 
-def candidates(stale_min: int = STALE_MIN) -> list[dict]:
-    """Claimable issues in pick order, each with the PR it already has, if any."""
+def candidates(stale_min: int = STALE_MIN, named: int | None = None) -> list[dict]:
+    """Claimable issues in pick order, each with the PR it already has, if any. named: the
+    issue ccpool chose; when GitHub's list of open issues does not have it yet (the list
+    lags a new issue by seconds, and ccpool's GraphQL read had it), it is read directly. In
+    run 10b five new chores ended `unclaimable` that way."""
     issues = [i for i in paged("repos/{owner}/{repo}/issues?state=open") if "pull_request" not in i]
+    if named is not None and named not in {i["number"] for i in issues}:
+        try:
+            one = gh_json("api", f"repos/{{owner}}/{{repo}}/issues/{named}") or {}
+        except GhError:
+            one = {}
+        if one.get("state") == "open" and "pull_request" not in one:
+            issues.append(one)
     open_numbers = unaccepted(issues)
     prs = open_prs()
     out = []
@@ -520,7 +530,7 @@ def cmd_claim(args) -> int:
     tried: set[int] = set()
     lost = ""  # what failed in the last claim attempt
     for _ in range(args.tries):
-        pool = [c for c in candidates() if c["issue"]["number"] not in tried]
+        pool = [c for c in candidates(named=args.issue) if c["issue"]["number"] not in tried]
         if args.issue is not None:
             # ccpool.py already chose the issue from its own snapshot; this
             # re-checks it against GitHub (holds, blockers, attempts) and claims only it.
