@@ -2851,7 +2851,10 @@ class Session(threading.Thread):
             return {"merge": self.auto_merge, "rebase": self.auto_rebase, "requeue": self.requeue,
                     "handback": self.merger_handback}.get(u.kind, self.reclaim)(env)
         claim_file = self.dir / "claim"
-        if u.role == "worker":
+        # Only an implement unit claims: an author resumed to accept its issue
+        # (stage:accept) or resolve its PR (stage:pr) works on an issue claim.py would
+        # refuse, as cohort 59 found when every one of them ended "unclaimable".
+        if u.role == "worker" and u.kind == "implement":
             pool = str(cfg.caps["worker"] or "unlimited")
             env.update(WRK_K=str(self.seq), WRK_CLAIM_FILE=str(claim_file), WORKER_POOL=pool)
             rc = self.sh(

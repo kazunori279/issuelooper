@@ -4341,6 +4341,20 @@ def test_the_author_resolves_its_own_conflict() -> None:
     check("a unit with a recorded conversation starts by resuming it, with its own time limit",
           (rc, calls[0][-2:], calls[0][calls[0].index("--print-timeout") + 1]),
           (0, ["--conversation", "conv-1"], f"{2700 + 900 + 2400}s"))
+    # Cohort 59: every resolve and own-accept unit ran claim.py first, which refuses an
+    # issue at stage:pr or stage:accept, so all of them ended "unclaimable" in seconds.
+    pool.cfg.kill_leftovers = False
+    for unit in (ccpool.Unit("worker", "resolve", "own:41@x", "mrg:41", 41, (0,),
+                             {"issue": 3, "resume": "conv-2", "timeout": "45m", "branch": "issue-3"}),
+                 ccpool.Unit("worker", "own-accept", "oac:4", "wrk:4", 4, (0,),
+                             {"sha": "e" * 40, "resume": "conv-3",
+                              "issues": [{"n": 4, "title": "sheet", "live": False, "since": "x"}]})):
+        w = ccpool.Session(pool, unit, 7)
+        prompts = []
+        w.session = lambda prompt, env, _p=prompts: (_p.append(prompt), (0, 200, False))[1]
+        outcome = w.work()
+        check(f"a {unit.kind} unit starts its session without claiming the issue",
+              (outcome, (w.dir / "claim.out").exists(), len(prompts)), ("ok", False, 1))
 
 
 def git_repo(d: pathlib.Path):
