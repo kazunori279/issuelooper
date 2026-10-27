@@ -67,6 +67,7 @@ KEYS = {
     ("sweep", "affected_browser_cap"): "SWEEP_AFFECTED_BROWSER_CAP",
     ("sweep", "fast_command"): "POOL_FAST_CHECK_CMD",
     ("sweep", "main_check"): "POOL_MAIN_CHECK",
+    ("sweep", "link_files"): "SWEEP_LINK_FILES",
     ("deploy", "command"): "POOL_DEPLOY_CMD",
     ("deploy", "timeout_s"): "POOL_DEPLOY_TIMEOUT_S",
     ("live", "enabled"): "POOL_LIVE",
@@ -227,6 +228,28 @@ def path_matches(path: str, pattern: str) -> bool:
     if pattern.endswith("/"):
         return path.startswith(pattern)
     return fnmatch.fnmatchcase(path, pattern)
+
+
+def link_shared_files(tree: str | pathlib.Path) -> list[str]:
+    """Link [sweep] link_files ($SWEEP_LINK_FILES, such as .env) from the shared checkout
+    into a worktree that lacks them, so every check sees the environment the workers'
+    trees have (devcheck links .env into a worker's tree, and its later sweeps keep it).
+    Run 11: test_issue_13 passed only without .env; it was red in worker sweeps and green
+    in the merge train, and merged. The files must be ignored by git. Returns what it linked."""
+    names = [n.strip() for n in os.environ.get("SWEEP_LINK_FILES", "").split(",") if n.strip()]
+    tree, root, done = pathlib.Path(tree), repo_root(), []
+    if not names or tree.resolve() == root.resolve():
+        return done
+    for name in names:
+        src, dst = root / name, tree / name
+        if src.exists() and not dst.exists() and not dst.is_symlink():
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.symlink_to(src)
+                done.append(name)
+            except OSError:
+                pass
+    return done
 
 
 def accept_paths() -> list[str]:

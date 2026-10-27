@@ -199,6 +199,9 @@ def main() -> int:
     if not os.path.isfile(os.path.join(root, RUNNER)):
         print(f"sweep_locked: {root} has no {RUNNER}; sweep NOT run", file=sys.stderr)
         return 2
+    linked = config.link_shared_files(root)  # [sweep] link_files: every sweep, the same environment
+    if linked:
+        print(f"[sweep] linked {', '.join(linked)} from the shared checkout", flush=True)
     changed = format_first(root)
     if changed:
         print(f"[sweep] format changed {len(changed)} file(s): {', '.join(changed[:10])}\n"

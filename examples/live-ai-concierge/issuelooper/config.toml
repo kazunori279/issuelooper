@@ -34,6 +34,9 @@ affected = "make lint && uv run pytest -q -p no:cacheprovider tests/unit {tests}
                              # SWEEP_AFFECTED: lint, every unit test, and the tests the change touches
 format = "uv run ruff format src tests"   # SWEEP_FORMAT: run first by agents' sweeps (the lint step's scope)
 rerun = "uv run pytest -q -p no:cacheprovider {tests}"   # SWEEP_RERUN: the failing tests alone, for a second try
+link_files = [".env"]        # SWEEP_LINK_FILES: devcheck links .env into a worker's tree and its sweeps keep it, so
+                             # every sweep, train, main check and guard gets it too (run 11: test_issue_13 passed only
+                             # without .env, red in workers' sweeps and green in the train, and merged)
 junit = true                 # SWEEP_JUNIT: each pytest run in a sweep writes a junit XML beside sweep/runs.jsonl
 fast_command = "uv sync --frozen -q && uv run python -c 'import concierge.main' && uv run pytest -q -x -p no:cacheprovider tests/unit"
                              # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit

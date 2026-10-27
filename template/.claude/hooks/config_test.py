@@ -181,6 +181,18 @@ try:
     os.environ.pop("ACCEPT_CHECKLIST")
     check("no checklist: no rows, no text", (config.required_rows(["src/static/a.js"]), config.checklist_text()),
           ([], ""))
+    # [sweep] link_files: run 11's env-dependent test was red where .env was linked, green elsewhere.
+    import tempfile
+    shared, tree = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())
+    (shared / ".env").write_text("KEY=1\n")
+    os.environ["SHARED_REPO_PATH"] = str(shared)
+    os.environ["SWEEP_LINK_FILES"] = ".env, missing.txt"
+    check("link_files: linked into a tree that lacks them, a missing one skipped",
+          (config.link_shared_files(tree), (tree / ".env").read_text()), ([".env"], "KEY=1\n"))
+    check("not twice, and never into the shared checkout itself",
+          (config.link_shared_files(tree), config.link_shared_files(shared)), ([], []))
+    os.environ["SWEEP_LINK_FILES"] = ""
+    check("off by default", config.link_shared_files(pathlib.Path(tempfile.mkdtemp())), [])
 finally:
     os.environ.clear()
     os.environ.update(saved)

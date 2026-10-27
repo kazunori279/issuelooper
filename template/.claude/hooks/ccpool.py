@@ -2783,6 +2783,7 @@ class Session(threading.Thread):
     def fast_check(self, wt: str, env: dict) -> tuple[bool, str]:
         """POOL_FAST_CHECK_CMD in a worktree: (passed, the tail of its output)."""
         cfg = self.pool.cfg
+        config.link_shared_files(wt)
         try:
             r = self.pool.run_owned(["bash", "-c", cfg.fast_check_cmd], cfg.fast_check_s, cwd=wt, env=env,
                                     stdin=subprocess.DEVNULL)
@@ -3849,6 +3850,7 @@ class Pool:
         if not self.cfg.rerun_cmd or not tests or "{tests}" not in self.cfg.rerun_cmd:
             return None, ""
         cmd = self.cfg.rerun_cmd.replace("{tests}", " ".join(shlex.quote(t) for t in tests))
+        config.link_shared_files(wt)
         try:
             r = self.run_owned(["bash", "-c", cmd], 900, cwd=wt, env=env or dict(os.environ),
                                stdin=subprocess.DEVNULL)
@@ -4316,6 +4318,7 @@ class Pool:
         if not self.cfg.accept_guard or not (pathlib.Path(wt) / "tests" / "accept").is_dir():
             return True, ""
         t0 = time.time()
+        config.link_shared_files(wt)
         try:
             r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.accept_guard_s, cwd=wt,
                                env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
