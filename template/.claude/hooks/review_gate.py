@@ -299,6 +299,39 @@ def split_files(diff: str) -> list[tuple[str, str]]:
     return out
 
 
+# Structure written as a test, found without the model. In cohort 55 six tests that count a
+# source file's lines merged: they came in test-only PRs, which the review skipped.
+LINE_COUNT = re.compile(r"len\(\s*(.*?)\.(?:splitlines\(\)|readlines\(\))\s*\)")
+SOURCE_READ = re.compile(r"^\s*(\w+)\s*=\s*.*\b(?:read_text|read|getsource)\(")
+SOURCE_HINT = re.compile(r"""["'/](?:src|static)/|\bsrc_dir\b|\b(?:SRC|SOURCE)\w*\b|\.(?:js|py|html|css)["']|getsource\(""")
+FORMATTER = re.compile(r"""ruff[\"',\s]+(?:format|check)|ruff (?:format|check)|black --check|prettier --check|\beslint\b""")
+
+
+def structure_tests(files: list[tuple[str, str]]) -> list[dict]:
+    """Findings for added Python test code that counts a source file's lines or runs a
+    formatter or linter: the review prompt bans both, and they are plain to see. A test
+    counting lines of an output it captured is not one (it reads no source)."""
+    found = []
+    for path, part in files:
+        if not (TEST_FILE.search(path) and path.endswith(".py")):
+            continue
+        added = [ln[1:] for ln in part.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
+        text = "\n".join(added)
+        reads = {m.group(1) for ln in added if (m := SOURCE_READ.match(ln))}
+        for ln in added:
+            m = LINE_COUNT.search(ln)
+            if m and SOURCE_HINT.search(text) and (
+                    any(x in m.group(1) for x in ("read_text(", "read(", "open(", "getsource(")) or m.group(1).strip() in reads):
+                found.append({"kind": "test", "file": path, "what": "counts a source file's lines, a structure check "
+                              f"that catches no behavior: `{ln.strip()[:120]}`"})
+                break
+            if FORMATTER.search(ln) and ("subprocess" in text or "run(" in ln):
+                found.append({"kind": "test", "file": path, "what": "runs a formatter or linter as a test (the sweep "
+                              f"lints already): `{ln.strip()[:120]}`"})
+                break
+    return found
+
+
 def is_prod(path: str) -> bool:
     """A file under REVIEW_PATHS that is not a test, fixture, doc or framework file."""
     if (
@@ -895,8 +928,24 @@ def review(pr: int, hand: bool = True) -> int:
     errors = int(old.get("errors") or 0) if old and old.get("verdict") == "error" else 0
 
     files = split_files(diff)
+    static = structure_tests(files)
+    if static:
+        v = {"verdict": "reject", "findings": static,
+             "reason": "it adds tests that check structure, not behavior: delete them, or drive the behavior instead."}
+        rejects = sum(1 for r in records_for(pr) if r.get("verdict") == "reject"
+                      or (r.get("verdict") == "owner" and r.get("why") == "rejects"))
+        if rejects >= MAX_REJECTS:
+            rc = done("owner", why="rejects", by="static check", reason=v["reason"], findings=static, round=rejects + 1)
+            if hand:
+                park_for_owner(repo, pr, issue, head, f"This is reject {rejects + 1} of this pull request "
+                               f"(`{v['reason']}`), more than the {MAX_REJECTS} handed back to workers.")
+            return rc
+        rc = done("reject", by="static check", reason=v["reason"], findings=static, round=rejects + 1)
+        if hand:
+            hand_back(repo, pr, issue, v)
+        return rc
     prod = [p for p, _ in files if is_prod(p)]
-    if not prod:
+    if not prod:  # after structure_tests: a test-only PR (an acceptance chore's) still gets that
         return done(
             "skipped",
             reason="no production file changed",

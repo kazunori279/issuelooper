@@ -283,6 +283,23 @@ try:
     check("record issue from body", r["issue"], 101)
     check("skipped: judge not asked", PROMPTS, [])
 
+    # Cohort 55: six tests that count a source file's lines merged in test-only PRs (acceptance
+    # chores), which the review skipped. A static check rejects them without the model.
+    count = [("tests/accept/test_accept_265.py", [
+        "def test_split():", "    src_dir = REPO / 'src' / 'concierge' / 'static' / 'js'",
+        "    lines = len((src_dir / 'app.js').read_text(encoding='utf-8').splitlines())", "    assert lines < 400"])]
+    serve(5, "c5" * 20, count)
+    check("a test-only PR whose test counts a source file's lines: rejected, judge not asked",
+          (rg.review(5, hand=False), record("c5" * 20)["verdict"], record("c5" * 20)["by"], PROMPTS),
+          (1, "reject", "static check", []))
+    serve(6, "c6" * 20, [("tests/unit/test_cli.py", ["def test_one_line(capsys):", "    main()",
+                                                     "    assert len(capsys.readouterr().err.splitlines()) == 1"])])
+    check("counting lines of captured output is no structure test", (rg.review(6), record("c6" * 20)["verdict"]),
+          (0, "skipped"))
+    serve(7, "c7" * 20, [("tests/unit/test_lint.py", ["import subprocess", "def test_fmt():",
+                                                      "    assert subprocess.run(['ruff', 'format', '--check', '.']).returncode == 0"])])
+    check("a formatter run as a test: rejected", (rg.review(7, hand=False), record("c7" * 20)["verdict"]), (1, "reject"))
+
     prod = [("src/a.py", ["price = item.get('price') or 19.99"])]
     serve(2, "b1" * 20, prod, branch="issue-42")
     REPLY["value"] = '{"verdict": "pass", "reason": "fine"}'
