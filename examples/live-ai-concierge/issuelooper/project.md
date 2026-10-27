@@ -55,6 +55,15 @@ asked language), not exact wording. Drive the issue's steps in each language the
 issue concerns, and the steps around them that depend on the change (after
 setting a location, ask for something "near here").
 
+Voice works in a live check: Chromium plays a recording as the microphone. Launch it
+the way `ux/journeys.py --live` does, with `--use-fake-ui-for-media-stream`,
+`--use-fake-device-for-media-stream` and
+`--use-file-for-fake-audio-capture=<absolute path to ux/barge_in.wav>%noloop`, and the
+`microphone` permission in the browser context; then tap the mic (`composer-mic`): the
+model hears "Sorry, stop. What time is it in Tokyo?", once. That covers the
+`live:voice-and-typed` row, and a missing microphone is not a reason to skip it (the
+config's `[accept] no_skip` refuses that skip).
+
 ## Spec check
 
 The spec is `spec/REQUIREMENTS.md` (requirements numbered `R-XXX-N`) and

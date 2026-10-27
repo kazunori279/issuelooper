@@ -112,7 +112,7 @@ KEYS = {
     ("accept", "units"): "POOL_ACCEPT_UNITS",
 }
 # [accept] keys that make up the checklist, carried together in $ACCEPT_CHECKLIST.
-CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers")
+CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers", "no_skip")
 # Each row group and the prefix of its rows' ids.
 CHECKLIST_GROUPS = (("viewports", "viewport"), ("languages", "lang"), ("always", "always"), ("live", "live"))
 # [agents.<role>] cli / model -> CCROLE_<ROLE>_CLI / CCROLE_MODEL_<ROLE>.
@@ -259,7 +259,12 @@ def checklist() -> dict:
     trig = raw.get("triggers") or {}
     triggers = [(str(g), [str(x) for x in (v if isinstance(v, list) else [v])])
                 for g, v in (trig.items() if isinstance(trig, dict) else [])]
-    return {"rows": rows, "triggers": triggers}
+    # Rows a live check may not skip (a row id, a row's text, or a group): the rig can run
+    # them. In run 10b 96 % of live-check records skipped the voice row as "no microphone",
+    # though Chromium's fake microphone plays a recording.
+    wanted = [str(x).strip().lower() for x in (raw.get("no_skip") or []) if str(x).strip()]
+    no_skip = {rid for rid, group, text in rows if rid.lower() in wanted or text.lower() in wanted or group in wanted}
+    return {"rows": rows, "triggers": triggers, "no_skip": no_skip}
 
 
 def required_rows(paths) -> list[tuple[str, str, str]]:

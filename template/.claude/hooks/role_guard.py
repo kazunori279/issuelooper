@@ -2086,11 +2086,13 @@ def checklist_gap(rec: dict, paths: list[str]) -> list[tuple[str, str]]:
     (no "rows") is not held to it."""
     if "rows" not in rec:
         return []
-    done = set(rec.get("rows") or []) | set((rec.get("skips") or {}).keys())
+    no_skip = config.checklist()["no_skip"]
+    done = set(rec.get("rows") or []) | {k for k in (rec.get("skips") or {}) if k not in no_skip}
     return [(rid, text) for rid, _, text in config.required_rows(paths) if rid not in done]
 
 
-def refuse_checklist_gap(gap: list[tuple[str, str]], sha: str) -> None:
+def refuse_checklist_gap(gap: list[tuple[str, str]], sha: str, skips: dict | None = None) -> None:
+    banned = [rid for rid, _ in gap if rid in (skips or {})]
     block(
         f"Gate 7 (live check): the live check at `{sha[:12]}` skips checklist rows this change needs: "
         + ", ".join(f"`{rid}` ({text})" for rid, text in gap[:12])
@@ -2100,6 +2102,9 @@ def refuse_checklist_gap(gap: list[tuple[str, str]], sha: str) -> None:
         "of its own, `# accept-rows: <ids>`; a row that cannot apply to this change gets "
         "`# accept-skip: <id> <why>` (reviewers read the reason). Then run devcheck.py again "
         "(`--update-pr <N>`)."
+        + (f"\n\nThis project does not take a skip of {', '.join(f'`{r}`' for r in banned)} (`[accept] no_skip`): "
+           "the live-check rig can run it. A device the browser needs (a microphone, a camera) has a fake one: "
+           "see *Live check* in .issuelooper/project.md." if banned else "")
     )
 
 
@@ -2152,7 +2157,7 @@ def devcheck_gate(
         )
     gap = checklist_gap(rec, paths or [])
     if gap:
-        refuse_checklist_gap(gap, sha)
+        refuse_checklist_gap(gap, sha, rec.get("skips"))
     rec_sha = str(rec.get("sha") or "").lower()
     if head_sha and rec_sha != head_sha.lower():
         # In the guard's working directory, as merge_base and the other gates' reads.
@@ -2519,7 +2524,7 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
                 )
             gap = checklist_gap(rec, pr_create_paths(command, cwd))
             if gap:
-                refuse_checklist_gap(gap, m_live.group(1))
+                refuse_checklist_gap(gap, m_live.group(1), rec.get("skips"))
         elif not m_live:
             issues = [n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body)
             scope = devcheck_scope(issues, pr_create_paths(command, cwd), "")

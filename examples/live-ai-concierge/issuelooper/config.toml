@@ -82,6 +82,8 @@ viewports = ["1280x800", "390x844", "320x640"]
 languages = ["en", "ja"]
 always = ["reload mid-task and after", "keyboard: Tab, Enter, Escape", "every entry point named in the issue"]
 live = ["set a location, then 'near here'", "voice and typed interruption", "a Japanese turn"]
+no_skip = ["live:voice-and-typed"]   # rows a live check may not skip: the fake microphone covers voice
+                             # (project.md, Live check). Run 10b: 96 % of records skipped it as "no microphone"
 [accept.triggers]
 "src/concierge/static/*" = ["viewports", "languages"]
 "src/concierge/main.py" = ["live"]

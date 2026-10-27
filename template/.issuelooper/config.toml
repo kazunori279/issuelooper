@@ -79,6 +79,8 @@ viewports = []               # e.g. ["1280x800", "390x844", "320x640"]
 languages = []               # e.g. ["en", "ja"]
 always = []                  # e.g. ["reload mid-task and after", "keyboard: Tab, Enter, Escape"]
 live = []                    # rows for a change to the live mode, e.g. ["a Japanese turn"]
+no_skip = []                 # rows a live check may not skip, as ids, texts or groups (e.g. ["live:voice-and-typed"]):
+                             # gate 7 refuses such a skip and points to project.md for how to run the row
 # Path globs (`*` crosses /; a trailing / is a directory) and the row groups a change to
 # them needs; any of them, or [accept] paths below, also needs the `always` rows.
 [accept.triggers]

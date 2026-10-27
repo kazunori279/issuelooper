@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json
 
 # Every temporary file this file and what it runs make goes under one directory,
 # removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
@@ -172,6 +173,11 @@ try:
     check("the prompt text lists ids and triggers",
           ("always:keyboard-tab-enter" in config.checklist_text(), "src/live.py -> live" in config.checklist_text()),
           (True, True))
+    raw = json.loads(values["ACCEPT_CHECKLIST"])
+    raw["no_skip"] = ["live:voice-and-typed", "Keyboard: Tab, Enter, Escape", "languages"]
+    os.environ["ACCEPT_CHECKLIST"] = json.dumps(raw)
+    check("no_skip names rows by id, text or group", sorted(config.checklist()["no_skip"]),
+          ["always:keyboard-tab-enter", "lang:en", "lang:ja", "live:voice-and-typed"])
     os.environ.pop("ACCEPT_CHECKLIST")
     check("no checklist: no rows, no text", (config.required_rows(["src/static/a.js"]), config.checklist_text()),
           ([], ""))

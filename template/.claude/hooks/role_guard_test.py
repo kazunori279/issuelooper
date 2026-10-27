@@ -2213,6 +2213,14 @@ def test_gate_7_holds_the_live_check_to_the_checklist() -> None:
           merge([{"path": "src/data.json", "changeType": "MODIFIED"}])[0], "allow")
     write_devcheck_record(head)
     check("a record from before the checklist (no rows) is not held to it", merge(ui)[0], "allow")
+    # Run 10b: 96 % of live-check records skipped the voice row as "no microphone".
+    on["ACCEPT_CHECKLIST"] = json.dumps({**json.loads(CHECKLIST_ENV["ACCEPT_CHECKLIST"]), "no_skip": ["lang:ja"]})
+    write_devcheck_record(head, rows=["viewport:1280x800", "viewport:320x640", "lang:en", "always:keyboard-tab-enter"],
+                          skips={"lang:ja": "no Japanese keyboard in headless Chromium"})
+    verdict, reason = merge(ui)
+    check("a skip of a row the project lists in no_skip does not count, and the refusal says how to run it",
+          (verdict, "`[accept] no_skip`" in reason, "project.md" in reason), ("refuse", True, True))
+    on["ACCEPT_CHECKLIST"] = CHECKLIST_ENV["ACCEPT_CHECKLIST"]
     (TEST_DEVCHECK_RECORDS / f"{head}.json").unlink()
 
 
