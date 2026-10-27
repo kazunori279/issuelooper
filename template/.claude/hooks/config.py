@@ -104,6 +104,7 @@ KEYS = {
     ("pool", "run_dir"): "ISSUELOOPER_RUN",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",
     ("guard", "protected_paths"): "GUARD_PROTECTED_PATHS",
+    ("guard", "background_check"): "GUARD_BACKGROUND",
     ("accept", "enabled"): "POOL_ACCEPT",
     ("accept", "paths"): "ACCEPT_PATHS",
     ("accept", "batch"): "POOL_ACCEPT_BATCH",

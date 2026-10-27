@@ -149,6 +149,8 @@ train_size = 6               # POOL_TRAIN_SIZE: PRs in one train at most (it tak
 secret_urls = []             # GUARD_SECRET_URLS: URL paths whose response holds a secret; fetching them unfiltered is refused
 protected_paths = []         # GUARD_PROTECTED_PATHS: the owner's files (such as ["spec/"]; a trailing / covers a
                              # directory); merge gate 6 refuses a pull request that changes any of them
+background_check = true      # GUARD_BACKGROUND: refuse `cmd &` (or nohup, setsid -f) that does not redirect stdout,
+                             # stderr and stdin (`> log 2>&1 < /dev/null`): the agent CLI waits for them to close
 
 # Any other variable, passed through as written.
 [env]

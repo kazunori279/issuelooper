@@ -39,7 +39,9 @@ for i in $(seq 60); do curl -sf "localhost:$TST_PORT/" > /dev/null && break; sle
 
 Always start the server in the background (`nohup ... > log 2>&1 < /dev/null &`),
 in its own command. A server in the foreground never returns, and your session
-sits there until the supervisor kills it. Stop it with `lsof -tiTCP:"$TST_PORT" -sTCP:LISTEN | xargs kill`,
+sits there until the supervisor kills it; so does one in the background that still
+holds the command's output or input, which is why the guard refuses `&` or `nohup`
+without all three redirects. Stop it with `lsof -tiTCP:"$TST_PORT" -sTCP:LISTEN | xargs kill`,
 never with `pkill` or `killall`: they match command lines, yours included, and
 the guard refuses them.
 

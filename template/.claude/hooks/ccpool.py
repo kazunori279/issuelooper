@@ -2060,8 +2060,8 @@ class Session(threading.Thread):
                         resume(conv, f"turn over, waiting on a background task for {cfg.background_idle_s:.0f} s", (
                             "Your last turn ended while a command you started was still running in the background, "
                             "and the session was restarted, which stopped that command. Run what you still need in "
-                            "the foreground and wait for it to finish (start servers with nohup and stop them by "
-                            "port before you end), then finish the task."
+                            "the foreground and wait for it to finish (start a server as `nohup <cmd> > <log> 2>&1 "
+                            "< /dev/null &` and stop it by port before you end), then finish the task."
                         ), max(120, hard - time.time()))
                         continue
                     if conv:

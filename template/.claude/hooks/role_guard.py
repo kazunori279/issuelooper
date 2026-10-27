@@ -779,6 +779,127 @@ def kill_by_pattern_check(command: str) -> None:
         )
 
 
+# A command started in the background keeps this command's stdout, stderr and stdin
+# unless it redirects them, and the agent CLI waits until every process holding them
+# exits. Run 11: an acceptance tester's `nohup uv run concierge --port 8121 ... &` held
+# agy until its 70-minute timeout, and the unit gave no verdict.
+BG_OPS = ("&>>", "&>", ">>", ">&", ">|", "<&", "<<<", "<>", ">", "<", "&&", "||", ";;", "|&", "|", "&", ";", "(", ")", "\n")
+BG_SEPARATORS = {"&&", "||", ";;", "|&", "|", "&", ";", "(", ")", "\n"}
+BG_FD = re.compile(r"(?<![\w$@-])([0-2])(?=[<>])")
+
+
+def background_on() -> bool:
+    return os.environ.get("GUARD_BACKGROUND", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _bg_tokens(command: str) -> list[str]:
+    """Words and shell operators; a file descriptor written before a redirection
+    (`2>&1`) becomes the word `@FD2`. [] when the quotes do not balance."""
+    text = BG_FD.sub(lambda m: f" @FD{m.group(1)}", HEREDOC.sub("", command))
+    lex = shlex.shlex(text, posix=True, punctuation_chars="();<>|&\n")
+    lex.whitespace, lex.whitespace_split = " \t\r", True
+    try:
+        raw = list(lex)
+    except ValueError:
+        return []
+    out = []
+    for t in raw:
+        if t and set(t) <= set("();<>|&\n"):
+            while t:  # a run of operators, longest first
+                op = next(o for o in BG_OPS + tuple(t[0]) if t.startswith(o))
+                out.append(op)
+                t = t[len(op):]
+        else:
+            out.append(t)
+    return out
+
+
+def background_jobs(command: str) -> list[str]:
+    """The jobs this command leaves running with stdout, stderr or stdin still attached:
+    each pipeline that ends in `&` (or starts with `nohup` or `setsid -f`) and does not
+    redirect all three away, unless a `wait` later in the command waits for them. One
+    level of `bash -c '...'` is looked into."""
+    tokens = _bg_tokens(command)
+    jobs, cur, pipeline, waited = [], [], [], False
+
+    def close(seg: list[str], sep: str) -> None:
+        nonlocal pipeline, waited
+        words, fds, fd, k = [], {"0": "tty", "1": "tty", "2": "tty"}, None, 0
+        if pipeline:
+            fds["0"] = "pipe"
+        while k < len(seg):
+            t = seg[k]
+            if t.startswith("@FD"):
+                fd = t[3:]
+            elif t in (">", ">>", ">|", "&>", "&>>", ">&", "<", "<&", "<>", "<<<"):
+                target = seg[k + 1] if k + 1 < len(seg) else ""
+                k += 1
+                if t in ("&>", "&>>") or (t == ">&" and fd is None and not target.isdigit()):
+                    fds["1"] = fds["2"] = "file"
+                elif t in (">&", "<&"):
+                    fds[fd or ("1" if t == ">&" else "0")] = fds.get(target, "file") if target != "-" else "closed"
+                elif t in ("<", "<>", "<<<"):
+                    fds[fd or "0"] = "file"
+                else:
+                    fds[fd or "1"] = "file"
+                fd = None
+            else:
+                words.append(t)
+                fd = None
+            k += 1
+        while words and ASSIGN.match(words[0]):
+            words = words[1:]
+        if words[:1] == ["wait"]:
+            waited = True
+        if sep == "|":
+            fds["1"] = "pipe"
+        elif sep == "|&":
+            fds["1"] = fds["2"] = "pipe"
+        pipeline.append((words, fds))
+        if sep in ("|", "|&"):
+            return
+        first = pipeline[0][0]
+        lead = os.path.basename(first[0]) if first else ""
+        bg = sep == "&" or lead == "nohup" or (lead == "setsid" and ({"-f", "--fork"} & set(first[1:3])))
+        attached = pipeline[0][1]["0"] == "tty" or any(f["1"] == "tty" or f["2"] == "tty" for _, f in pipeline)
+        if bg and attached:
+            jobs.append(" ".join(w for w, _ in pipeline for w in w)[:120] or "(a group)")
+        elif not bg and attached:
+            for words_, _ in pipeline:
+                if words_[:1] and os.path.basename(words_[0]) in ("bash", "sh", "zsh") and "-c" in words_:
+                    i = words_.index("-c")
+                    if i + 1 < len(words_):
+                        jobs.extend(background_jobs(words_[i + 1]))
+        pipeline = []
+
+    for t in tokens + ["\n"]:
+        if t in BG_SEPARATORS:
+            if cur or t == "&" or pipeline:
+                close(cur, t)
+            cur = []
+        else:
+            cur.append(t)
+    return [] if waited else jobs
+
+
+def background_check(command: str) -> None:
+    if not background_on() or "&" not in command and "nohup" not in command and "setsid" not in command:
+        return
+    jobs = background_jobs(command)
+    if jobs:
+        block(
+            f"This starts `{jobs[0]}` in the background with its output (or input) still attached to "
+            "this command. The agent CLI waits until every process holding them exits, so the session "
+            "hangs until its timeout: in run 11 an acceptance tester's `nohup uv run concierge ... &` "
+            "blocked agy for 70 minutes and gave no verdict.\n\n"
+            "Redirect all three in the same command: "
+            "`nohup <cmd> > $ISSUELOOPER_TMP/<name>.log 2>&1 < /dev/null &` (or "
+            "`setsid -f <cmd> > $ISSUELOOPER_TMP/<name>.log 2>&1 < /dev/null`), then wait for it with a bounded "
+            "loop (`for i in $(seq 60); do curl -sf localhost:<port>/ > /dev/null && break; sleep 1; done`). "
+            "Background jobs this same command `wait`s for are fine."
+        )
+
+
 # One `git` call: its global options (-C <dir>, -c <k=v>, --long[=v]) and its subcommand.
 GIT_CALL = re.compile(
     r"""\bgit((?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)|--[\w-]+(?:=\S+)?))*)\s+([a-z][\w-]*)"""
@@ -2593,6 +2714,8 @@ def main(raw: str) -> None:
     # Before the write test, because this one is not a `gh` write.
     secret_check(command)
     kill_by_pattern_check(command)
+    if role:
+        background_check(command)
     if role in ROLES:
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
         git_checkout_check(command, cwd or None)

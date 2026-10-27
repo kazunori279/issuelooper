@@ -219,6 +219,31 @@ def test_kill_by_pattern() -> None:
     check("any command naming pkill is refused", verdict, "refuse")
 
 
+def test_background_commands_must_let_go_of_the_terminal() -> None:
+    # Run 11: `nohup uv run concierge --port 8121 ... &` held agy until a 70-minute timeout.
+    refused = ["nohup uv run concierge --port 8121 &",
+               "nohup uv run concierge --port 8121 > $ISSUELOOPER_TMP/s.log 2>&1 &",
+               "uv run concierge --port 8121 > s.log &",
+               "setsid -f uv run concierge --port 8121",
+               "cmd 2>&1 > s.log < /dev/null &",
+               'bash -c "nohup uv run concierge &"']
+    allowed = ["nohup uv run concierge --port 8121 > $ISSUELOOPER_TMP/s.log 2>&1 < /dev/null &",
+               "setsid -f uv run concierge > $ISSUELOOPER_TMP/s.log 2>&1 < /dev/null",
+               "uv run concierge &> $ISSUELOOPER_TMP/s.log < /dev/null & sleep 2; curl -sf localhost:8121/",
+               "pytest tests/a & pytest tests/b & wait",
+               'echo "a & b" && git status 2>/dev/null | head',
+               "cd wt && (uv run x > l 2>&1 < /dev/null &) && sleep 1"]
+    for role in ("tester", "worker"):
+        for cmd in refused:
+            verdict, reason = run(cmd, role=role, host=AGY)
+            check(f"{cmd!r} is refused for the {role}", verdict, "refuse")
+        check("the refusal shows the right form", "2>&1 < /dev/null" in reason and "setsid -f" in reason, True)
+        for cmd in allowed:
+            check(f"{cmd!r} is allowed for the {role}", run(cmd, role=role, host=AGY)[0], "allow")
+    check("off with GUARD_BACKGROUND=0",
+          run(refused[0], role="tester", extra_env={"GUARD_BACKGROUND": "0"})[0], "allow")
+
+
 def test_arguments_are_refused_at_once() -> None:
     # `role_guard.py check-pr 98` used to wait on stdin until a watchdog killed it.
     proc = subprocess.Popen([sys.executable, str(GUARD), "check-pr", "98"], stdin=subprocess.PIPE,

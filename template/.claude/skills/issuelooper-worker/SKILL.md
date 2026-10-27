@@ -44,7 +44,9 @@ costs a whole round (one live issue once took six worker sessions this way). Whe
 the project has `[devcheck]` on, that is step 4's live check; otherwise, in
 your worktree, start the app in live mode on a free port, in the background, as
 *Live mode* in `.issuelooper/project.md` says (it names where the credentials
-come from), with its log at `$ISSUELOOPER_TMP/wrk-$K-$N-live.log`. Drive the issue's steps at
+come from), with its log at `$ISSUELOOPER_TMP/wrk-$K-$N-live.log` (always
+`nohup <cmd> > <log> 2>&1 < /dev/null &`: a background server that keeps the command's
+output or input holds your session until its timeout, and the guard refuses it). Drive the issue's steps at
 least twice (in each language the issue concerns), read the screenshots and the
 server log, stop the server with `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, and remove any credential
 link you made in the worktree before you commit. Say what the live environment
