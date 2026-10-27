@@ -251,7 +251,8 @@ def load(
     ]
     # The worker-owns-its-issue switches: the acceptance sample, explorers, areas (absent: off).
     model["ownership"] = {"sample": (state.get("accept") or {}).get("sample"),
-                          "explore": state.get("explore"), "areas": state.get("areas")}
+                          "explore": state.get("explore"), "areas": state.get("areas"),
+                          "area_waits": state.get("area_waits")}
     model["attention"] = attention(model, state, log, now)
     return model
 
@@ -637,6 +638,11 @@ def ownership_lines(o: dict) -> list[str]:
             f"{name} {v.get('queue', 0)} waiting" + "".join(
                 f" [{'busy' if sl.get('busy') else 'idle'}, {sl.get('issues', 0)} issues]" for sl in v.get("slots") or [])
             for name, v in a.items()))
+    w = {k: v for k, v in (o.get("area_waits") or {}).items() if v.get("hot_wait_s") or v.get("area_wait_s")}
+    if w:
+        out.append("Area waits: " + " · ".join(
+            f"{name} hot {v.get('hot_wait_s', 0) // 60} min, busy {v.get('area_wait_s', 0) // 60} min"
+            + (f" ({v['waiting']} waiting)" if v.get("waiting") else "") for name, v in w.items()))
     return out
 
 

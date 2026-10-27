@@ -328,6 +328,9 @@ def test_ownership_lines() -> None:
         "Acceptance sample: 1 in 2 · 2 of the last 6 disagree with the author (33%) · 9 sampled in all",
         "Explorers: 1 running (phone 320 px) · 3/6 this hour",
         "Areas: live 4 waiting [busy, 2 issues]"])
+    check("area waits, by reason", dm.ownership_lines({"area_waits": {"live": {"hot_wait_s": 600, "area_wait_s": 0,
+                                                                          "waiting": 1}}}),
+          ["Area waits: live hot 10 min, busy 0 min (1 waiting)"])
     check("all off: nothing", dm.ownership_lines({}), [])
 
 

@@ -207,11 +207,22 @@ the pool busy; each is off by default (the concierge sample turns them on):
   `[explore] focuses` in turn and filing up to `[explore] issues` findings, at most
   `[explore] max` at once and `[explore] per_hour` an hour. They replace idle-time UX runs
   and spec checks; the regular UX run (`[ux] gap_minutes`) stays.
-- `[areas.<name>]` (path globs, hot files): an issue goes to its area's conversation (an
-  `area:<name>` label, else the files its last branch or its text names), resumed issue
-  after issue, at most `[areas] conversations` (2) per area, and a fresh one with the old
-  one's notes after `[areas] refresh_after` (6) issues. One session at a time works an
-  issue naming a hot file, and the starve hold leaves hot files to that rule.
+- `[areas.<name>]` (path globs, hot files, title `words`, requirement-id `ids`): an issue
+  goes to its area's conversation by an `area:<name>` label, else by the area that leads
+  on title words, ids, its last branch's files and the files its names occur in
+  (`[areas] shared` files, which name everything, do not count). The conversation is
+  resumed issue after issue; conversation k opens while k times `[areas] second_at` wait
+  (at most `[areas] conversations`, 3), more than `[areas] lend_at` waiting go to
+  ordinary workers, and a fresh conversation with the old one's notes starts after
+  `[areas] refresh_after` (6) issues. Only a hot file makes an issue wait for another
+  session; waits are logged and totalled in `state.json` (`area_waits`).
+- `[pool] author_guard`: when the train's acceptance guards fail only because of a PR,
+  its author is resumed to fix the code or update a guard its issue changes (a
+  `Guard change:` line in the PR body, checked by the review gate).
+
+An issue `[pool] hub_at` (3) open issues depend on is a hub: it takes the highest priority
+among them and one level more, `[pool] hub_timeout` (1.5) times the worker timeout and
+its last worker's conversation, and its failures never park it at stage:owner.
 
 The supervisor also handles what goes wrong in long unattended runs: workers that
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
@@ -223,8 +234,12 @@ finished is ended `POOL_UNSEEN_IDLE_S` after the last step, once nothing it star
 in its scratch paths is still working), and a session's clocks stand still while the agent CLI retries a failed model
 call (agy), up to a hard ceiling of 1.5 times its timeout (`POOL_TIMEOUT_CEILING`); quota
 errors agy retries inside a turn (read from its conversation record) pause new sessions
-pool-wide, and a turn agy ends on an error it calls retryable is resumed, not counted
-as a failure. A UX run, spec check or explorer gets a turn to write its report before
+pool-wide, and while the pool is paused for quota every running session's clocks stand
+still too (its ceiling moves by up to `POOL_QUOTA_EXTEND_MAX_S`); a session that times out
+mostly in quota waits is no failed attempt. A turn agy ends on an error it calls retryable is
+resumed, not counted as a failure, and an acceptance unit's posted verdicts settle however
+its session ended. A UX report's first line stays `Score: provisional`, which is not logged,
+until the journeys ran; sessions may not read the loop's own logs. A UX run, spec check or explorer gets a turn to write its report before
 its time runs out. Conflicting PRs that only add lines are rebased without an agent (once
 per head; a head whose rebase failed goes to a merger), a PR that conflicts again
 after three merger sessions (main kept moving) goes back to a worker, a P0/P1 PR whose
