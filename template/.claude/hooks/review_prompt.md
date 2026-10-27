@@ -32,6 +32,10 @@ The issue (#<<N>>), as written:
 
 <<ISSUE>>
 
+Names this diff adds that the spec names too (a test hook, an id, a key the spec requires is the product's, not code for tests: never a `test_specific` finding, whether or not other production code reads it):
+
+<<SPEC>>
+
 The author's answer to the last rejection of this pull request (weigh it: when it quotes the issue or the spec and that covers the code, the earlier finding does not stand):
 
 <<ANSWER>>

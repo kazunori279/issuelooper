@@ -134,6 +134,8 @@ PROMPT = pathlib.Path(os.environ.get("REVIEW_PROMPT") or HERE / "review_prompt.m
 PATHS = _paths(os.environ.get("REVIEW_PATHS", "src/"))
 RULES = os.environ.get("REVIEW_RULES", ".issuelooper/review_rules.md")
 FIXTURES = os.environ.get("REVIEW_FIXTURES", "tests/fixtures/**/*.json,spec/fixtures/**/*.json")
+# Where the product's spec lives (REVIEW_SPEC_PATHS; empty = no spec lookup).
+SPEC_PATHS = _paths(os.environ.get("REVIEW_SPEC_PATHS", "spec/"))
 # A failed review and a PR rejected many times used to be allowed ("error", "cap"):
 # a judge outage or a persistent finding then merged unreviewed code.
 ALLOWS = {"pass", "skipped", "override"}
@@ -596,6 +598,53 @@ def prescan(
     return flags
 
 
+# Names a diff adds that a spec may require: test hooks, element ids and names, and
+# quoted identifiers (`msg-user`, "composerInput", 'place_info').
+NAME_HOOKS = re.compile(r"""(?:data-testid|testid|TestId|\bid|\bname|data-[\w-]+)\s*[=:(,]\s*["'`]([\w:.-]{2,60})["'`]""")
+NAME_QUOTED = re.compile(r"""["'`]([A-Za-z][\w:.-]{2,60})["'`]""")
+SPEC_EXT = (".md", ".txt", ".rst", ".yaml", ".yml", ".toml", ".json", ".html")
+
+
+def spec_names(files: list[tuple[str, str]], root: pathlib.Path, cap: int = 30) -> list[str]:
+    """The names this diff adds in production code that the spec names too (backticked,
+    or written out whole when they read as identifiers), each with where: the reviewer
+    may not call them test-specific. Run 11, PR #92 (#4): "data-testid=msg-user no
+    production code reads" was rejected as test_specific, though REQUIREMENTS §12 (lines
+    185-191) requires that test hook."""
+    hooks, quoted = [], []
+    for path, part in files:
+        if not is_prod(path):
+            continue
+        for _, line in added_lines(part):
+            hooks += NAME_HOOKS.findall(line)
+            quoted += [q for q in NAME_QUOTED.findall(line) if re.search(r"[-_]|[a-z][A-Z]", q)]
+    names = list(dict.fromkeys(hooks + quoted))[:300]
+    if not names or not SPEC_PATHS:
+        return []
+    lines: list[tuple[str, int, str]] = []
+    for prefix in SPEC_PATHS:
+        base = root / prefix
+        for f in sorted([base] if base.is_file() else base.rglob("*") if base.is_dir() else []):
+            if f.is_file() and f.suffix in SPEC_EXT:
+                try:
+                    for k, ln in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                        lines.append((str(f.relative_to(root)), k, ln))
+                except OSError:
+                    continue
+    out = []
+    for name in names:
+        tick = f"`{name}`"
+        whole = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+        hit = next(((p, k) for p, k, ln in lines if tick in ln), None)
+        if hit is None and name in quoted:
+            hit = next(((p, k) for p, k, ln in lines if whole.search(ln)), None)
+        if hit:
+            out.append(f"`{name}` ({hit[0]}:{hit[1]})")
+            if len(out) >= cap:
+                break
+    return out
+
+
 JS_START = re.compile(
     r"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)\s*\(|"
     r"^\s*(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b[^(]*\([^)]*\)|\([^)]*\)\s*=>|[\w$]+\s*=>)\s*\{|"
@@ -767,7 +816,7 @@ def parse_verdict(reply) -> dict:
 
 
 def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "",
-                 issue_text: str = "", answer: str = "") -> str:
+                 issue_text: str = "", answer: str = "", spec: list[str] | None = None) -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
@@ -775,6 +824,7 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
         "TITLE": title,
         "ISSUE": issue_text.strip() or "(not readable)",
         "ANSWER": answer.strip() or "(none)",
+        "SPEC": "\n".join(f"- {x}" for x in spec or []) or "(none found)",
         "PATHS": ", ".join(f"`{p}`" for p in PATHS) or "the repository",
         "RULES": rules.strip() or NO_RULES,
         "LONG": str(LONG_FN),
@@ -1021,6 +1071,7 @@ def review(pr: int, hand: bool = True) -> int:
     answer = author_answer(repo, pr, last_reject) if last_reject else ""
     issue_text = issue_body(repo, issue)
     flags = prescan(files, fixture_tokens(config.repo_root()), extra)
+    spec = spec_names(files, config.repo_root())
     longfn = long_functions(files, content_at)
     # Only logged, never a reason to reject.
     grown = grown_functions(files, content_at, REFACTOR_LINES)
@@ -1043,7 +1094,7 @@ def review(pr: int, hand: bool = True) -> int:
         gone = left_out(shown, text) if cut else []
         prompt = build_prompt(
             issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone),
-            issue_text, answer,
+            issue_text, answer, spec,
         )
         size = len(prompt.encode())
         if size <= PROMPT_BYTES or prod_limit <= MAX_CHARS:
@@ -1054,6 +1105,7 @@ def review(pr: int, hand: bool = True) -> int:
     hints = {
         "key": key,
         "flags": len(flags),
+        "spec_names": len(spec),
         "long_functions": longfn,
         "dupes": len(dupes),
         "chars": len(text),

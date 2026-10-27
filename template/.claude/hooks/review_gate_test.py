@@ -217,6 +217,28 @@ try:
         "kinds in reply format", '"project_rule"' in p and '"test_specific"' in p, True
     )
 
+    # --- names the spec requires (run 11, PR #92: msg-user called test-specific) --------
+    spec_root = pathlib.Path(tempfile.mkdtemp())
+    (spec_root / "spec").mkdir()
+    (spec_root / "spec" / "REQUIREMENTS.md").write_text(
+        "## 12. Test hooks\n\n| testid | Element |\n| --- | --- |\n| `msg-user`, `msg-assistant` | bubbles |\n"
+        "The settings key place_info is listed.\n")
+    named = rg.split_files(diff_for([("src/static/app.js", [
+        'el.dataset.testid = "x"; bubble.setAttribute("data-testid", "msg-user");',
+        'const k = "place_info"; const z = "dash-board"; const status = "status";'])]))
+    check("names the diff adds that the spec names: a test hook, a quoted identifier; not others",
+          rg.spec_names(named, spec_root),
+          ["`msg-user` (spec/REQUIREMENTS.md:5)", "`place_info` (spec/REQUIREMENTS.md:6)"])
+    p = rg.build_prompt(7, "t", [], [], [], "d", False, spec=["`msg-user` (spec/REQUIREMENTS.md:5)"])
+    check("the prompt lists them as the product's, never test_specific",
+          ("- `msg-user` (spec/REQUIREMENTS.md:5)" in p, "never a `test_specific` finding" in p, "<<SPEC>>" in p),
+          (True, True, False))
+    check("none: said so", "(none found)" in rg.build_prompt(7, "t", [], [], [], "d", False), True)
+    keep_spec = rg.SPEC_PATHS
+    rg.SPEC_PATHS = ()
+    check("REVIEW_SPEC_PATHS empty: no lookup", rg.spec_names(named, spec_root), [])
+    rg.SPEC_PATHS = keep_spec
+
     # --- pre-scan -------------------------------------------------------------------
     files = rg.split_files(
         diff_for(

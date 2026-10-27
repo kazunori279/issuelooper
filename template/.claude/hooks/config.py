@@ -95,6 +95,7 @@ KEYS = {
     ("review", "production_paths"): "REVIEW_PATHS",
     ("review", "max_rejects"): "REVIEW_MAX_REJECTS",
     ("review", "fixtures"): "REVIEW_FIXTURES",
+    ("review", "spec_paths"): "REVIEW_SPEC_PATHS",
     ("pool", "max_sessions"): "POOL_MAX_WORKERS",
     ("pool", "merge_train"): "POOL_MERGE_TRAIN",
     ("pool", "train_size"): "POOL_TRAIN_SIZE",
