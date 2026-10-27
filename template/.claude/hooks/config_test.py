@@ -181,6 +181,20 @@ try:
     os.environ.pop("ACCEPT_CHECKLIST")
     check("no checklist: no rows, no text", (config.required_rows(["src/static/a.js"]), config.checklist_text()),
           ([], ""))
+    values, unknown = config.env_from({"explore": {"enabled": True, "focuses": ["one card type (weather, maps)", "ja"]},
+                                       "areas": {"refresh_after": 6, "live": {"paths": ["src/live.py", "src/js/live*"],
+                                                                              "hot": ["src/live.py"]},
+                                                 "cards": {"paths": ["src/js/cards/*"], "hot": True}}})
+    os.environ.update(values)
+    check("explore focuses keep their commas; areas go in one JSON variable",
+          (unknown, config.explore_focuses(), values["POOL_AREA_REFRESH"],
+           [(a["name"], a["hot"]) for a in config.areas()]),
+          ([], ["one card type (weather, maps)", "ja"], "6", [("live", ["src/live.py"]), ("cards", ["src/js/cards/*"])]))
+    check("a path's area and whether it is hot",
+          (config.area_of("src/js/live_audio.js"), config.area_of("src/js/cards/map.js"), config.area_of("README.md"),
+           config.is_hot("src/live.py"), config.is_hot("src/js/live_audio.js")), ("live", "cards", "", True, False))
+    for k in values:
+        os.environ.pop(k, None)
     # [sweep] link_files: run 11's env-dependent test was red where .env was linked, green elsewhere.
     import tempfile
     shared, tree = pathlib.Path(tempfile.mkdtemp()), pathlib.Path(tempfile.mkdtemp())

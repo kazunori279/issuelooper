@@ -77,6 +77,19 @@ Write `$LOGDIR/spec_report.md`: the commit, each requirement you checked with
 `ok`, `gap: filed #N`, `gap: already #N` or `not testable here: <why>`. Then stop
 the server and remove `$T`.
 
+## Explore
+
+The pool has slots no issue needs, and your prompt names one focus (a viewport, a
+language, the live journey, reload and restore, the settings, one card type, one spec
+section). Run the commit in your prompt (the rig), and use the app through that focus
+only, as a person would: at the viewports and languages that apply, across a reload,
+with screenshots after each step, read through contact sheets. Judge them on the UX
+run's scale (step 2). File at most the number your prompt gives, each checked for a
+duplicate as in UX run step 3, labelled `area:<name>` when it lies in one of the areas
+your prompt lists. Write `$LOGDIR/explore_report.md` as you go: its first line
+`Score: N/100` for this focus, then what you checked and each finding's disposition.
+Stop the server and remove `$T`.
+
 ## Acceptance check
 
 Your prompt lists merged issues (up to six) and the commit they are in: the deployed

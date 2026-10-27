@@ -2324,6 +2324,42 @@ def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
     check("a provisional score counts", ccpool.SCORE_LINE.search("Score: 64/100 (provisional)").group(1), "64")
 
 
+def test_explorers_fill_the_idle_slots() -> None:
+    """Proposal §3: c55 at 3 h 45 min had 11 agents for 4 claimable issues, and D's own
+    testers filed about 5 issues an hour; idle UX runs and spec checks waited for an idle pool."""
+    focuses = ["phone 320 px", "Japanese, every screen", "reload and restore"]
+    h = Rig(state([iss(1, ["stage:triage", "P1"])]), global_cap=4, explore=True, explore_focuses=focuses,
+            explore_max=2, explore_per_hour=3, spec=True, ux=True, ux_gap_s=1e12, ux_idle_gap_s=0, spec_gap_s=0)
+    h.pool.book.last_ux_t = h.now
+    started = h.step()
+    check("one worker, and explorers in the free slots, up to POOL_EXPLORE_MAX, each with the next focus; "
+          "no idle UX run or spec check",
+          sorted((u.kind, u.info.get("focus")) for u in started),
+          [("explore", "Japanese, every screen"), ("explore", "phone 320 px"), ("implement", None)])
+    check("explorers rank after all other work", max(started, key=lambda u: u.rank).kind, "explore")
+    check("both running: no more", h.step(), [])
+    h.finish(next(u.key for u in started if u.info.get("focus") == "phone 320 px"))
+    again = h.step()
+    check("a freed explorer slot takes the focus after the last", [u.info.get("focus") for u in again],
+          ["reload and restore"])
+    h.finish(again[0].key)
+    check("POOL_EXPLORE_PER_HOUR reached: none until the hour has passed", h.step(), [])
+    h.now += 3601
+    check("an hour later the rotation goes on, from the first again", [u.info.get("focus") for u in h.step()],
+          ["phone 320 px"])
+    busy = Rig(state([iss(n, ["stage:triage", "P1"]) for n in range(1, 5)]), global_cap=4, explore=True,
+               explore_focuses=focuses)
+    check("no free slot: no explorer", sorted(u.kind for u in busy.step()), ["implement"] * 4)
+    nocap = Rig(state([iss(1, ["stage:triage", "P1"])]), explore=True, explore_focuses=focuses)
+    check("with no global cap, explorers only while no worker is due", sorted(u.kind for u in nocap.step()), ["implement"])
+    u = ccpool.Unit("tester", "explore", "exp:a:0", "tst:exp0", None, (5, 0),
+                    {"sha": "a" * 40, "deployed": True, "focus": "phone 320 px", "issues": 3, "areas": ["live", "cards"]})
+    prompt = ccpool.tester_prompt(u, 8121, "60m")
+    check("its prompt: the focus, the skill section, the limit, areas to label, a provisional score",
+          all(x in prompt for x in ("section Explore", "Your focus: phone 320 px", "at most 3 new findings",
+                                    "`area:<name>`", "live, cards", "explore_report.md", "provisional")), True)
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""

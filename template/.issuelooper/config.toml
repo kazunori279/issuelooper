@@ -140,6 +140,16 @@ gap_minutes = 45             # POOL_SPEC_GAP_MIN: at most one spec check per thi
 id_pattern = ""              # POOL_MAP_ID_PATTERN: a regex for the spec's requirement ids (such as '\bREQ-\d+\b');
                              # a worker's prompt lists the files that name the ids its issue mentions
 
+[explore]
+enabled = false              # POOL_EXPLORE: when the due work leaves agent slots free (under max_sessions), testers
+                             # explore the deployed app, one focus each, and file what they find; they replace the
+                             # idle-time UX runs and spec checks (the regular UX run, every [ux] gap_minutes, stays)
+focuses = []                 # POOL_EXPLORE_FOCUSES: taken in turn, e.g. ["phone 320 px", "Japanese, every screen",
+                             # "reload mid-task and after", "the settings", "one spec section: ..."]
+max = 2                      # POOL_EXPLORE_MAX: explorers at once
+per_hour = 4                 # POOL_EXPLORE_PER_HOUR: explorers started per hour at most (the model quota is shared)
+issues = 3                   # POOL_EXPLORE_ISSUES: findings one explorer files at most
+
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project

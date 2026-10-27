@@ -90,6 +90,15 @@ KEYS = {
     ("spec", "enabled"): "POOL_SPEC",
     ("spec", "gap_minutes"): "POOL_SPEC_GAP_MIN",
     ("spec", "id_pattern"): "POOL_MAP_ID_PATTERN",
+    ("explore", "enabled"): "POOL_EXPLORE",
+    ("explore", "max"): "POOL_EXPLORE_MAX",
+    ("explore", "per_hour"): "POOL_EXPLORE_PER_HOUR",
+    ("explore", "issues"): "POOL_EXPLORE_ISSUES",
+    ("areas", "refresh_after"): "POOL_AREA_REFRESH",
+    ("areas", "refresh_tokens"): "POOL_AREA_REFRESH_TOKENS",
+    ("areas", "conversations"): "POOL_AREA_CONVERSATIONS",
+    ("areas", "second_at"): "POOL_AREA_SECOND_AT",
+    ("areas", "hot_lock"): "POOL_AREA_HOT_LOCK",
     ("review", "enabled"): "REVIEW_GATE",
     ("review", "rules"): "REVIEW_RULES",
     ("review", "production_paths"): "REVIEW_PATHS",
@@ -198,6 +207,7 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
     out: dict[str, str] = {}
     unknown: list[str] = []
     checklist_raw: dict = {}
+    areas: dict = {}
     for table, body in cfg.items():
         if table == "env":
             for name, v in (body or {}).items():
@@ -209,6 +219,13 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
         for key, v in body.items():
             if table == "accept" and key in CHECKLIST_KEYS:
                 checklist_raw[key] = v
+                continue
+            if table == "explore" and key == "focuses":
+                out["POOL_EXPLORE_FOCUSES"] = json.dumps([str(x) for x in (v if isinstance(v, list) else [v])],
+                                                         ensure_ascii=False)  # a focus may hold commas
+                continue
+            if table == "areas" and isinstance(v, dict):
+                areas[key] = v
                 continue
             if table == "agents" and isinstance(v, dict):
                 if key not in ROLES:
@@ -227,6 +244,8 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
                 out[name] = _text(v)
     if checklist_raw:
         out["ACCEPT_CHECKLIST"] = json.dumps(checklist_raw, ensure_ascii=False)
+    if areas:
+        out["POOL_AREAS"] = json.dumps(areas, ensure_ascii=False)
     return out, unknown
 
 
@@ -261,6 +280,49 @@ def link_shared_files(tree: str | pathlib.Path) -> list[str]:
             except OSError:
                 pass
     return done
+
+
+def explore_focuses() -> list[str]:
+    """[explore] focuses ($POOL_EXPLORE_FOCUSES: a JSON list, or entries split by `|`)."""
+    raw = os.environ.get("POOL_EXPLORE_FOCUSES", "").strip()
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw)
+        return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else [str(v)]
+    except ValueError:
+        return [x.strip() for x in raw.split("|") if x.strip()]
+
+
+def areas() -> list[dict]:
+    """[areas.<name>] tables ($POOL_AREAS): [{"name", "paths": [globs], "hot": [globs]}], in
+    the file's order. `hot = true` makes every path hot; a list names the hot ones. [] = off."""
+    try:
+        raw = json.loads(os.environ.get("POOL_AREAS") or "{}")
+    except ValueError:
+        return []
+    out = []
+    for name, body in (raw.items() if isinstance(raw, dict) else []):
+        if not isinstance(body, dict):
+            continue
+        paths = [str(x) for x in (body.get("paths") or []) if str(x).strip()]
+        hot = body.get("hot") or []
+        hot = paths if hot is True else [str(x) for x in (hot if isinstance(hot, list) else [hot]) if str(x).strip()]
+        if paths:
+            out.append({"name": str(name), "paths": paths, "hot": hot})
+    return out
+
+
+def area_of(path: str, table: list[dict] | None = None) -> str:
+    """The first area whose paths cover a repository path ('' when none)."""
+    for a in areas() if table is None else table:
+        if any(path_matches(path, g) for g in a["paths"]):
+            return a["name"]
+    return ""
+
+
+def is_hot(path: str, table: list[dict] | None = None) -> bool:
+    return any(path_matches(path, g) for a in (areas() if table is None else table) for g in a["hot"])
 
 
 def accept_paths() -> list[str]:

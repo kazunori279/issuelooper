@@ -422,6 +422,17 @@ class Config:
     ux_journeys: str = ""  # the project's journeys script (a repository path); empty = the tester keeps its own
     spec: bool = False
     spec_gap_s: float = 2700
+    # Explorers (POOL_EXPLORE): when the due work leaves agent slots free, tester units that
+    # each walk one focus of the deployed app (rotating through explore_focuses) and file
+    # what they find; they replace the idle-time UX runs and spec checks. At most
+    # explore_max at once and explore_per_hour started an hour (the model quota is shared).
+    # c55 at 3 h 45 min: 11 agents for 4 claimable issues; D's testers filed ~5 issues an hour.
+    explore: bool = False
+    explore_focuses: list = dataclasses.field(default_factory=list)
+    explore_max: int = 2
+    explore_per_hour: int = 4
+    explore_issues: int = 3
+    areas: list = dataclasses.field(default_factory=list)  # [areas] (config.areas): {"name", "paths", "hot"}
     unknown_s: float = 300
     split_after: int = 4
     starve_after: int = 2  # conflicts left to a merger on the same files before a P0/P1 PR is starving
@@ -570,6 +581,12 @@ class Config:
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
             ux_journeys=e("POOL_UX_JOURNEYS", "").strip(),
             spec_gap_s=gap_s("POOL_SPEC_GAP", 45),
+            explore=env_flag("POOL_EXPLORE"),
+            explore_focuses=config.explore_focuses(),
+            explore_max=env_int("POOL_EXPLORE_MAX", 2),
+            explore_per_hour=env_int("POOL_EXPLORE_PER_HOUR", 4),
+            explore_issues=env_int("POOL_EXPLORE_ISSUES", 3),
+            areas=config.areas(),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
             starve_after=env_int("POOL_STARVE_AFTER", 2),
@@ -975,6 +992,8 @@ class Book:
         self.last_ux_t = 0.0  # when the last UX run started
         self.last_spec_t = 0.0  # when the last spec check started
         self.extra_runs = 0  # idle UX runs and spec checks started (part of their keys)
+        self.explore_runs = 0  # explorers started (their focus rotates with it)
+        self.explore_times: list[float] = []  # when each started, for the hourly budget
         self.unknown_since: dict[int, float] = {}  # PR -> first poll it read UNKNOWN
         self.conflicts: list[tuple[float, str, int]] = []  # (time, file, PR) seen by a rebase
         self.split_filed: set[str] = set()  # files a split issue was filed for
@@ -1302,6 +1321,8 @@ def plan(
     )
     if accept_long:
         pass  # a long acceptance queue takes the testers before idle-time UX runs and spec checks
+    elif cfg.explore and cfg.explore_focuses:
+        pass  # explorers fill idle slots instead (below); the regular UX run keeps its gap
     elif ux_sha and not busy:
         info = {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd)}
         if (cfg.ux and not ux_running and not any(u.kind == "ux" for u in units)
@@ -1323,6 +1344,9 @@ def plan(
             units.append(Unit("tester", "spec", f"spec:{ux_sha[:12]}:{book.extra_runs}", "tst:spec", None,
                               (2, 0, 1), {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd), "spare": True}))
 
+    if cfg.explore and cfg.explore_focuses and ux_sha and not accept_long:
+        units += plan_explorers(book, cfg, now, ux_sha, units)
+
     units.sort(key=lambda u: u.rank)
     due, stuck = [], []
     for u in units:
@@ -1332,6 +1356,28 @@ def plan(
         elif u.kind != "ux" and (why in ("tries", "family") or (why == "done" and u.kind not in ("live", "accept"))):
             stuck.append(u)
     return due, stuck
+
+
+def plan_explorers(book: Book, cfg: Config, now: float, sha: str, units: list[Unit]) -> list[Unit]:
+    """Explorer units for the agent slots the due work leaves free (with no global cap: only
+    while no worker is due), up to POOL_EXPLORE_MAX running and POOL_EXPLORE_PER_HOUR
+    started in the last hour, each with the next focus in turn."""
+    agents = sum(1 for u in book.running.values() if u.role != "auto")
+    due = [u for u in units if u.role != "auto" and not book.why_not(u, cfg, now)]
+    if cfg.global_cap:
+        free = cfg.global_cap - agents - len(due)
+    else:
+        free = 0 if any(u.role == "worker" for u in due) else cfg.explore_max
+    running = sum(1 for u in book.running.values() if u.kind == "explore")
+    budget = cfg.explore_per_hour - sum(1 for t in book.explore_times if now - t < 3600) if cfg.explore_per_hour else free
+    families = [f"tst:exp{j}" for j in range(max(0, cfg.explore_max)) if f"tst:exp{j}" not in book.running]
+    out = []
+    for j in range(max(0, min(free, cfg.explore_max - running, budget, len(families)))):
+        k = book.explore_runs + j
+        out.append(Unit("tester", "explore", f"exp:{sha[:12]}:{k}", families[j], None, (5, k),
+                        {"sha": sha, "deployed": bool(cfg.deploy_cmd), "focus": cfg.explore_focuses[k % len(cfg.explore_focuses)],
+                         "issues": cfg.explore_issues, "areas": [a["name"] for a in cfg.areas]}))
+    return out
 
 
 def accept_item(book: Book, open_by: dict, n: int, live: bool) -> dict:
@@ -1756,6 +1802,22 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         f"the deployed app now runs {sha[:12]}" if u.info.get("deployed")
         else f"origin/main is at {sha[:12]} (this repository does not deploy)"
     )
+    if u.kind == "explore":
+        areas = u.info.get("areas") or []
+        return (
+            "Use the issuelooper-tester skill (section Explore) and do exactly one run, then stop.\n\n"
+            f"Your unit: {where}, and the pool has slots no issue needs. Your focus: {u.info.get('focus')}. Start the "
+            f"app at that commit on your port as {PROJECT} says (live mode only when the focus is the live journey) "
+            "and use it as a person would, through that focus only: at the checklist's viewports and languages "
+            "where they apply, and across a reload. Judge what you see by the skill's UX scale (UX run, step 2). "
+            f"File at most {u.info.get('issues', 3)} new findings, each checked for a duplicate as in UX run step 3, "
+            "signed `<!-- tester -->`"
+            + (f", labelled `area:<name>` when it lies in one of these areas: {', '.join(areas)}" if areas else "")
+            + ". Write $LOGDIR/explore_report.md: its first line `Score: N/100` for this focus, written as soon as "
+            "you have looked (provisional) and updated as you go, then what you checked and each finding's "
+            "disposition (`filed #N`, `already #N`, `not filed: <why>`)."
+            + rules
+        )
     if u.kind == "spec":
         return (
             "Use the issuelooper-tester skill (section Spec check) and do exactly one check, then "
@@ -2712,8 +2774,7 @@ class Session(threading.Thread):
         elif u.role == "worker" and u.kind == "own-accept":
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
-            prompt = author_accept_prompt(u, self.seq, self.port, self.timeout(), [a["name"] for a in config.areas()]
-                                          if hasattr(config, "areas") else None)
+            prompt = author_accept_prompt(u, self.seq, self.port, self.timeout(), [a["name"] for a in cfg.areas])
         elif u.role == "worker" and u.kind == "resolve":
             env.update(RESOLVE_PR=str(u.number), RESOLVE_BRANCH=u.info.get("branch") or f"issue-{u.info['issue']}")
             prompt = author_resolve_prompt(u, self.seq, self.timeout(), self.main_commits(u.info.get("branch") or ""))
@@ -3760,6 +3821,9 @@ class Pool:
                 b.last_spec_t = self.clock()
             if u.info.get("idle") or u.kind == "spec":
                 b.extra_runs += 1
+            if u.kind == "explore":
+                b.explore_runs += 1
+                b.explore_times = [t for t in b.explore_times if self.clock() - t < 3600] + [self.clock()]
             if u.kind in ("accept", "own-accept"):
                 for x in u.info["issues"]:
                     b.accept_held[x["n"]] = u.key
@@ -5704,6 +5768,9 @@ class Pool:
                        "held": sorted(self.book.accept_held),
                        **({"sample": self.sample_stats()} if self.cfg.author_accept else {})},
             "missing_files": self.book.missing,
+            **({"explore": {"running": [u.info.get("focus") for u in self.book.running.values() if u.kind == "explore"],
+                            "last_hour": sum(1 for t in self.book.explore_times if now - t < 3600),
+                            "per_hour": self.cfg.explore_per_hour}} if self.cfg.explore else {}),
             "ux_scores": self.ux_scores[-10:],
         }
         q = state["queue"]
