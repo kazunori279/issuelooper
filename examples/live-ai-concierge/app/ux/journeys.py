@@ -306,6 +306,34 @@ def card(page: Page, kind: str):
     return page.locator(f'[data-testid="card"][data-card-type="{kind}"]').last
 
 
+# Cards on screen, and those of them that show a map (a Google map, or anything the app
+# marks as a map), as [cards, maps].
+CARDS_JS = (
+    "() => { const cs = [...document.querySelectorAll('[data-testid=card]')];"
+    " const map = c => c.querySelector('.gm-style, [data-testid*=map], iframe[src*=map], img[src*=staticmap]');"
+    " return [cs.length, cs.filter(map).length]; }"
+)
+
+
+def reload_keeps_cards(page: Page):
+    """Reload, then fail the step unless the cards and their maps come back (R-HIST-1: the
+    feed shows the previous turns again). "Maps vanish after reload" was a major in every
+    late audit of one cohort, and the UX runs never caught it."""
+    before = page.evaluate(CARDS_JS)
+    page.reload()
+    after = page.evaluate(CARDS_JS)
+    for _ in range(16):  # the feed and the maps come back over a few seconds
+        if after[0] >= before[0] and after[1] >= before[1]:
+            break
+        page.wait_for_timeout(500)
+        after = page.evaluate(CARDS_JS)
+    page.wait_for_timeout(1000)
+    if after[0] < before[0] or after[1] < before[1]:
+        raise RuntimeError(
+            f"after the reload {after[0]} of {before[0]} cards and {after[1]} of {before[1]} maps are on screen"
+        )
+
+
 # --- journeys -----------------------------------------------------------------------
 
 
@@ -369,6 +397,12 @@ def scripted(browser, rec: Recorder, out: pathlib.Path, port: int | None):
             lambda: scroll_feed_top(page),
             600,
         )
+        rec.do(
+            page,
+            j,
+            "reloads the page: the places and route cards and their maps are still there",
+            lambda: reload_keeps_cards(page),
+        )
         page.context.close()
 
         page = new_page(browser, DESKTOP)
@@ -404,7 +438,7 @@ def scripted(browser, rec: Recorder, out: pathlib.Path, port: int | None):
                 say(page, "hello", 5000),
             ),
         )
-        rec.do(page, j, "reloads the page", lambda: (page.reload(), page.wait_for_timeout(3000)))
+        rec.do(page, j, "reloads the page: the cards are still there", lambda: reload_keeps_cards(page))
         rec.do(
             page,
             j,
