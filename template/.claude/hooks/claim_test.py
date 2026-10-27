@@ -550,6 +550,21 @@ def test_finish_without_pr_releases_then_parks() -> None:
     check("and so does the monitor's reset marker", repo.run("claim", "--loop", "6").returncode, 0)
 
 
+def test_a_hub_is_never_parked_by_its_failures() -> None:
+    """Cohort 60: hub #32 (four issues waiting on it) failed twice and sat at stage:triage
+    for three hours; the third failure would have parked it at stage:owner."""
+    repo = Repo([issue(32, ["stage:triage", "P1"])])
+    cf = repo.dir / "claim"
+    for loop in ("1", "2", "3", "4"):
+        claim = repo.run("claim", "--loop", loop, "--claim-file", str(cf), CLAIM_HUB="1")
+        check(f"a hub is claimable after {int(loop) - 1} failures", claim.returncode, 0)
+        res = repo.run("finish", "--claim-file", str(cf), "--loop", loop, CLAIM_HUB="1")
+        check(f"failure {loop} of a hub goes back to the queue, never to stage:owner",
+              res.stdout.strip(), "#32: released to stage:triage")
+    check("the failures are still recorded", sum("fail=1" in c for c in repo.comments(32)), 4)
+    check("without CLAIM_HUB the same issue is refused after three", repo.run("claim", "--loop", "9").returncode, 3)
+
+
 def test_agent_release() -> None:
     repo = Repo([issue(9, ["stage:triage", "P2"])])
     cf = repo.dir / "claim"

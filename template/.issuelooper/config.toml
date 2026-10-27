@@ -197,6 +197,10 @@ author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after th
                              # is red) is resolved by its author's conversation, resumed (agy --conversation, claude
                              # --resume), instead of a merger session; the merger stays the fallback (no recorded
                              # conversation, or POOL_AUTHOR_RESOLVE_MAX = 2 author sessions without a merge)
+hub_at = 3                   # POOL_HUB_AT: an issue this many open issues depend on is a hub: it takes its dependents'
+                             # priority and one level more, hub_timeout times the worker timeout, resumes its last
+                             # worker's conversation, and failures never park it at stage:owner (0 = off)
+hub_timeout = 1.5            # POOL_HUB_TIMEOUT
 starve_overlap = true        # POOL_STARVE_OVERLAP: while a P0/P1 PR starves (its rebase left to a merger twice on
                              # the same files), hold only merges whose hunks there come within 10 lines of its own
                              # (POOL_STARVE_MARGIN); off: every merge that touches those files waits

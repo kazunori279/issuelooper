@@ -2578,6 +2578,41 @@ def test_a_session_leaves_no_scratch_and_counts_only_its_own_usage() -> None:
           {"input": 100_000, "output": 50, "turns": 1, "thinking": 0, "cache_read": 20})
 
 
+def test_a_hub_goes_first_and_is_not_parked() -> None:
+    """Cohort 60: hub #32 ("Resume the conversation after a reload", P2; #33, #34, #36 and
+    #37, all P1, wait on it) failed twice (a train hand-back, a timeout) and then sat at
+    stage:triage for 3 h behind P1 work, until the monitor raised it to P1."""
+    old_cli = os.environ.get("CCROLE_WORKER_CLI")
+    os.environ["CCROLE_WORKER_CLI"] = "claude"
+    try:
+        deps = [iss(n, ["stage:triage", "P1"], body="Blocked by: #32") for n in (33, 34, 36, 37)]
+        others = [iss(n, ["stage:triage", "P1"]) for n in range(40, 46)]
+        hub = iss(32, ["stage:triage", "P2"], title="Resume the conversation after a reload")
+        h = Rig(state([hub] + deps + others), global_cap=2, timeouts={"worker": "60m", "merger": "45m", "tester": "60m"})
+        h.pool.book.convs[32] = {"conv": "s-32", "cli": "claude"}
+        started = h.step()
+        check("the hub goes first though it is P2 (its dependents are P1, and it is a hub)",
+              [u.number for u in started][:1], [32])
+        u = started[0]
+        check("with 1.5 times the worker timeout, its last worker's conversation, and its dependents counted",
+              (u.info["timeout"], u.info["resume"], u.info["hub"]), ("5400s", "s-32", 4))
+        h.pool.book.failed_tries[32] = 2
+        h.finish(u.key, "failed (exit 1)")
+        h.pool.ask_decompose(h.st)
+        check("after its failures the monitor hears it is a hub that stays claimable, for the owner",
+              any("#32 is a hub (4 open issues depend on it)" in e and "stays claimable" in e for e in h.pool.events), True)
+        small = Rig(state([iss(5, ["stage:triage", "P2"]), iss(6, ["stage:triage", "P1"], body="Blocked by: #5")]),
+                    global_cap=1, hub_at=3)
+        check("one dependent: no hub, but the blocker takes the priority of what waits on it",
+              ([u.number for u in small.step()], small.pool.book.running and
+               next(iter(small.pool.book.running.values())).info.get("hub")), ([5], None))
+    finally:
+        if old_cli is None:
+            os.environ.pop("CCROLE_WORKER_CLI", None)
+        else:
+            os.environ["CCROLE_WORKER_CLI"] = old_cli
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""

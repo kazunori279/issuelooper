@@ -394,6 +394,14 @@ class Config:
     stall_s: float = 600
     hold_review_s: float = 3600  # a hold:monitor this old is pointed out to the monitor
     blocked_review_s: float = 3600  # a claimable P0/P1 issue blocked this long is pointed out too
+    # A hub: an issue at least hub_at open issues depend on (0 = off). It takes the highest
+    # priority among its dependents and one level more in the claim order, gets hub_timeout
+    # times the worker timeout, resumes its last worker's conversation, and claim.py's
+    # attempt cap never parks it (CLAIM_HUB): the monitor is told instead. Cohort 60: hub #32
+    # (P2, #33, #34, #36, #37 waiting) sat 3 h at stage:triage behind P1 work after its
+    # second failure, until the monitor raised it.
+    hub_at: int = 3
+    hub_timeout: float = 1.5
     decompose_after: int = 2  # failed tries on one issue (Book.failed_tries) before the monitor is asked to split it
     ux_screen: bool = True  # the monitor screens ux:proposed proposals before the owner reads them
     background_idle_s: float = 120  # agy idle on a background task this long: resumed (Session.background_idle)
@@ -587,6 +595,8 @@ class Config:
             hold_review_s=gap_s("POOL_HOLD_REVIEW", 60),
             blocked_review_s=gap_s("POOL_BLOCKED_REVIEW", 60),
             decompose_after=env_int("POOL_DECOMPOSE_AFTER", 2),
+            hub_at=env_int("POOL_HUB_AT", 3),
+            hub_timeout=float(e("POOL_HUB_TIMEOUT", "") or 1.5),
             ux_screen=env_flag("POOL_UX_SCREEN", True),
             background_idle_s=float(e("POOL_BACKGROUND_IDLE_S", "") or 120),
             unseen_idle_s=float(e("POOL_UNSEEN_IDLE_S", "") or 180),
@@ -912,6 +922,22 @@ def age_s(stamp: str, now: float) -> float:
     return now - dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
 
 
+def dependents(st: dict) -> tuple[collections.Counter, dict[int, int]]:
+    """(issue -> open issues that depend on it, issue -> the highest priority among them),
+    through GitHub dependencies and `Blocked by:` lines."""
+    count: collections.Counter = collections.Counter()
+    best: dict[int, int] = {}
+    open_numbers = {i["number"] for i in st["open"]}
+    for i in st["open"]:
+        on = set(i.get("blockers") or [])
+        for m in claimlib.BLOCKED_LINE.finditer(i.get("body") or ""):
+            on.update(int(x) for x in claimlib.NUM.findall(m.group(1)))
+        for b in on & open_numbers:
+            count[b] += 1
+            best[b] = min(best.get(b, 9), priority(i["labels"]))
+    return count, best
+
+
 def accept_order(st: dict, issues: list[int], entry: dict[int, str], now: float) -> list[int]:
     """The order acceptance takes issues in: first those another open issue depends on (a
     GitHub dependency or a `Blocked by:` line; their dependents may start already, but
@@ -1162,13 +1188,30 @@ def plan(
 
     queue = collections.Counter(book.issue_area.get(i["number"]) for i in claimable)
     book.waits_now = {}
-    for i in sorted(claimable, key=lambda i: (priority(i["labels"]), i["number"])):
+    deps, dep_prio = dependents(st)
+
+    def claim_rank(i: dict) -> tuple:
+        """Priority, inherited from the issues waiting on it, a level higher for a hub; then
+        the most dependents; then the lowest number."""
+        n = i["number"]
+        prio = min(priority(i["labels"]), dep_prio.get(n, 9))
+        if cfg.hub_at and deps[n] >= cfg.hub_at:
+            prio = max(0, prio - 1)
+        return (prio, -deps[n], n)
+    for i in sorted(claimable, key=claim_rank):
         n = i["number"]
         where = place_in_area(n, book, cfg, holding(book, cfg, now, units), queue) if cfg.areas else {}
         if where is None:
             continue  # its area's conversations are busy, or its hot file is being worked on
-        units.append(Unit("worker", "implement", f"wrk:{n}@{i['updated']}", f"wrk:{n}", n,
-                          (4, priority(i["labels"]), n), {"title": i["title"], **where}))
+        info = {"title": i["title"], **where}
+        if cfg.hub_at and deps[n] >= cfg.hub_at:
+            info["hub"] = deps[n]
+            info["timeout"] = f"{int(seconds(cfg.timeouts.get('worker') or '45m') * cfg.hub_timeout)}s"
+            conv = conv_resumable(book.convs.get(n))
+            if not info.get("resume") and not info.get("area") and conv and conv not in busy_convs(
+                    holding(book, cfg, now, units)):
+                info["resume"] = conv  # its last worker knows what failed
+        units.append(Unit("worker", "implement", f"wrk:{n}@{i['updated']}", f"wrk:{n}", n, (4, *claim_rank(i)), info))
 
     open_by = {i["number"]: i for i in st["open"]}
     accept_long = False  # the acceptance queue is over two batches: it goes before idle-time runs
@@ -2495,7 +2538,9 @@ class Session(threading.Thread):
             # ended with nothing saved.
             report = self.unit.kind in REPORTS or self.unit.kind == "own-accept"
             if role == "worker" and self.unit.kind == "implement" and cfg.wrap_s():
-                wrap_at, wrap_budget = start + cfg.wrap_s(), cfg.worker_wrap_budget_s
+                # A unit with a longer time limit (a hub) wraps up proportionally later.
+                scale = seconds(timeout) / max(1, seconds(cfg.timeouts.get("worker") or timeout))
+                wrap_at, wrap_budget = start + cfg.wrap_s() * scale, cfg.worker_wrap_budget_s
             elif report and cfg.report_wrap:
                 wrap_at, wrap_budget = start + cfg.report_wrap * seconds(timeout), cfg.report_wrap_budget_s
             else:
@@ -2960,6 +3005,8 @@ class Session(threading.Thread):
         if u.role == "worker" and u.kind == "implement":
             pool = str(cfg.caps["worker"] or "unlimited")
             env.update(WRK_K=str(self.seq), WRK_CLAIM_FILE=str(claim_file), WORKER_POOL=pool)
+            if u.info.get("hub"):
+                env["CLAIM_HUB"] = "1"  # its failures do not park it (claim.py), for the claim, release and finish
             rc = self.sh(
                 [
                     sys.executable,
@@ -2998,6 +3045,13 @@ class Session(threading.Thread):
             if u.info.get("area") or u.info.get("hot"):
                 pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
                 prompt += "\n" + area_text(u, cfg)
+            if u.info.get("hub"):
+                prompt += (f"\n#{n} is a hub: {u.info['hub']} open issues wait on it, so you have {self.timeout()} "
+                           "instead of the usual limit."
+                           + (" This conversation worked on it before and that attempt did not merge: read the "
+                              "newest comments (a hand-back, a release) for what failed, and start a new worktree "
+                              "from the branch, since the old one is gone." if u.info.get("resume") else "")
+                           + " Land the smallest change that unblocks them; say on the issue what is left.\n")
         elif u.role == "worker" and u.kind == "own-accept":
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
@@ -6013,6 +6067,15 @@ class Pool:
                     or labels & (HOLDS | IGNORED) or PART_OF.search(i.get("body") or "")):
                 continue
             b.decompose_told.add(n)
+            deps, _ = dependents(st)
+            if self.cfg.hub_at and deps[n] >= self.cfg.hub_at:
+                self.event(
+                    f"#{n} is a hub ({deps[n]} open issues depend on it) and has failed {b.failed_tries[n]} times: "
+                    f"{i['title']}. It stays claimable at the front of the queue (its failures do not park it), "
+                    "its next worker resumes the last one's conversation with a longer time limit, and the owner "
+                    "should hear of it in your next summary: what each attempt hit (the release and hand-back "
+                    "comments). Split it if it is too big for one session, or cut a dependency that does not need it")
+                continue
             self.event(
                 f"#{n} has failed {b.failed_tries[n]} times and is not merged: {i['title']} (worker sessions that "
                 "ended without a pull request, or pull requests handed back for red tests or the review). Read why "

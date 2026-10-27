@@ -81,6 +81,11 @@ JITTER_S = float(os.environ.get("CLAIM_JITTER_S", "3"))
 RATE_RETRIES = int(os.environ.get("CLAIM_RATE_RETRIES", "3"))
 RATE_WAIT_S = float(os.environ.get("CLAIM_RATE_WAIT_S", "45"))
 RATE_LIMITED = re.compile(r"(?i)secondary rate limit|abuse detection|submitted too quickly")
+# The supervisor sets CLAIM_HUB=1 for an issue many open issues depend on (ccpool.py,
+# POOL_HUB_AT): its failed attempts are still recorded, but they neither refuse a claim
+# nor park it at stage:owner; the supervisor tells the monitor instead. Cohort 60's hub #32
+# (four issues waiting on it) sat at stage:triage for 3 h after its second failure.
+HUB = os.environ.get("CLAIM_HUB", "").strip() == "1"
 # Claims this much older than yours do not compete with it: they are left over
 # from an earlier cycle (a PR the merger later handed back). A live rival claimed
 # within seconds of you, because both of you read the issue as claimable.
@@ -416,7 +421,7 @@ def try_claim(cand: dict, loop: str) -> dict | None:
     token = uuid.uuid4().hex[:10]
     comments = comments_of(n)
     attempts = failed_attempts(comments)
-    if attempts >= MAX_ATTEMPTS:
+    if attempts >= MAX_ATTEMPTS and not HUB:
         cand["lost"] = f"{attempts} failed attempts since the last reset (limit {MAX_ATTEMPTS})"
         return None
     stale = active_claims(comments) if frm == DOING else []
@@ -582,7 +587,7 @@ def release(
 def cmd_release(args) -> int:
     need_role("worker")
     to, reason = args.to, args.reason
-    if to != "stage:owner" and failed_attempts(comments_of(args.issue)) + 1 >= MAX_ATTEMPTS:
+    if to != "stage:owner" and not HUB and failed_attempts(comments_of(args.issue)) + 1 >= MAX_ATTEMPTS:
         to = "stage:owner"
         reason += f"; {MAX_ATTEMPTS} attempts without a PR, so it leaves the pool until the owner or monitor looks"
     release(args.issue, args.loop, args.token, reason, to, fail=True)
@@ -617,7 +622,7 @@ def cmd_finish(args) -> int:
         outcome = f"pr #{pr['number']}"
     elif held and DOING in names:
         fails = failed_attempts(comments_of(n)) + (0 if args.no_fail else 1)
-        to = "stage:owner" if fails >= MAX_ATTEMPTS else claim.get("from") or "stage:triage"
+        to = "stage:owner" if fails >= MAX_ATTEMPTS and not HUB else claim.get("from") or "stage:triage"
         why = args.reason or "the session ended without a pull request"
         if to == "stage:owner":
             why += f"; {fails} attempts without a PR, so it leaves the pool until the owner or monitor looks"
