@@ -4394,6 +4394,32 @@ def test_the_author_resolves_its_own_conflict() -> None:
               (outcome, (w.dir / "claim.out").exists(), len(prompts)), ("ok", False, 1))
 
 
+def test_quota_time_moves_the_deadlines_and_is_no_failure() -> None:
+    """Run 12: 13 timeouts, each with 3,000-4,900 s of pool quota pause in its run; only the
+    CLI's own retries stopped the clocks, two were killed at the ceiling, and #40 was parked
+    at stage:owner after three timeouts counted as failed attempts."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-quotaclock-"))
+    agent = d / "ccrole"
+    agent.write_text("#!/bin/sh\nfor i in $(seq 120); do echo '{\"event\": \"step_update\"}'; sleep 1; done\n")
+    agent.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agent), render="cat", timeouts={"tester": "4s"},
+                                     timeout_ceiling=1.5, stall_s=0, quota_extend_max_s=10,
+                                     caps={r: 0 for r in ccpool.ROLES}, kill_leftovers=False),
+                       fetcher=state, spawn=False)
+    pool.book.quota_until = time.time() + 3600  # the pool is paused for quota all along
+    t0 = time.time()
+    w = pool.start(ccpool.Unit("tester", "ux", "ux:q", "tst:ux:q", None, (2,), {"sha": "a" * 40}))
+    outcome = w.work()
+    took = time.time() - t0
+    check("the ceiling moved by the pool's quota time (at most POOL_QUOTA_EXTEND_MAX_S): killed on the second "
+          "tick, not the first", (took > 25, took < 60), (True, True))
+    check("a timeout spent mostly in quota waits is no failed attempt",
+          (outcome.startswith("timed out under quota after 4s"), outcome.startswith(ccpool.NOT_A_FAILURE)), (True, True))
+    check("the pause is logged with its parts", "while the pool was paused" in (w.dir / "resumes.log").read_text(), True)
+    pool.finished(w, outcome)
+    check("and its key is due again (no try spent)", pool.book.tries["ux:q"], 0)
+
+
 def git_repo(d: pathlib.Path):
     """A bare origin and a clone of it in d; returns a git runner for the clone."""
     origin, work = d / "origin.git", d / "work"

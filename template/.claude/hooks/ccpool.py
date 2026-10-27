@@ -412,6 +412,15 @@ class Config:
     # clocks: a merger with 25 minutes of paused clocks ran 52 minutes on a 45-minute
     # timeout, a UX run 69 on 60. 0 = no ceiling.
     timeout_ceiling: float = 1.5
+    # While the pool is paused for quota (Pool.quota_seen), a running session's deadlines
+    # and its ceiling move too, as for the CLI's own retries: every model call it makes then
+    # meets the same exhausted quota. The ceiling moves by at most quota_extend_max_s of
+    # quota time (CLI retries and pool pauses together). A session that times out with at
+    # least quota_timeout_share of its timeout spent in quota time is "timed out under
+    # quota": no failed attempt. Run 12: 13 timeouts, each with 3,000-4,900 s of pool pause
+    # in its run, and #40 parked at stage:owner after three of them.
+    quota_extend_max_s: float = 1800
+    quota_timeout_share: float = 0.2
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     rerun_cmd: str = ""  # [sweep] rerun: reruns the named failing tests ({tests}); empty = the whole check again
     main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
@@ -587,6 +596,8 @@ class Config:
             inturn_quota=env_flag("POOL_INTURN_QUOTA", True),
             transient_resumes=env_int("POOL_TRANSIENT_RESUMES", 2),
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
+            quota_extend_max_s=float(e("POOL_QUOTA_EXTEND_MAX_S", "") or 1800),
+            quota_timeout_share=float(e("POOL_QUOTA_TIMEOUT_SHARE", "") or 0.2),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             rerun_cmd=e("SWEEP_RERUN", "").strip(),
             main_check=env_flag("POOL_MAIN_CHECK", True) and bool(e("SWEEP_COMMAND", "").strip()),
@@ -2351,7 +2362,8 @@ def pid_alive(pid: int) -> bool:
 
 
 # Session outcomes that put the claim back without counting a failed attempt.
-NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "stopped with the supervisor")
+NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "timed out under quota",
+                 "stopped with the supervisor")
 
 
 class Session(threading.Thread):
@@ -2364,6 +2376,7 @@ class Session(threading.Thread):
         self.left_pr = False  # a worker session that ended with its pull request open (claim.py finish)
         self.quota_idx = -1  # the newest in-turn quota retry already counted (agy's record)
         self.branch_files: list[str] = []  # what a worker's branch changed (Book.convs)
+        self.quota_time = 0.0  # seconds its clocks stood still for quota (CLI retries and pool pauses)
         self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
         self.dir = pool.cfg.logdir / f"{seq:04d}-{unit.role}-{slug}"
@@ -2463,6 +2476,7 @@ class Session(threading.Thread):
             # timeouts on one model were sessions waiting there; the clocks stop for it,
             # so the work gets its full budget.
             paused, tick = 0.0, time.time()
+            pooled = ceiling_moved = 0.0  # pool quota time among paused; how far the ceiling moved for both
 
             def resume(conv: str, why: str, text: str = "", budget: float = 0) -> None:
                 nonlocal resumes
@@ -2500,12 +2514,18 @@ class Session(threading.Thread):
                         if hits:
                             self.inturn_hits += hits
                             self.pool.quota_seen(role, inturn=True)
-                    if retrying:
+                    pool_paused = not retrying and self.pool.book.quota_until > now
+                    if retrying or (pool_paused and paused < cfg.retry_pause_max_s):
                         add = min(step, cfg.retry_pause_max_s - paused)
                         paused += add
+                        pooled += add if pool_paused else 0
                         soft, hard = soft + add, hard + add
                         if wrap_at and not wrapped:
                             wrap_at += add
+                        room = cfg.quota_extend_max_s - (ceiling_moved if cfg.timeout_ceiling else cfg.quota_extend_max_s)
+                        if room > 0:
+                            ceiling += min(add, room)
+                            ceiling_moved += min(add, room)
                     quiet = self.quiet_s()
                     if time.time() > ceiling:
                         with open(self.dir / "resumes.log", "a") as rl:
@@ -2639,9 +2659,11 @@ class Session(threading.Thread):
                         resume(conv, f"exited with {rc}, quota resume {quota_k} after {wait:.0f} s")
                         rc = None
         elapsed = time.time() - start
+        self.quota_time = paused
         if paused:
             with open(self.dir / "resumes.log", "a") as rl:
-                rl.write(f"{time.time():.0f} clocks paused {paused:.0f} s in the CLI's model-call retries\n")
+                rl.write(f"{time.time():.0f} clocks paused {paused:.0f} s for quota ({paused - pooled:.0f} s in the "
+                         f"CLI's model-call retries, {pooled:.0f} s while the pool was paused)\n")
         try:
             errtext = (self.dir / "session.err").read_text(errors="replace")
         except OSError:
@@ -2951,6 +2973,8 @@ class Session(threading.Thread):
             # Before the quota test: a session killed at its deadline (exit 124) whose
             # stderr still held an earlier 429 was counted as a quota error.
             outcome = f"timed out after {self.timeout()}"
+            if cfg.quota_timeout_share and self.quota_time >= cfg.quota_timeout_share * seconds(self.timeout()):
+                outcome = f"timed out under quota after {self.timeout()} ({self.quota_time:.0f} s of quota waits)"
         elif rc != 0 and self.ended_on_quota():
             # Not the agent's failure: the claim goes back without a failed attempt, and
             # the pool holds new starts for a while (Pool.finished).
@@ -4025,7 +4049,7 @@ class Pool:
                 # Only failures count toward POOL_FAMILY_MAX: a merged PR that a live check
                 # or a reopen sends back is progress, not a loop.
                 b.family_starts[u.family] -= 1
-            if outcome.startswith(("quota error", "transient error")):
+            if outcome.startswith(("quota error", "transient error", "timed out under quota")):
                 # The model's capacity, not the unit: no try spent, so it is due again
                 # when the pause ends.
                 b.tries[u.key] -= 1
