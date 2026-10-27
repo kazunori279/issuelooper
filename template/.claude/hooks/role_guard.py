@@ -2504,6 +2504,38 @@ def worker_git_check(command: str) -> None:
         )
 
 
+# A worker's conversation resumed to resolve its own PR's conflict (ccpool.py's author
+# resolve): it works like a merger on that one PR, under the worker role.
+RESOLVE_PR_ENV, RESOLVE_BRANCH_ENV = "RESOLVE_PR", "RESOLVE_BRANCH"
+PR_WRITE_SEGMENT = re.compile(r"\bgh\s+pr\s+(?:comment|edit|close|ready|reopen|review)\b([^|;&\n]*)")
+
+
+def resolve_scope_check(command: str) -> None:
+    """The author resolving PR $RESOLVE_PR pushes only its branch, writes only to that PR,
+    and opens none: what the step needs and nothing more."""
+    pr = os.environ.get(RESOLVE_PR_ENV, "").strip().lstrip("#")
+    branch = os.environ.get(RESOLVE_BRANCH_ENV, "").strip()
+    if not pr:
+        return
+    why = (f"This session resumed your conversation to resolve pull request #{pr}'s conflict with main, and "
+           "nothing else: rebase, resolve, sweep, push its branch, stop.\n\n")
+    if PR_CREATE.search(command):
+        block(why + "It does not open a pull request: push the rebased head to the existing branch "
+              f"(`git push --force-with-lease origin HEAD:{branch or '<its branch>'}`).")
+    for m in PR_WRITE_SEGMENT.finditer(command):
+        found = BARE_NUMBER.search(m.group(1))
+        if found and found.group(1) != pr:
+            block(why + f"It writes only to PR #{pr}, and this names #{found.group(1)}.")
+    for words, _ in command_segments(command):
+        sub, _, args = git_words(words)
+        if sub != "push" or not branch:
+            continue
+        for spec in [a for a in args if not a.startswith("-")][1:]:
+            dst = spec.lstrip("+").partition(":")[2] or spec.lstrip("+")
+            if dst.removeprefix("refs/heads/") not in (branch, "HEAD"):
+                block(why + f"It pushes only `{branch}`, and this pushes `{dst}`.")
+
+
 def worker_label_check(command: str, added: set[str], removed: set[str]) -> None:
     """Stage labels move only on the claimed issue, and stage:pr clears stage:doing."""
     stage = {label for label in added | removed if label.startswith("stage:")}
@@ -2724,6 +2756,7 @@ def main(raw: str) -> None:
 
     if role == "worker":
         worker_git_check(command)
+        resolve_scope_check(command)
 
     if not any(re.search(p, command) for p in WRITE_PATTERNS):
         allow()

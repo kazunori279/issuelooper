@@ -244,6 +244,24 @@ def test_background_commands_must_let_go_of_the_terminal() -> None:
           run(refused[0], role="tester", extra_env={"GUARD_BACKGROUND": "0"})[0], "allow")
 
 
+def test_an_author_resolving_its_pr_stays_on_it() -> None:
+    # ccpool's author resolve: the worker's conversation, resumed for its PR's conflict.
+    env = {"RESOLVE_PR": "41", "RESOLVE_BRANCH": "issue-7"}
+    for cmd, want in (("git push --force-with-lease origin HEAD:issue-7", "allow"),
+                      ("git push --force-with-lease origin issue-7", "allow"),
+                      ("git push --force-with-lease", "allow"),
+                      ("git push origin HEAD:issue-8", "refuse"),
+                      ("git push origin HEAD:main", "refuse"),
+                      ("gh pr comment 41 --body '<!-- worker -->\nthe hunk needs a decision'", "allow"),
+                      ("gh pr comment 40 --body '<!-- worker -->\nx'", "refuse"),
+                      ("gh pr create --title x --body y", "refuse"),
+                      ("gh issue edit 7 --add-label stage:triage --remove-label stage:pr", "refuse"),
+                      ("gh pr merge 41 --squash", "refuse")):
+        check(f"resolving PR #41: {cmd!r}", run(cmd, role="worker", host=AGY, extra_env=env)[0], want)
+    check("an ordinary worker pushes its branch as before",
+          run("git push origin HEAD:issue-8", role="worker", host=AGY)[0], "allow")
+
+
 def test_arguments_are_refused_at_once() -> None:
     # `role_guard.py check-pr 98` used to wait on stdin until a watchdog killed it.
     proc = subprocess.Popen([sys.executable, str(GUARD), "check-pr", "98"], stdin=subprocess.PIPE,

@@ -407,6 +407,12 @@ class Config:
     orphan_pr_min: int = 10
     unclaimable_retry_s: float = 240
     merger_max: int = 3  # merger sessions on one PR without a merge before it goes back to a worker
+    # A PR that conflicts after the supervisor's rebase (or whose rebase is red) is resolved
+    # by its author's conversation, resumed, instead of a merger; the merger stays for a PR
+    # with no recorded conversation, a CLI that cannot resume it, or after author_resolve_max
+    # author sessions without a merge.
+    author_resolve: bool = False
+    author_resolve_max: int = 2
     auto_cap: int = 4
     ux_gap_s: float = 1500
     ux_idle_gap_s: float = 600
@@ -542,6 +548,8 @@ class Config:
             orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
             unclaimable_retry_s=float(e("POOL_UNCLAIMABLE_RETRY_S", "") or 240),
             merger_max=env_int("POOL_MERGER_MAX", 3),
+            author_resolve=env_flag("POOL_AUTHOR_RESOLVE"),
+            author_resolve_max=env_int("POOL_AUTHOR_RESOLVE_MAX", 2),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
@@ -859,6 +867,29 @@ class Unit:
     info: dict = dataclasses.field(default_factory=dict, compare=False, hash=False)
 
 
+def conv_resumable(rec: dict | None, role: str = "worker") -> str:
+    """The conversation id in a record, when the role's CLI is the one that ran it and can
+    resume it now (agy: its record is still there); else ''."""
+    if not rec or not rec.get("conv"):
+        return ""
+    try:
+        cli = agent_cli.for_role(role)
+    except ValueError:
+        return ""
+    return rec["conv"] if rec.get("cli") == cli.name and cli.can_resume(rec["conv"]) else ""
+
+
+def busy_convs(units) -> set:
+    """Conversations, and (area, slot) pairs, that running or planned units hold."""
+    out = set()
+    for u in units:
+        if u.info.get("resume"):
+            out.add(u.info["resume"])
+        if u.info.get("area") is not None and u.info.get("slot") is not None:
+            out.add((u.info["area"], u.info["slot"]))
+    return out
+
+
 class Book:
     """What the supervisor has started and how it ended."""
 
@@ -889,6 +920,10 @@ class Book:
         self.accept_held: dict[int, str] = {}
         self.accept_settling: set[str] = set()
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
+        self.author_runs: collections.Counter = collections.Counter()  # PR -> author resolve sessions, the same way
+        # issue -> the conversation that last worked on it: {"conv", "cli", "t", "seq", "area", "slot",
+        # "files" (what its branch changed)}; kept in owners.json across restarts (Pool.save_owners).
+        self.convs: dict[int, dict] = {}
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
         # still shows stage:pr, and PR #131 was merged again 2 s later on the same head.
@@ -1172,6 +1207,25 @@ def plan(
                     (0, pr["number"]),
                     {**info, "mergers": book.merger_runs[pr["number"]]},
                 )
+            )
+        elif (cfg.author_resolve and book.author_runs[pr["number"]] < cfg.author_resolve_max
+              and conv_resumable(book.convs.get(n))
+              and not {conv_resumable(book.convs.get(n)),
+                       ((book.convs.get(n) or {}).get("area"), (book.convs.get(n) or {}).get("slot"))}
+              & busy_convs(list(book.running.values()) + units)):
+            # The author knows the change: its conversation is resumed with the conflict
+            # (proposal: the worker owns its issue end to end). A merger re-read the issue,
+            # the PR and main from scratch: c58, 32 sessions, median 14.5 min.
+            rec = book.convs[n]
+            hard = book.hard_conflicts.get(pr["number"]) or []
+            units.append(
+                Unit("worker", "resolve", f"own:{pr['number']}@{pr['head'][:12]}@{main[:12]}", f"mrg:{pr['number']}",
+                     pr["number"], (0, pr["number"]),
+                     {**info, "resume": rec["conv"], "cli": rec.get("cli"), "area": rec.get("area"),
+                      "slot": rec.get("slot"), "files": rec.get("files") or [],
+                      "conflicts": sorted(hard[-1][1]) if hard else [],
+                      "red": book.rebase_failed.get(pr["number"]) == pr["head"],
+                      "timeout": cfg.timeouts.get("merger")})
             )
         else:
             units.append(
@@ -1469,6 +1523,41 @@ from a merger session, and any write to a PR but #{pr}.
    for stage:triage on #{n}. Once per PR.
 
 Do not read, rebase or merge any other pull request.
+Budget: hard wall-clock timeout of {timeout}."""
+
+
+def author_resolve_prompt(u: Unit, seq: int, timeout: str, commits: str) -> str:
+    """The author's conversation, resumed to resolve its PR's conflict (POOL_AUTHOR_RESOLVE)."""
+    pr, n = u.number, u.info["issue"]
+    branch = u.info.get("branch") or f"issue-{n}"
+    wt = scratch(f"wrk-{seq}-{n}-wt")
+    why = (" and the supervisor's rebase of it went red" if u.info.get("red") else "")
+    files = ", ".join(f"`{f}`" for f in u.info.get("conflicts") or []) or "(see the rebase)"
+    return f"""This conversation wrote pull request #{pr} for issue #{n}. The supervisor resumed it for one step:
+the PR now conflicts with main{why}, and you resolve it instead of a merger, because you know the change.
+Then stop.
+
+Main's commits since your branch forked (newest first):
+{commits or "    (could not list them; git log your fork point..origin/main)"}
+The files that conflicted in the supervisor's rebase: {files}
+
+Your earlier worktree is gone. Follow the issuelooper-merger skill's steps for this PR, keeping your worker role
+(the guard lets you push {branch} only, and comment only on #{pr} and #{n}):
+1. git -C "$SHARED_REPO_PATH" fetch -q origin main {branch}, then
+   git -C "$SHARED_REPO_PATH" worktree add -B {branch} {wt} origin/{branch}; set it up as {PROJECT} says.
+   git rebase origin/main there, and resolve every conflict so both your change and what landed on main
+   survive: never drop main's side to make yours apply.
+2. python3 .claude/hooks/sweep_locked.py --update-pr {pr} in the worktree, and fix what fails. If the PR body's
+   `Live check:` line names another sha than your new head, also
+   python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr {pr}. Then
+   git push --force-with-lease origin HEAD:{branch}.
+3. Catch up with main: git fetch -q origin main; if git merge-base --is-ancestor origin/main HEAD fails, rebase
+   again (a clean rebase is pushed without a new sweep). Three rounds at most.
+4. Stop with #{n} at stage:pr. Do not merge, open a pull request, or move a label: the supervisor merges your
+   new head after its gates.
+5. When the rebase needs a decision about behavior you cannot make, say so on PR #{pr} (signed
+   `<!-- worker -->`: the hunk and the choice) and stop; a merger or the monitor takes it from there.
+Your scratch files: {scratch(f"wrk-{seq}-{n}-")}*. Last line of your reply: AUTHOR-RESOLVED, or AUTHOR-STUCK <why>.
 Budget: hard wall-clock timeout of {timeout}."""
 
 
@@ -1956,6 +2045,7 @@ class Session(threading.Thread):
         self.port = 0
         self.left_pr = False  # a worker session that ended with its pull request open (claim.py finish)
         self.quota_idx = -1  # the newest in-turn quota retry already counted (agy's record)
+        self.branch_files: list[str] = []  # what a worker's branch changed (Book.convs)
         self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
         self.dir = pool.cfg.logdir / f"{seq:04d}-{unit.role}-{slug}"
@@ -1982,10 +2072,14 @@ class Session(threading.Thread):
                 args, env=env, cwd=repo_root(), stdout=out, stderr=subprocess.STDOUT, timeout=600
             ).returncode
 
+    def timeout(self) -> str:
+        """The unit's own time limit (an author resolving a conflict: the merger's), else its role's."""
+        return self.unit.info.get("timeout") or self.pool.cfg.timeouts.get(self.unit.role) or "45m"
+
     def session(self, prompt: str, env: dict) -> tuple[int, float, bool]:
         cfg = self.pool.cfg
         role = self.unit.role
-        timeout = cfg.timeouts[role]
+        timeout = self.timeout()
         cli = self.cli = agent_cli.for_role(role, env)
         (self.dir / "prompt.txt").write_text(prompt)
         env = dict(
@@ -2005,7 +2099,13 @@ class Session(threading.Thread):
         ceiling = start + cfg.timeout_ceiling * seconds(timeout) if cfg.timeout_ceiling else float("inf")
         # The CLI's own limit leaves room for the clocks to stand still (below); the
         # supervisor enforces the rest.
-        cmd = base + cli.first_turn(prompt, hard - start + cfg.retry_pause_max_s)
+        # A unit that continues a recorded conversation (the issue's author) resumes it.
+        first = self.unit.info.get("resume")
+        cmd = base + (cli.resume(prompt, first, hard - start + cfg.retry_pause_max_s) if first
+                      else cli.first_turn(prompt, hard - start + cfg.retry_pause_max_s))
+        if first:
+            with open(self.dir / "resumes.log", "a") as rl:
+                rl.write(f"{time.time():.0f} started in conversation {first} ({self.unit.kind})\n")
         with open(self.dir / "wrapper.err", "w") as err:
             # Under the pool's lock, after a look at stopping: stop() either sees this
             # process and kills it, or it is never started. A worker still claiming its
@@ -2355,6 +2455,14 @@ class Session(threading.Thread):
             return (self.dir / REPORTS[u.kind]).exists()
         if u.kind == "accept":
             return (self.dir / "accept_report.md").exists()
+        if u.kind == "resolve":
+            r = subprocess.run([self.pool.cfg.gh, "pr", "view", str(u.number), "--json", "headRefOid,state"],
+                               capture_output=True, text=True, timeout=60, cwd=repo_root())
+            try:
+                data = json.loads(r.stdout) if r.returncode == 0 else {}
+            except ValueError:
+                data = {}
+            return bool(data) and (data.get("state") != "OPEN" or data.get("headRefOid") != u.info.get("head"))
         n = u.info.get("issue") if u.role == "merger" else u.number
         try:
             out = subprocess.run(
@@ -2481,6 +2589,9 @@ class Session(threading.Thread):
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
                                    bool(cfg.accept_guard))
+        elif u.role == "worker" and u.kind == "resolve":
+            env.update(RESOLVE_PR=str(u.number), RESOLVE_BRANCH=u.info.get("branch") or f"issue-{u.info['issue']}")
+            prompt = author_resolve_prompt(u, self.seq, self.timeout(), self.main_commits(u.info.get("branch") or ""))
         elif u.role == "merger":
             env.update(MERGE_PR=str(u.number))
             prompt = merger_prompt(u, cfg.timeouts["merger"])
@@ -2501,7 +2612,7 @@ class Session(threading.Thread):
         elif timed_out:
             # Before the quota test: a session killed at its deadline (exit 124) whose
             # stderr still held an earlier 429 was counted as a quota error.
-            outcome = f"timed out after {cfg.timeouts[u.role]}"
+            outcome = f"timed out after {self.timeout()}"
         elif rc != 0 and self.ended_on_quota():
             # Not the agent's failure: the claim goes back without a failed attempt, and
             # the pool holds new starts for a while (Pool.finished).
@@ -2515,7 +2626,12 @@ class Session(threading.Thread):
         else:
             outcome = "ok"
 
-        if u.role == "worker":
+        if u.role == "worker" and u.kind != "implement":
+            self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
+            for tree in glob.glob(scratch(f"wrk-{self.seq}-*-tree")):
+                shutil.rmtree(tree, ignore_errors=True)
+        elif u.role == "worker":
+            self.branch_files = self.changed_files(scratch(f"wrk-{self.seq}-*-wt"))
             self.save_wip(scratch(f"wrk-{self.seq}-*-wt"))
             args = [
                 sys.executable,
@@ -2539,6 +2655,25 @@ class Session(threading.Thread):
         elif u.role == "merger":
             self.cleanup(scratch(f"mrg-{u.number}-wt"))
         return outcome
+
+    def changed_files(self, pattern: str) -> list[str]:
+        """What the session's branch changes against origin/main (its first worktree)."""
+        for wt in glob.glob(pattern):
+            r = subprocess.run(["git", "-C", wt, "diff", "--name-only", "origin/main...HEAD"],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                return sorted(set(r.stdout.split()))[:200]
+        return []
+
+    def main_commits(self, branch: str, limit: int = 15) -> str:
+        """Main's commits since the PR's branch forked, newest first, for the author's prompt."""
+        root = str(repo_root())
+        self.git(root, "fetch", "-q", "origin", "main", *([branch] if branch else []))
+        fork = self.git(root, "merge-base", "origin/main", f"origin/{branch}").stdout.strip() if branch else ""
+        if not fork:
+            return ""
+        r = self.git(root, "log", "--oneline", "--no-decorate", f"-{limit}", f"{fork}..origin/main")
+        return "\n".join("    " + ln for ln in r.stdout.splitlines())
 
     # --- units without an agent ---
     def gh(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -3307,6 +3442,7 @@ class Pool:
             self.seq = 0
         self.load_deploys()
         self.load_ux_scores()
+        self.load_owners()
 
     # --- bookkeeping ---
     def log(self, kind: str, **kv):
@@ -3576,8 +3712,12 @@ class Pool:
                 # The resolved head merges on the next poll; GitHub may still be computing
                 # its mergeability, so read again soon rather than after POOL_POLL_S.
                 self.hurry_pr, self.hurry_until = u.number, now + 60
+            if u.kind == "resolve" and not outcome.startswith(NOT_A_FAILURE):
+                b.author_runs[u.number] += 1
+                self.hurry_pr, self.hurry_until = u.number, now + 60
             if (u.kind == "merge" and outcome == "ok") or (u.kind == "handback" and outcome.startswith("handed back")):
                 b.merger_runs.pop(u.number, None)
+                b.author_runs.pop(u.number, None)
             if u.kind == "handback" and outcome.startswith("handed back"):
                 b.reset_pr(u.number)
             if outcome.startswith("startup crash"):
@@ -3605,6 +3745,8 @@ class Pool:
                 )
         if outcome.startswith("quota error"):
             self.quota_seen(u.role)
+        if u.role == "worker":
+            self.record_conv(w)
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
             self.settle_live(u)
         if u.kind == "accept":
@@ -3639,6 +3781,52 @@ class Pool:
             **extra,
         )
         self.wake.set()
+
+    def record_conv(self, w: Session) -> None:
+        """Remember the conversation a worker session ran in, for its issue: the author's
+        later steps resume it (POOL_AUTHOR_RESOLVE, and acceptance). Kept in owners.json."""
+        u = w.unit
+        conv = w.conversation() if (w.dir / "session.jsonl").exists() else None
+        n = u.info.get("issue") if u.kind == "resolve" else u.number
+        if not conv or n is None:
+            return
+        with self.lock:
+            prev = self.book.convs.get(n) or {}
+            self.book.convs[n] = {"conv": conv, "cli": w.cli.name, "t": round(self.clock(), 1), "seq": w.seq,
+                                  "area": u.info.get("area", prev.get("area")), "slot": u.info.get("slot", prev.get("slot")),
+                                  "files": w.branch_files or prev.get("files") or []}
+        self.save_owners()
+
+    OWNED = ("convs", "author_runs")
+
+    def save_owners(self) -> None:
+        """The conversations and the author's bookkeeping, for a restarted supervisor."""
+        with self.lock:
+            data = {k: getattr(self.book, k) for k in self.OWNED}
+            text = json.dumps(data, default=lambda x: sorted(x) if isinstance(x, (set, frozenset)) else str(x))
+        try:
+            tmp = self.cfg.logdir / "owners.json.tmp"
+            tmp.write_text(text)
+            tmp.replace(self.cfg.logdir / "owners.json")
+        except OSError:
+            pass
+
+    def load_owners(self) -> None:
+        try:
+            data = json.loads((self.cfg.logdir / "owners.json").read_text())
+        except (OSError, ValueError):
+            return
+        for k in self.OWNED:
+            v = data.get(k)
+            if v is None:
+                continue
+            cur = getattr(self.book, k)
+            if isinstance(cur, collections.Counter):
+                cur.update({int(a): b for a, b in v.items()})
+            elif isinstance(cur, dict) and isinstance(v, dict):
+                cur.update({(int(a) if str(a).isdigit() else a): b for a, b in v.items()})
+            else:
+                setattr(self.book, k, v)
 
     def record_ux_score(self, w: Session, outcome: str = ""):
         """The score from the UX run's report (an explorer's from its own), for pool.jsonl
@@ -4525,6 +4713,7 @@ class Pool:
                     with self.lock:
                         self.book.train.pop(c["pr"], None)
                         self.book.merger_runs.pop(c["pr"], None)
+                        self.book.author_runs.pop(c["pr"], None)
                     merged.append(c["pr"])
                     final = self.fetch_main(final)
                     self.after_merge(c["pr"], c["issue"], c["head"], c["needs_live"],
@@ -5230,7 +5419,7 @@ class Pool:
             "sessions": [
                 {"seq": w.seq, "role": w.unit.role, "kind": w.unit.kind, "number": w.unit.number,
                  "unit": w.unit.key, "started": w.started, "dir": str(w.dir),
-                 "timeout_s": seconds(self.cfg.timeouts[w.unit.role]) if w.unit.role in self.cfg.timeouts else 0,
+                 "timeout_s": seconds(w.timeout()) if w.unit.role in self.cfg.timeouts else 0,
                  "cli": w.cli.name}
                 for w in list(self.sessions.values())
             ],

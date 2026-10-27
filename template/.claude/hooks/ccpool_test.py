@@ -4033,6 +4033,70 @@ def test_inturn_quota_pauses_the_pool_and_a_retryable_error_resumes() -> None:
     check("and not a failed attempt", "transient error (exit 3)".startswith(ccpool.NOT_A_FAILURE), True)
 
 
+def test_the_author_resolves_its_own_conflict() -> None:
+    """Proposal §1 step 2: c58's 32 merger sessions (median 14.5 min) each re-read the issue,
+    the PR and main; the author's conversation, resumed, knows the change."""
+    old_cli = os.environ.get("CCROLE_WORKER_CLI")
+    os.environ["CCROLE_WORKER_CLI"] = "claude"  # resumable by id, no record to look for
+    try:
+        conflicting = state([iss(2, ["stage:pr", "P1"])], prs=[pr(40, 2, mergeable="CONFLICTING")])
+        h = Rig(conflicting, author_resolve=True, timeouts={"worker": "60m", "merger": "45m", "tester": "60m"})
+        h.pool.book.rebase_failed[40] = "b" * 40
+        h.pool.book.hard_conflicts[40] = [(NOW, frozenset({"src/live.py"}))]
+        check("no recorded conversation: a merger, as before", [(u.role, u.kind) for u in h.step()], [("merger", "land")])
+        h.finish(h.running()[0], "failed (exit 1)")
+        h.pool.book.convs[2] = {"conv": "s-author", "cli": "claude", "files": ["src/live.py"]}
+        h.st = state([iss(2, ["stage:pr", "P1"])], prs=[pr(40, 2, head="c" * 40, mergeable="CONFLICTING")])
+        h.pool.book.rebase_failed[40] = "c" * 40
+        started = h.step()
+        u = started[0]
+        check("a recorded conversation: the author is resumed for the conflict, with the merger's time",
+              (u.role, u.kind, u.info["resume"], u.info["conflicts"], u.info["timeout"], u.family),
+              ("worker", "resolve", "s-author", ["src/live.py"], "45m", "mrg:40"))
+        prompt = ccpool.author_resolve_prompt(u, 9, "45m", "    abc123 Fix things")
+        check("its prompt: main's commits, the conflicted files, the merger's steps, stop at stage:pr",
+              ("abc123 Fix things" in prompt, "`src/live.py`" in prompt, "--force-with-lease origin HEAD:issue-2" in prompt,
+               "Do not merge" in prompt, "issuelooper-merger" in prompt), (True, True, True, True, True))
+        h.finish(u.key, "ok")
+        check("one author session counted", h.pool.book.author_runs[40], 1)
+        h.pool.book.author_runs[40] = 2
+        h.st = state([iss(2, ["stage:pr", "P1"])], prs=[pr(40, 2, head="d" * 40, mergeable="CONFLICTING")])
+        h.pool.book.rebase_failed[40] = "d" * 40
+        check("after POOL_AUTHOR_RESOLVE_MAX author sessions: the merger", [u.kind for u in h.step()], ["land"])
+        h.finish(h.running()[0], "failed (exit 1)")
+        h.pool.book.author_runs[40] = 0
+        h.pool.book.running["x"] = ccpool.Unit("worker", "own-accept", "k", "x", 9, (2,), {"resume": "s-author"})
+        h.st = state([iss(2, ["stage:pr", "P1"])], prs=[pr(40, 2, head="e" * 40, mergeable="CONFLICTING")])
+        h.pool.book.rebase_failed[40] = "e" * 40
+        check("its conversation busy elsewhere: the merger rather than a wait", [u.kind for u in h.step()], ["land"])
+        del h.pool.book.running["x"]
+        h.pool.save_owners()
+        again = ccpool.Pool(h.pool.cfg, fetcher=state, spawn=False)
+        check("a restarted supervisor keeps the conversations", again.book.convs[2]["conv"], "s-author")
+        os.environ["CCROLE_WORKER_CLI"] = "agy"
+        check("a conversation another CLI ran is not resumed", ccpool.conv_resumable(again.book.convs[2]), "")
+    finally:
+        if old_cli is None:
+            os.environ.pop("CCROLE_WORKER_CLI", None)
+        else:
+            os.environ["CCROLE_WORKER_CLI"] = old_cli
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-resume-"))
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_WRAP)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat",
+                                     timeouts={"worker": "60m", "merger": "45m"}, worker_wrap_s=0, stall_s=0),
+                       fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("worker", "resolve", "own:40@x", "mrg:40", 40, (0,),
+                                         {"issue": 2, "resume": "conv-1", "timeout": "45m"}), 1)
+    w.dir.mkdir(parents=True)
+    rc, _, _ = w.session("resolve PR 40", dict(os.environ, CCROLE_WORKER_CLI="agy"))
+    calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+    check("a unit with a recorded conversation starts by resuming it, with its own time limit",
+          (rc, calls[0][-2:], calls[0][calls[0].index("--print-timeout") + 1]),
+          (0, ["--conversation", "conv-1"], f"{2700 + 900 + 2400}s"))
+
+
 def git_repo(d: pathlib.Path):
     """A bare origin and a clone of it in d; returns a git runner for the clone."""
     origin, work = d / "origin.git", d / "work"

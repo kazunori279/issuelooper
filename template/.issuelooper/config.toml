@@ -152,6 +152,10 @@ merge_train = true           # POOL_MERGE_TRAIN: PRs that pass the gates wait in
 train_size = 6               # POOL_TRAIN_SIZE: PRs in one train at most (it takes what is queued, up to this)
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
+author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after the supervisor's rebase (or whose rebase
+                             # is red) is resolved by its author's conversation, resumed (agy --conversation, claude
+                             # --resume), instead of a merger session; the merger stays the fallback (no recorded
+                             # conversation, or POOL_AUTHOR_RESOLVE_MAX = 2 author sessions without a merge)
 starve_overlap = true        # POOL_STARVE_OVERLAP: while a P0/P1 PR starves (its rebase left to a merger twice on
                              # the same files), hold only merges whose hunks there come within 10 lines of its own
                              # (POOL_STARVE_MARGIN); off: every merge that touches those files waits
