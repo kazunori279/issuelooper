@@ -417,6 +417,11 @@ class Config:
     split_after: int = 4
     starve_after: int = 2  # conflicts left to a merger on the same files before a P0/P1 PR is starving
     starve_hold_s: float = 3600  # how long merges that touch a starving PR's files wait for it at most
+    # Hold only a PR whose hunks in those files come within starve_margin lines of the
+    # starving PR's (each against its own fork point). Run 11: two starving PRs on main.py
+    # held 9 others 179 times in 34 minutes, whatever part of the file they changed.
+    starve_overlap: bool = True
+    starve_margin: int = 10
     split_window_s: float = 5400
     split_max: int = 8
     split_per_window: int = 1
@@ -546,6 +551,8 @@ class Config:
             split_after=env_int("POOL_SPLIT_AFTER", 4),
             starve_after=env_int("POOL_STARVE_AFTER", 2),
             starve_hold_s=float(e("POOL_STARVE_HOLD_S", "") or 3600),
+            starve_overlap=env_flag("POOL_STARVE_OVERLAP", True),
+            starve_margin=env_int("POOL_STARVE_MARGIN", 10),
             split_window_s=float(e("POOL_SPLIT_WINDOW_S", "5400")),
             split_max=env_int("POOL_SPLIT_MAX", 8),
             split_per_window=env_int("POOL_SPLIT_PER_WINDOW", 1),
@@ -749,6 +756,26 @@ FLAKY_DEADLINE = "<!-- flaky: past its deadline -->"
 # run 9 /tmp ran out of inodes and PRs #57 and #59 were handed back for it.
 INFRA = re.compile(r"(?i)no space left on device|os error 28|\bENOSPC\b|disk quota exceeded|\bEDQUOT\b|"
                    r"too many open files|\bEMFILE\b|cannot allocate memory|\bENOMEM\b|read-only file system")
+
+
+HUNK = re.compile(r"(?m)^@@ -(\d+)(?:,(\d+))? \+")
+
+
+def diff_hunks(diff: str) -> list[tuple[int, int]]:
+    """The line ranges a `git diff -U0` changes in the old file (an insertion is the line
+    it follows)."""
+    out = []
+    for m in HUNK.finditer(diff):
+        start, n = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
+        out.append((start, start + max(n, 1) - 1))
+    return out
+
+
+def hunks_overlap(a: list | None, b: list | None, margin: int) -> bool:
+    """Whether two sets of ranges come within margin lines (unknown counts as yes)."""
+    if a is None or b is None:
+        return True
+    return any(x1 - margin <= y2 and y1 - margin <= x2 for x1, x2 in a for y1, y2 in b)
 
 
 def same_failure(first: str, second: str) -> bool:
@@ -2878,7 +2905,11 @@ class Session(threading.Thread):
         root = str(repo_root())
         fork = self.git(root, "merge-base", "origin/main", head).stdout.strip()
         files = set(self.git(root, "diff", "--name-only", fork, head).stdout.split()) if fork else set()
-        held = self.pool.starve_hold(pr, files)
+
+        def ranges(f: str) -> list | None:
+            r = self.git(root, "diff", "-U0", fork, head, "--", f)
+            return diff_hunks(r.stdout) if r.returncode == 0 else None
+        held = self.pool.starve_hold(pr, files, ranges if fork else None)
         if held:
             self.note(held)
         return held
@@ -3317,7 +3348,8 @@ class Pool:
         if not hot or prio > 1:
             return
         first = min(t for t, _ in self.book.hard_conflicts[pr])
-        self.starving[pr] = {"files": hot, "since": now, "rank": (prio, first, pr)}
+        self.starving[pr] = {"files": hot, "since": now, "rank": (prio, first, pr),
+                             "head": (p or {}).get("head", ""), "branch": (p or {}).get("branch", ""), "ranges": {}}
         self.log("starving", pr=pr, files=sorted(hot), priority=f"P{prio}")
         self.event(f"PR #{pr} (P{prio}) conflicted {self.cfg.starve_after} times on {', '.join(sorted(hot)[:4])}: "
                    "merges of other PRs that touch those files wait until it lands, is closed, or "
@@ -3326,6 +3358,10 @@ class Pool:
     def track_starving(self, st: dict, now: float) -> None:
         """End a starving PR's hold when it is no longer an open PR, or at the time limit."""
         open_prs = {p["number"] for p in st.get("prs", [])}
+        for p in st.get("prs", []):
+            s = self.starving.get(p["number"])
+            if s and s.get("head") != p["head"]:
+                s.update(head=p["head"], branch=p.get("branch", ""), ranges={})  # a new head: its hunks moved
         for pr, s in list(self.starving.items()):
             why = ("it is no longer open (merged or closed)" if pr not in open_prs else
                    f"{self.cfg.starve_hold_s / 60:.0f} minutes passed" if now - s["since"] > self.cfg.starve_hold_s
@@ -3336,17 +3372,38 @@ class Pool:
                 self.log("starving_end", pr=pr, why=why)
                 self.event(f"merges that touch PR #{pr}'s files no longer wait for it: {why}")
 
-    def starve_hold(self, pr: int, files: set) -> str:
+    def starve_hold(self, pr: int, files: set, ranges=None) -> str:
         """'' unless the PR touches the files of a starving PR that is not itself and does
         not rank below it (P0 before P1, then the one that started conflicting first):
-        two starving PRs on the same files never wait for each other."""
+        two starving PRs on the same files never wait for each other. With ranges (file ->
+        this PR's hunks) and POOL_STARVE_OVERLAP, only where the hunks come within
+        POOL_STARVE_MARGIN lines of the starving PR's."""
         with self.lock:
             mine = self.starving.get(pr)
-            for other, s in sorted(self.starving.items(), key=lambda kv: kv[1]["rank"]):
-                if other == pr or not files & s["files"] or (mine and mine["rank"] < s["rank"]):
-                    continue
-                return f"held (it touches {', '.join(sorted(files & s['files'])[:3])}, which starving PR #{other} needs)"
+            others = [(o, dict(s)) for o, s in sorted(self.starving.items(), key=lambda kv: kv[1]["rank"])
+                      if o != pr and not (mine and mine["rank"] < s["rank"])]
+        for other, s in others:
+            shared = files & s["files"]
+            if shared and ranges and self.cfg.starve_overlap:
+                shared = {f for f in shared
+                          if hunks_overlap(ranges(f), self.starve_ranges(other, f), self.cfg.starve_margin)}
+            if shared:
+                return f"held (it touches {', '.join(sorted(shared)[:3])}, which starving PR #{other} needs)"
         return ""
+
+    def starve_ranges(self, pr: int, f: str) -> list | None:
+        """The starving PR's hunks in file f, from its fork point (cached per head; None
+        when git cannot tell)."""
+        s = self.starving.get(pr) or {}
+        cache = s.setdefault("ranges", {})
+        if f in cache or not s.get("head"):
+            return cache.get(f)
+        if s.get("branch"):
+            self.git("fetch", "-q", "origin", s["branch"])
+        fork = self.git("merge-base", "origin/main", s["head"]).stdout.strip()
+        r = self.git("diff", "-U0", fork, s["head"], "--", f) if fork else None
+        cache[f] = diff_hunks(r.stdout) if r is not None and r.returncode == 0 else None
+        return cache[f]
 
     def record_large(self, files: dict) -> None:
         """Source files on main over POOL_SPLIT_LINES lines (path -> lines), seen after a merge."""

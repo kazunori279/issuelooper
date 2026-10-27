@@ -150,6 +150,10 @@ merge_train = true           # POOL_MERGE_TRAIN: PRs that pass the gates wait in
 train_size = 6               # POOL_TRAIN_SIZE: PRs in one train at most (it takes what is queued, up to this)
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
+starve_overlap = true        # POOL_STARVE_OVERLAP: while a P0/P1 PR starves (its rebase left to a merger twice on
+                             # the same files), hold only merges whose hunks there come within 10 lines of its own
+                             # (POOL_STARVE_MARGIN); off: every merge that touches those files waits
+starve_hold_s = 3600         # POOL_STARVE_HOLD_S: the longest one starving PR holds others
 prune_other_roots = false    # POOL_PRUNE_OTHER_ROOTS: at start, also remove other loops' scratch roots beside this
                              # one (issuelooper-*-<hash>) untouched for two days; off: only this repository's
 

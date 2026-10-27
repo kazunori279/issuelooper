@@ -104,6 +104,8 @@ KEYS = {
     ("pool", "tester_port_base"): "TST_PORT",
     ("pool", "run_dir"): "ISSUELOOPER_RUN",
     ("pool", "prune_other_roots"): "POOL_PRUNE_OTHER_ROOTS",
+    ("pool", "starve_overlap"): "POOL_STARVE_OVERLAP",
+    ("pool", "starve_hold_s"): "POOL_STARVE_HOLD_S",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",
     ("guard", "protected_paths"): "GUARD_PROTECTED_PATHS",
     ("guard", "background_check"): "GUARD_BACKGROUND",

@@ -116,6 +116,7 @@ max_sessions = 16            # POOL_MAX_WORKERS: agent sessions running at once,
 worker_timeout = "60m"       # POOL_TIMEOUT_WORKER: 60 with the live check on
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
+starve_hold_s = 1800         # POOL_STARVE_HOLD_S: run 11's starving PRs on main.py held 9 PRs 179 times in 34 min
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
 

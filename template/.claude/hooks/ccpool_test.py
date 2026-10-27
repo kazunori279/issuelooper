@@ -3016,6 +3016,19 @@ def test_a_starving_pr_holds_merges_on_its_files() -> None:
     check("another PR's merge that touches the file waits; one that does not, and the starving PR itself, go",
           (h.pool.starve_hold(12, {"src/near.py", "x"}).startswith("held (it touches src/near.py, which starving PR #11"),
            h.pool.starve_hold(12, {"src/other.py"}), h.pool.starve_hold(11, {"src/near.py"})), (True, "", ""))
+    # Run 11: PRs 73 and 81 on main.py held 9 others 179 times in 34 minutes, wherever they edited.
+    h.pool.starving[11]["ranges"] = {"src/near.py": [(100, 120)]}
+    check("with hunks known: one far from the starving PR's goes, one near it waits",
+          (h.pool.starve_hold(12, {"src/near.py"}, lambda f: [(300, 310)]),
+           h.pool.starve_hold(12, {"src/near.py"}, lambda f: [(125, 130)]).startswith("held"),
+           h.pool.starve_hold(12, {"src/near.py"}, lambda f: None).startswith("held")),
+          ("", True, True))
+    h.pool.cfg.starve_overlap = False
+    check("POOL_STARVE_OVERLAP=0: any change to the file waits, as before",
+          h.pool.starve_hold(12, {"src/near.py"}, lambda f: [(300, 310)]).startswith("held"), True)
+    h.pool.cfg.starve_overlap = True
+    check("hunks from a -U0 diff", ccpool.diff_hunks("@@ -10,3 +10,4 @@\n@@ -40 +41 @@\n@@ -50,0 +52,2 @@\n"),
+          [(10, 12), (40, 40), (50, 50)])
     for _ in range(2):
         h.pool.record_conflicts(12, {"src/near.py"}, hard=True)
     check("a P2 PR does not starve others", 12 in h.pool.starving, False)
