@@ -423,6 +423,11 @@ class Config:
     split_lines: int = 900
     worker_wrap_s: float = 2100
     worker_wrap_budget_s: float = 720
+    # A UX run, spec check or explorer still going at this fraction of its timeout (or near
+    # its ceiling) gets a turn to write its report: run 11's first UX run hit its 90-minute
+    # ceiling with no report and no score. 0 = off.
+    report_wrap: float = 0.8
+    report_wrap_budget_s: float = 600
     tst_port: int = 8021
     tst_port_step: int = 100
     ccrole: str = str(HERE / "ccrole.sh")
@@ -545,6 +550,8 @@ class Config:
             worker_wrap_s=float(e("POOL_WORKER_WRAP_S", "3000" if devcheck else "2100")),
             # 12 min: workers on slower models ran out of 8 before they had pushed.
             worker_wrap_budget_s=float(e("POOL_WORKER_WRAP_BUDGET_S", "720")),
+            report_wrap=float(e("POOL_REPORT_WRAP", "") or 0.8),
+            report_wrap_budget_s=float(e("POOL_REPORT_WRAP_BUDGET_S", "") or 600),
             tst_port=env_int("TST_PORT", config.tester_port_base()),
             tst_port_step=env_int("POOL_TESTER_PORT_STEP", 100),
             ccrole=e("POOL_CCROLE", str(HERE / "ccrole.sh")),
@@ -1441,6 +1448,8 @@ def ux_journeys_path() -> str:
 
 
 SCORE_LINE = re.compile(r"(?i)\bscore\b\W*(\d{1,3})\s*/\s*100\b")
+# The units that end in a report with a score line, and its file in the session's $LOGDIR.
+REPORTS = {"ux": "ux_report.md", "spec": "spec_report.md", "explore": "explore_report.md"}
 
 
 def ux_score(report: pathlib.Path) -> int | None:
@@ -1543,7 +1552,8 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         f"({PROJECT} says where it is) as a harsh UX reviewer, and file at most five new "
         "findings. Write the run's report to $LOGDIR/ux_report.md. Its first line must be "
         "`Score: N/100`, N being the 0-100 score a user would give the app on the skill's scale; "
-        "the supervisor reads that line."
+        "the supervisor reads that line. Write it as soon as the first journeys have run (a provisional "
+        "score) and update it as you go, so a run cut short still reports."
         + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: a score 10 or "
            "more above it needs what the skill's step 4 asks."
            if previous and previous.get("score") is not None else "")
@@ -1963,7 +1973,13 @@ class Session(threading.Thread):
             # conversation with a few minutes to commit and release: workers that ran
             # their full timeout were a quarter of all worker time, and most of them
             # ended with nothing saved.
-            wrap_at = start + cfg.wrap_s() if role == "worker" and cfg.wrap_s() else None
+            report = self.unit.kind in REPORTS
+            if role == "worker" and self.unit.kind == "implement" and cfg.wrap_s():
+                wrap_at, wrap_budget = start + cfg.wrap_s(), cfg.worker_wrap_budget_s
+            elif report and cfg.report_wrap:
+                wrap_at, wrap_budget = start + cfg.report_wrap * seconds(timeout), cfg.report_wrap_budget_s
+            else:
+                wrap_at, wrap_budget = None, 0.0
             wrapped = False
             # Time the CLI spent retrying a failed model call inside a turn. Most worker
             # timeouts on one model were sessions waiting there; the clocks stop for it,
@@ -2024,13 +2040,19 @@ class Session(threading.Thread):
                         self.kill()
                         rc = 124
                         break
-                    if wrap_at and not wrapped and time.time() > wrap_at:
+                    # Also before the ceiling: paused clocks moved the wrap-up past it, and the
+                    # session was killed with nothing saved.
+                    if wrap_at and not wrapped and time.time() > min(wrap_at, ceiling - wrap_budget - 60):
                         wrapped = True
                         conv = self.conversation()
                         if conv:
-                            budget = cfg.worker_wrap_budget_s
+                            budget = wrap_budget
                             soft = hard = time.time() + budget
                             resume(conv, "wrap-up", (
+                                f"Time is almost up. Within the next few minutes write $LOGDIR/{REPORTS[self.unit.kind]} "
+                                "as it stands, its first line `Score: N/100` on what you saw so far, file what is "
+                                "ready to file (within your limit), stop every server you started, and stop."
+                                if report else
                                 "Time is almost up. Within the next few minutes: if your sweep is green, "
                                 "push and open (or update) the pull request as your skill says; otherwise "
                                 "commit what you have on your branch, say on the issue what is done and "
@@ -2269,10 +2291,8 @@ class Session(threading.Thread):
         u = self.unit
         if u.role == "worker" and not (self.dir / "claim").exists():
             return True  # the agent released its claim
-        if u.kind == "ux":
-            return (self.dir / "ux_report.md").exists()
-        if u.kind == "spec":
-            return (self.dir / "spec_report.md").exists()
+        if u.kind in REPORTS:
+            return (self.dir / REPORTS[u.kind]).exists()
         if u.kind == "accept":
             return (self.dir / "accept_report.md").exists()
         n = u.info.get("issue") if u.role == "merger" else u.number
@@ -3507,8 +3527,8 @@ class Pool:
                         if self.book.accept_held.get(x["n"]) == u.key:
                             del self.book.accept_held[x["n"]]
                     self.book.accept_settling.discard(u.key)
-        if u.kind == "ux":
-            self.record_ux_score(w)
+        if u.kind in ("ux", "explore"):
+            self.record_ux_score(w, outcome)
         extra = {}
         if (w.dir / "session.jsonl").exists():
             extra["usage"] = w.cli.usage(w.events())
@@ -3529,18 +3549,25 @@ class Pool:
         )
         self.wake.set()
 
-    def record_ux_score(self, w: Session):
-        """The score from the UX run's report, for pool.jsonl and the dashboard. 7 of 10
-        reports in one run had none, so a run's score could not be followed."""
-        score = ux_score(w.dir / "ux_report.md")
+    def record_ux_score(self, w: Session, outcome: str = ""):
+        """The score from the UX run's report (an explorer's from its own), for pool.jsonl
+        and the dashboard. 7 of 10 reports in one run had none, so a run's score could not
+        be followed. Only whole-app UX runs make the dashboard's series."""
+        name = REPORTS[w.unit.kind]
+        score = ux_score(w.dir / name)
+        kind = "ux_score" if w.unit.kind == "ux" else "explore_score"
         rec = {"t": round(self.clock(), 1), "sha": str(w.unit.info.get("sha", ""))[:12], "score": score}
-        with self.lock:
-            self.ux_scores = (self.ux_scores + [rec])[-20:]
+        if w.unit.kind == "ux":
+            with self.lock:
+                self.ux_scores = (self.ux_scores + [rec])[-20:]
+        extra = {"focus": w.unit.info.get("focus")} if w.unit.kind == "explore" else {}
         if score is None:
-            self.log("ux_score", session=w.seq, sha=rec["sha"], score=None,
-                     missing="no `Score: N/100` line in ux_report.md")
+            why = "no report" if not (w.dir / name).exists() else "no `Score: N/100` line"
+            self.log(kind, session=w.seq, sha=rec["sha"], score=None, missing=f"{why} in {name}",
+                     outcome=outcome, **extra)
+            self.event(f"{w.unit.kind} run {w.seq} at {rec['sha']} ended {outcome or 'without a score'}: {why} in {name}")
         else:
-            self.log("ux_score", session=w.seq, sha=rec["sha"], score=score)
+            self.log(kind, session=w.seq, sha=rec["sha"], score=score, outcome=outcome, **extra)
 
     def load_ux_scores(self):
         """The scores this run already logged, so a restarted supervisor keeps them."""

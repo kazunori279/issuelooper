@@ -272,7 +272,11 @@ A worker turns the steps into a failing test, so make them exact.
 
 Write `$LOGDIR/ux_report.md`. Its first line is `Score: N/100`: N is the 0-100
 score a user would give the app, on the scale in step 2; the supervisor reads that
-line and the owner follows it from run to run. Then the commit, the journeys you
+line and the owner follows it from run to run. Write it first right after the journeys
+ran (`Score: N/100 (provisional)`), and update it as you read and file: a run cut short
+(a quota wait, the time limit) still reports. Near the end of your budget the supervisor
+sends you a turn that asks for the report now; do that before anything else. Do not
+read the loop's own code or sleep-poll: neither is part of a UX run. Then the commit, the journeys you
 ran (and which you added or changed this run), every finding with its disposition
 (`filed #N`, `already #N`, `not filed: <why>`), and anything you could not test.
 

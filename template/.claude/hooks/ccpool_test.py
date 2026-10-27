@@ -2162,6 +2162,29 @@ def test_ux_journeys_and_score() -> None:
     check("a restarted supervisor keeps them", [r["score"] for r in again.ux_scores], [38, None, 58])
 
 
+def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
+    """Run 11's first UX run hit its 90-minute ceiling with no report and no score."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-report-"))
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_WRAP)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"tester": "60m"},
+                                     report_wrap=0.0005, report_wrap_budget_s=90, retry_pause_max_s=0, stall_s=0),
+                       fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("tester", "ux", "ux:abc", "tst:ux:abc", None, (2,), {"sha": "c" * 40}), 1)
+    w.dir.mkdir(parents=True)
+    rc, _, timed_out = w.session("walk the app", dict(os.environ, CCROLE_TESTER_CLI="agy"))
+    calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+    text = calls[-1][calls[-1].index("--print") + 1]
+    check("near the end of its budget a UX run is told to write its report, with the score line",
+          (rc, timed_out, len(calls), "ux_report.md" in text, "Score: N/100" in text), (0, False, 2, True, True))
+    pool.finished(w, "timed out after 60m")
+    rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
+    check("a run without a report is logged as such, with how it ended",
+          (rec["score"], rec["missing"], rec["outcome"]), (None, "no report in ux_report.md", "timed out after 60m"))
+    check("a provisional score counts", ccpool.SCORE_LINE.search("Score: 64/100 (provisional)").group(1), "64")
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""
