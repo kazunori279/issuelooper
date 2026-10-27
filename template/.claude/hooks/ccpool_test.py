@@ -3926,6 +3926,64 @@ def test_clocks_stop_during_agy_retries() -> None:
     check("the pause is logged", "clocks paused" in (w.dir / "resumes.log").read_text(), True)
 
 
+FAKE_AGY_INTURN = r"""#!/usr/bin/env python3
+import json, os, sqlite3, sys, time
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+if "--conversation" in sys.argv:
+    print(json.dumps({"event": "init", "conversation_id": "conv-t"}), flush=True)
+    print(json.dumps({"event": "result", "result": {"conversation_id": "conv-t", "response": "done after the timeout"}}),
+          flush=True)
+    sys.exit(0)
+print(json.dumps({"event": "init", "conversation_id": "conv-t"}), flush=True)
+c = sqlite3.connect(os.path.join(os.environ["AGY_CONVERSATIONS_DIR"], "conv-t.db"))
+c.execute("create table steps (idx integer primary key, step_type integer, status integer, step_payload blob, "
+          "error_details blob)")
+c.execute("insert into steps values (4, 17, 3, ?, NULL)", (b"API error (attempt 1): RESOURCE_EXHAUSTED (code 429)",))
+c.commit()
+c.close()
+print(json.dumps({"event": "step_update", "step_update": {"step_index": 4, "state": "DONE",
+      "step_type": "error_message"}}), flush=True)
+time.sleep(17)
+print('AGY_ERROR: {"status":"DEADLINE_EXCEEDED","retryable":true}', file=sys.stderr, flush=True)
+print(json.dumps({"event": "result", "result": {"conversation_id": "conv-t", "status": "ERROR", "response": "",
+      "error": "stream idle timeout (5m0s): context deadline exceeded"}}), flush=True)
+sys.exit(3)
+"""
+
+
+def test_inturn_quota_pauses_the_pool_and_a_retryable_error_resumes() -> None:
+    """Run 11: agy hid 321 quota retries (no pause, slow workers), and a DEADLINE_EXCEEDED
+    ended worker 41 as "failed (exit 3)", a failed attempt."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-inturn-"))
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_INTURN)
+    agy.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"worker": "60m"},
+                                     stall_s=0, background_idle_s=0, quota_wait_s=1, worker_wrap_s=0),
+                       fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:6@x", "wrk:6", 6, (4,), {}), 1)
+    w.dir.mkdir(parents=True)
+    w.work_done = lambda: False
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(d)
+    try:
+        rc, _, timed_out = w.session("do issue 6", dict(os.environ, CCROLE_WORKER_CLI="agy"))
+    finally:
+        os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+    calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+    log = (d / "pool" / "pool.jsonl").read_text()
+    check("an in-turn quota retry pauses new sessions pool-wide",
+          (w.inturn_hits, pool.book.quota_until > 0, '"inturn": true' in log), (1, True, True))
+    check("a retryable error is resumed in the same conversation, and the session ends ok",
+          (rc, timed_out, len(calls), calls[-1][-2:]), (0, False, 2, ["--conversation", "conv-t"]))
+    v = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:7@x", "wrk:7", 7, (4,), {}), 2)
+    v.dir.mkdir(parents=True)
+    (v.dir / "session.err").write_text('AGY_ERROR: {"status":"DEADLINE_EXCEEDED","retryable":true}\n')
+    (v.dir / "session.jsonl").write_text(json.dumps({"event": "result", "result": {"status": "ERROR", "response": ""}}))
+    check("such an ending is transient, not quota", (v.ended_transient(), v.ended_on_quota()), (True, False))
+    check("and not a failed attempt", "transient error (exit 3)".startswith(ccpool.NOT_A_FAILURE), True)
+
+
 def git_repo(d: pathlib.Path):
     """A bare origin and a clone of it in d; returns a git runner for the clone."""
     origin, work = d / "origin.git", d / "work"

@@ -389,6 +389,10 @@ class Config:
     # The most a session's clocks stand still for the CLI's own retries of a model call;
     # 20 min was not enough for a model whose calls kept failing for a while.
     retry_pause_max_s: float = 2400
+    # The CLI's own retries of a quota error inside a turn (agy's record of them) pause new
+    # sessions pool-wide, as a quota error that ends a turn does (Pool.quota_seen).
+    inturn_quota: bool = True
+    transient_resumes: int = 2  # resumes after a turn the CLI ended on a retryable error
     # Wall clock a session may run, as a multiple of its timeout, whatever paused its
     # clocks: a merger with 25 minutes of paused clocks ran 52 minutes on a 45-minute
     # timeout, a UX run 69 on 60. 0 = no ceiling.
@@ -512,6 +516,8 @@ class Config:
             stall_fast_models=e("POOL_STALL_FAST_MODELS", "claude"),
             kill_leftovers=env_flag("POOL_KILL_LEFTOVERS", True),
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
+            inturn_quota=env_flag("POOL_INTURN_QUOTA", True),
+            transient_resumes=env_int("POOL_TRANSIENT_RESUMES", 2),
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             rerun_cmd=e("SWEEP_RERUN", "").strip(),
@@ -1868,7 +1874,7 @@ def pid_alive(pid: int) -> bool:
 
 
 # Session outcomes that put the claim back without counting a failed attempt.
-NOT_A_FAILURE = ("startup crash", "quota error", "stopped with the supervisor")
+NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "stopped with the supervisor")
 
 
 class Session(threading.Thread):
@@ -1879,6 +1885,8 @@ class Session(threading.Thread):
         self.started = time.time()
         self.port = 0
         self.left_pr = False  # a worker session that ended with its pull request open (claim.py finish)
+        self.quota_idx = -1  # the newest in-turn quota retry already counted (agy's record)
+        self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
         self.dir = pool.cfg.logdir / f"{seq:04d}-{unit.role}-{slug}"
         try:
@@ -1947,6 +1955,7 @@ class Session(threading.Thread):
                 )
             resumes, rc = 0, None
             quota_k = 0  # resumes after a quota error, each after a doubling wait
+            trans_k = 0  # resumes after a retryable error that ended the turn
             stall_k = 0  # resumes after the model went silent between steps
             idle_k = 0  # resumes after the model's turn ended on a background task
             waited_on: list[int] = []  # processes the stuck-stream rule last waited for
@@ -1989,6 +1998,14 @@ class Session(threading.Thread):
                     now = time.time()
                     step, tick = now - tick, now
                     retrying = paused < cfg.retry_pause_max_s and self.in_model_retry()
+                    if retrying and cfg.inturn_quota:
+                        # agy retries a 429 inside the turn about once a minute and says
+                        # nothing on the stream but an empty error step. Run 11: 321 such
+                        # retries in 35 sessions, no quota pause, and workers took 35-45 min.
+                        hits, self.quota_idx = self.cli.inturn_quota(self.conversation(), self.quota_idx)
+                        if hits:
+                            self.inturn_hits += hits
+                            self.pool.quota_seen(role, inturn=True)
                     if retrying:
                         add = min(step, cfg.retry_pause_max_s - paused)
                         paused += add
@@ -2088,6 +2105,23 @@ class Session(threading.Thread):
                 # capacity shortage can last hours, and every session retrying at once
                 # is the load the error asks to reduce.
                 conv = self.quota_stalled(quiet=0, exited=True)
+                if not conv and rc != 0 and trans_k < cfg.transient_resumes and self.ended_transient() \
+                        and not self.work_done():
+                    # A retryable failure of the CLI (agy: a stream idle timeout while it
+                    # summarized the context): the same conversation goes on after a pause.
+                    conv = self.conversation()
+                    if conv and time.time() + cfg.quota_wait_s < min(hard, ceiling) - 120:
+                        trans_k += 1
+                        with open(self.dir / "resumes.log", "a") as rl:
+                            rl.write(f"{time.time():.0f} retryable error, wait {cfg.quota_wait_s:.0f} s before resume\n")
+                        if self.pool.halt.wait(cfg.quota_wait_s):
+                            break
+                        resume(conv, f"exited with {rc} on a retryable error, resume {trans_k}", (
+                            "Your last turn ended on a temporary error of the model service (a timeout). "
+                            "Continue the task from where you stopped."))
+                        rc = None
+                        continue
+                    conv = None
                 if conv and quota_k < cfg.quota_resumes and not self.work_done():
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
                     self.pool.quota_seen(role)
@@ -2214,6 +2248,19 @@ class Session(threading.Thread):
         except OSError:
             return False
         return bool(self.cli.quota.search(err))
+
+    def ended_transient(self) -> bool:
+        """Whether the turn ended on an error the CLI calls retryable and that is not a
+        quota error: the stream's last result, or the tail of stderr (agy's AGY_ERROR)."""
+        pattern = self.cli.transient
+        events = self.events()
+        if events and self.cli.is_result(events[-1]) and pattern.search(json.dumps(events[-1])):
+            return not self.ended_on_quota()
+        try:
+            err = (self.dir / "session.err").read_text(errors="replace")[-3000:]
+        except OSError:
+            return False
+        return bool(pattern.search(err)) and not self.ended_on_quota()
 
     def work_done(self) -> bool:
         """Whether the unit's result is already there (on GitHub, or the tester's
@@ -2379,6 +2426,8 @@ class Session(threading.Thread):
             # Not the agent's failure: the claim goes back without a failed attempt, and
             # the pool holds new starts for a while (Pool.finished).
             outcome = f"quota error (exit {rc})"
+        elif rc != 0 and self.ended_transient():
+            outcome = f"transient error (exit {rc})"  # the service's, not the agent's
         elif rc != 0 and elapsed < 120:
             outcome = f"startup crash (exit {rc})"
         elif rc != 0:
@@ -3349,9 +3398,10 @@ class Pool:
             w.start()
         return w
 
-    def quota_seen(self, role: str) -> None:
+    def quota_seen(self, role: str, inturn: bool = False) -> None:
         """A session hit a model quota error: hold new agent sessions, for a time that
-        doubles with each pause in a row (reset when a session ends ok)."""
+        doubles with each pause in a row (reset when a session ends ok). inturn: the CLI
+        retries it inside a running turn (it did not end the turn)."""
         now = self.clock()
         with self.lock:
             b = self.book
@@ -3361,10 +3411,10 @@ class Pool:
             wait = quota_backoff(b.quota_streak, self.cfg.quota_wait_s, self.cfg.quota_wait_max_s)
             b.quota_until = now + wait
             self.events.append(
-                f"model quota errors ({role} session): no new agent sessions for {wait:.0f} s "
-                f"(pause {b.quota_streak} in a row); running sessions wait and resume"
+                f"model quota errors ({role} session{', retried inside its turn' if inturn else ''}): no new agent "
+                f"sessions for {wait:.0f} s (pause {b.quota_streak} in a row); running sessions wait and resume"
             )
-        self.log("quota_pause", role=role, seconds=wait, streak=b.quota_streak)
+        self.log("quota_pause", role=role, seconds=wait, streak=b.quota_streak, inturn=inturn)
 
     def finished(self, w: Session, outcome: str):
         u, now = w.unit, self.clock()
@@ -3385,7 +3435,7 @@ class Pool:
                 # Only failures count toward POOL_FAMILY_MAX: a merged PR that a live check
                 # or a reopen sends back is progress, not a loop.
                 b.family_starts[u.family] -= 1
-            if outcome.startswith("quota error"):
+            if outcome.startswith(("quota error", "transient error")):
                 # The model's capacity, not the unit: no try spent, so it is due again
                 # when the pause ends.
                 b.tries[u.key] -= 1
@@ -3428,7 +3478,7 @@ class Pool:
                         f"{self.cfg.crash_max} {u.role} sessions in a row died at startup (see "
                         f"{w.dir}/session.err); no new {u.role} starts for {self.cfg.crash_pause_s:.0f} s"
                     )
-            elif outcome != "unclaimable" and not outcome.startswith("quota error"):
+            elif outcome != "unclaimable" and not outcome.startswith(("quota error", "transient error")):
                 self.crashes[u.role] = 0
             # Only the issue's own failures count toward asking for a split: a session that
             # never got the claim, or ended on quota, a crash or a stop, says nothing about
@@ -3438,7 +3488,7 @@ class Pool:
                     and not outcome.startswith(NOT_A_FAILURE):
                 b.failed_tries[u.number] += 1
             # A hold has its own event, once, and is retried every POOL_HOLD_RETRY_S.
-            if outcome not in ("ok", "unclaimable") and not outcome.startswith(("quota error", "held")):
+            if outcome not in ("ok", "unclaimable") and not outcome.startswith(("quota error", "transient error", "held")):
                 self.events.append(
                     f"{u.role} session {w.seq} on {u.kind} {self.label(u)} {outcome} (log {w.dir})"
                 )
@@ -3463,6 +3513,9 @@ class Pool:
         if (w.dir / "session.jsonl").exists():
             extra["usage"] = w.cli.usage(w.events())
             extra["cli"] = w.cli.name
+            retried, _ = w.cli.inturn_quota(w.conversation()) if w.unit.role != "auto" else (0, 0)
+            if retried:
+                extra["quota_retries"] = retried  # inside its turns, all told
         self.log(
             "end",
             session=w.seq,

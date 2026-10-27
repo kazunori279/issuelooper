@@ -610,6 +610,47 @@ def test_usage_without_a_result() -> None:
           claude.usage(cut), {"input": 110, "output": 11, "thinking": 0, "cache_read": 0, "turns": 2, "cost_usd": 0.1})
 
 
+def test_inturn_quota_resume_and_transient() -> None:
+    # Run 11: agy retried 321 quota errors inside turns; only its record has the text.
+    import sqlite3
+    agy, claude = agent_cli.get("agy"), agent_cli.get("claude")
+    root = pathlib.Path(tempfile.mkdtemp(prefix="agy-inturn-"))
+    old = os.environ.get("AGY_CONVERSATIONS_DIR")
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(root)
+    try:
+        c = sqlite3.connect(root / "q1.db")
+        c.execute("create table steps (idx integer primary key, step_type integer, status integer, "
+                  "step_payload blob, error_details blob)")
+        quota = b"\x12API error (attempt 2): RESOURCE_EXHAUSTED (code 429): TPM quota exhausted."
+        c.executemany("insert into steps values (?, ?, 3, ?, NULL)",
+                      [(1, 17, quota), (2, 15, b"reply"), (3, 17, b"API error: something else"), (4, 17, quota)])
+        c.commit()
+        c.close()
+        check("agy: quota errors retried inside the turn, from its record", agy.inturn_quota("q1"), (2, 4))
+        check("agy: only those after the last one counted", agy.inturn_quota("q1", 1), (1, 4))
+        check("agy: none after the newest", agy.inturn_quota("q1", 4), (0, 4))
+        check("agy: no record", agy.inturn_quota("nope"), (0, -1))
+        check("agy: a conversation with a record can be resumed", (agy.can_resume("q1"), agy.can_resume("nope"),
+                                                                   agy.can_resume(None)), (True, False, False))
+        check("claude: resumable by id, no in-turn record", (claude.can_resume("s1"), claude.inturn_quota("s1")),
+              (True, (0, -1)))
+    finally:
+        if old is None:
+            os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+        else:
+            os.environ["AGY_CONVERSATIONS_DIR"] = old
+        shutil.rmtree(root, ignore_errors=True)
+    err = ('AGY_ERROR: {"short_error":"agent executor error: pre-invocation hook: context summarization: request '
+           'failed: stream idle timeout (5m0s): context deadline exceeded","status":"DEADLINE_EXCEEDED",'
+           '"retryable":true}')
+    check("agy: run 11's DEADLINE_EXCEEDED is transient, not quota",
+          (bool(agy.transient.search(err)), bool(agy.quota.search(err))), (True, False))
+    check("agy: a plain failure is neither", bool(agy.transient.search('AGY_ERROR: {"retryable":false}')), False)
+    check("claude: context size from the newest message",
+          claude.context_tokens([{"type": "assistant", "message": {"usage": {"input_tokens": 5,
+                                                                             "cache_read_input_tokens": 100}}}]), 105)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

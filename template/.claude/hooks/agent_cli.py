@@ -93,6 +93,10 @@ class Cli:
     name = ""
     prompt_flag = ""
     quota: re.Pattern = re.compile(r"(?!x)x")
+    # A failed turn the CLI itself calls retryable and that is not the model's quota (a
+    # stream idle timeout, a deadline): resumed as a quota error is, but it does not
+    # pause the pool.
+    transient: re.Pattern = re.compile(r"(?!x)x")
     # Text on stderr that means the CLI's own time limit ended the run ('' = it has none).
     timeout_text = ""
     # A last stderr line that means the agent's turn is over while the CLI waits for a
@@ -104,6 +108,21 @@ class Cli:
 
     def resume(self, prompt: str, session_id: str, timeout_s: float) -> list[str]:
         raise NotImplementedError
+
+    def can_resume(self, session_id: str | None) -> bool:
+        """Whether a later process can resume this conversation (its record is there)."""
+        return bool(session_id)
+
+    def inturn_quota(self, session_id: str | None, after: int = -1) -> tuple[int, int]:
+        """(quota errors the CLI retried inside the turn, in steps after index `after`;
+        the newest such step's index, or `after`). (0, after) for a CLI that does not
+        record them."""
+        return 0, after
+
+    def context_tokens(self, events: list[dict]) -> int:
+        """The prompt size of the newest model call (input plus cached tokens): how large
+        the conversation has grown. 0 when unknown."""
+        return 0
 
     def is_init(self, e: dict) -> bool:
         raise NotImplementedError
@@ -192,6 +211,10 @@ class Agy(Cli):
     quota = re.compile(
         r"RESOURCE_EXHAUSTED|TPM quota exhausted|No spare capacity|\bcode 429\b"
     )
+    # A turn agy ended on an error it calls retryable: its stderr's AGY_ERROR line says
+    # `"retryable":true`. Run 11: a stream idle timeout during context summarization
+    # (DEADLINE_EXCEEDED) ended worker 41 as "failed (exit 3)", a failed attempt.
+    transient = re.compile(r'"retryable"\s*:\s*true|\bDEADLINE_EXCEEDED\b|\bUNAVAILABLE\b|stream idle timeout')
     timeout_text = "print timeout"
     # When the model ends its turn while a command it ran is still going (a server, a
     # sweep moved to the background), agy prints this and waits for the task, up to its
@@ -209,6 +232,57 @@ class Agy(Cli):
     def conversations() -> pathlib.Path:
         return pathlib.Path(os.environ.get("AGY_CONVERSATIONS_DIR")
                             or "~/.gemini/antigravity-cli/conversations").expanduser()
+
+    @classmethod
+    def db(cls, conv: str | None) -> pathlib.Path | None:
+        return cls.conversations() / f"{conv}.db" if conv else None
+
+    def can_resume(self, session_id):
+        db = self.db(session_id)
+        return bool(db and db.exists())
+
+    # agy's step type for a model call it failed and retries (the stream's error_message):
+    # the stream carries no text, the record's payload does ("API error (attempt 3):
+    # RESOURCE_EXHAUSTED (code 429) ..."). Run 11: 35 sessions retried 321 such calls,
+    # none of them seen as quota by the supervisor.
+    ERROR_STEP = 17
+
+    def inturn_quota(self, session_id, after=-1):
+        db = self.db(session_id)
+        if not db or not db.exists():
+            return 0, after
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = c.execute("select idx, step_payload, error_details from steps where step_type = ? and idx > ?",
+                                 (self.ERROR_STEP, after)).fetchall()
+            finally:
+                c.close()
+        except sqlite3.Error:
+            return 0, after
+        hits = [idx for idx, a, b in rows
+                if self.quota.search(((a or b"") + (b or b"")).decode("utf-8", "replace"))]
+        return len(hits), max(hits, default=after)
+
+    def context_tokens(self, events):
+        db = self.db(self.session_id(events))
+        if not db or not db.exists():
+            return 0
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                row = c.execute("select data from gen_metadata order by idx desc limit 1").fetchone()
+            finally:
+                c.close()
+            if not row:
+                return 0
+            for call in _proto(row[0]).get(1, []):
+                for u in _proto(call).get(4, []):
+                    f = _proto(u)
+                    return sum(v for k in (2, 5) for v in f.get(k, []) if isinstance(v, int))
+        except (sqlite3.Error, ValueError, IndexError, TypeError):
+            return 0
+        return 0
 
     def first_turn(self, prompt, timeout_s):
         return [
@@ -427,6 +501,7 @@ class Claude(Cli):
     name = "claude"
     prompt_flag = "-p"
     quota = re.compile(r"\b429\b|rate_limit_error|overloaded_error|usage limit", re.I)
+    transient = re.compile(r"Request timed out|\bAPI Error: (?:500|502|503|504)\b|ECONNRESET")
 
     def first_turn(self, prompt, timeout_s):
         return ["-p", prompt, "--output-format", "stream-json", "--verbose"]
@@ -462,6 +537,14 @@ class Claude(Cli):
             if isinstance(content, list)
             else []
         )
+
+    def context_tokens(self, events):
+        for e in reversed(events):
+            u = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
+            if u:
+                return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                                        "cache_creation_input_tokens"))
+        return 0
 
     def pending_tool(self, events) -> bool:
         """A tool_use with no tool_result after it."""
