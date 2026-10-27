@@ -4078,8 +4078,13 @@ class Pool:
                     self.book.accept_settling.discard(u.key)
         if u.kind == "accept":
             try:
-                if outcome == "ok" or outcome.startswith(("timed out", "failed")):
-                    verified = self.settle_accept(u, w.started, outcome == "ok")  # a timed-out one may have settled some
+                # Every verdict the unit posted counts, however its session ended: run 12's s97
+                # posted five accept-verified verdicts and then ended on one UNAVAILABLE error
+                # ("transient error"); they were thrown away and a new unit redid 21 minutes.
+                # Issues without a verdict stay in the queue (a round is counted only after a
+                # clean end).
+                if not outcome.startswith("startup crash"):
+                    verified = self.settle_accept(u, w.started, outcome == "ok")
                     self.accept_chore(w.dir, verified, {x["n"]: x.get("title", "") for x in u.info["issues"]})
             finally:
                 with self.lock:

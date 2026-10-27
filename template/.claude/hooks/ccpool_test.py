@@ -1314,6 +1314,25 @@ def _book(**kw):
     return b
 
 
+def test_verdicts_settle_whatever_ended_the_session() -> None:
+    """Run 12: accept unit s97 posted five accept-verified verdicts, then ended on one
+    UNAVAILABLE error; the verdicts were not settled and another unit redid them."""
+    for outcome, want in (("transient error (exit 3)", 1), ("quota error (exit 3)", 1), ("timed out after 60m", 1),
+                          ("stopped with the supervisor", 1), ("ok", 1), ("startup crash (exit 1)", 0)):
+        h = Rig(state([iss(9, ["stage:accept"])]), accept=True, accept_paths=["src/"])
+        calls = []
+        h.pool.settle_accept = lambda u, started, finished, calls=calls: calls.append(finished) or []
+        h.pool.accept_chore = lambda *a: None
+        u = ccpool.Unit("tester", "accept", "accept:x", "tst:accept0", None, (2,),
+                        {"sha": "d" * 40, "issues": [{"n": 9, "title": "t", "since": ""}]})
+        h.pool.start(u)
+        h.finish(u.key, outcome)
+        check(f"accept unit ending {outcome!r}: its verdicts are settled", len(calls), want)
+        check(f"and a round without a verdict counts only after a clean end ({outcome!r})",
+              calls == [outcome == "ok"] or not want, True)
+        check("its issue is free for the next unit", h.pool.book.accept_held, {})
+
+
 def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
     """Fixed regressions came back in cohort 52 ("maps blank after reload"). A verified
     issue's script becomes tests/accept/, run on each build with no model."""
