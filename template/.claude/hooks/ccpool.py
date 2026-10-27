@@ -462,9 +462,10 @@ class Config:
     # works an issue that names an area's hot file. c52 PR #143 waited 5 h 40 min on live.py.
     area_refresh: int = 6
     area_refresh_tokens: int = 0
-    area_conversations: int = 2
+    area_conversations: int = 3
     area_second_at: int = 3
     area_hot_lock: bool = True
+    area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
     unknown_s: float = 300
     split_after: int = 4
     starve_after: int = 2  # conflicts left to a merger on the same files before a P0/P1 PR is starving
@@ -623,9 +624,10 @@ class Config:
             areas=config.areas(),
             area_refresh=env_int("POOL_AREA_REFRESH", 6),
             area_refresh_tokens=env_int("POOL_AREA_REFRESH_TOKENS", 0),
-            area_conversations=env_int("POOL_AREA_CONVERSATIONS", 2),
+            area_conversations=env_int("POOL_AREA_CONVERSATIONS", 3),
             area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
+            area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
             starve_after=env_int("POOL_STARVE_AFTER", 2),
@@ -1024,6 +1026,12 @@ class Book:
         self.issue_files: dict[int, list] = {}
         self.area_cache: dict[int, tuple] = {}
         self.area_slots: dict[str, list] = {}
+        # Waits for an area ([areas]): issue -> {"why": "hot" | "area", "area", "files"} as the
+        # last plan found them; issue -> (when it started waiting, that record); area ->
+        # seconds waited, by why ("<area>:hot", "<area>:area"; "-:hot" for no area).
+        self.waits_now: dict[int, dict] = {}
+        self.waits: dict[int, tuple] = {}
+        self.area_wait_s: collections.Counter = collections.Counter()
         self.pr_heads: dict[int, str] = {}  # PR -> the head the last plan read
         # PR -> [head handed back, seen off stage:pr since]: a poll read before the hand-back
         # still shows stage:pr, and PR #131 was merged again 2 s later on the same head.
@@ -1153,6 +1161,7 @@ def plan(
             )
 
     queue = collections.Counter(book.issue_area.get(i["number"]) for i in claimable)
+    book.waits_now = {}
     for i in sorted(claimable, key=lambda i: (priority(i["labels"]), i["number"])):
         n = i["number"]
         where = place_in_area(n, book, cfg, holding(book, cfg, now, units), queue) if cfg.areas else {}
@@ -1424,12 +1433,21 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) ->
     free slot is resumed, unless it is due for a refresh (POOL_AREA_REFRESH issues, or
     POOL_AREA_REFRESH_TOKENS of context): then a fresh one starts with the notes. A second
     slot opens only while POOL_AREA_SECOND_AT issues wait in the area and the issue's
-    files do not overlap those of the area's running work. active: holding()."""
+    files do not overlap those of the area's running work. active: holding().
+
+    Slot k > 0 opens while k * POOL_AREA_SECOND_AT issues wait in the area, whatever the
+    issue's files (unknown included): only a hot file serializes. With every slot busy and
+    POOL_AREA_LEND_AT or more waiting, the issue goes to an ordinary worker ("lent"). Run 12:
+    nine settings issues queued behind one conversation while pool slots sat free, because
+    a second opened only for issues with known, disjoint files. Each wait is noted in
+    book.waits_now (Pool.track_waits logs and totals them)."""
     files = set(book.issue_files.get(n) or [])
     hot = {f for f in files if config.is_hot(f, cfg.areas)} if cfg.area_hot_lock else set()
-    if hot & {f for u in active if u.role == "worker" for f in u.info.get("hot") or []}:
-        return None
     area = book.issue_area.get(n) or ""
+    held = hot & {f for u in active if u.role == "worker" for f in u.info.get("hot") or []}
+    if held:
+        book.waits_now[n] = {"why": "hot", "area": area, "files": sorted(held)}
+        return None
     if not area:
         return {"hot": sorted(hot)} if hot else {}
     mine = [u for u in active if u.info.get("area") == area]
@@ -1439,8 +1457,7 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) ->
     for k in range(max(1, cfg.area_conversations)):
         if k in busy:
             continue
-        if k and (queue[area] < cfg.area_second_at or not files
-                  or files & {f for u in mine for f in u.info.get("files") or []}):
+        if k and queue[area] < k * max(1, cfg.area_second_at):
             break
         slot = slots[k] if k < len(slots) else {}
         refresh = bool(slot) and (slot.get("issues", 0) >= cfg.area_refresh > 0 or
@@ -1450,6 +1467,9 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) ->
             continue
         return {"area": area, "slot": k, "resume": conv or None, "files": sorted(files), "hot": sorted(hot),
                 "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh}
+    if cfg.area_lend_at and queue[area] >= cfg.area_lend_at:
+        return {"lent": area, "files": sorted(files), "hot": sorted(hot)}
+    book.waits_now[n] = {"why": "area", "area": area, "files": []}
     return None
 
 
@@ -4193,7 +4213,8 @@ class Pool:
                          tokens=slots[k]["tokens"], resumed=resumed)
         self.save_owners()
 
-    OWNED = ("convs", "author_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots")
+    OWNED = ("convs", "author_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
+             "area_wait_s")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""
@@ -4218,7 +4239,7 @@ class Pool:
                 continue
             cur = getattr(self.book, k)
             if isinstance(cur, collections.Counter):
-                cur.update({int(a): b for a, b in v.items()})
+                cur.update({(int(a) if str(a).isdigit() else a): b for a, b in v.items()})
             elif isinstance(cur, dict) and isinstance(v, dict):
                 cur.update({(int(a) if str(a).isdigit() else a): b for a, b in v.items()})
             else:
@@ -5331,6 +5352,33 @@ class Pool:
                 b.accept_rounds.pop(n, None)
         b.accept_ready, b.accept_target = ready, target
 
+    def track_waits(self, now: float, started: set) -> None:
+        """Log when an issue starts waiting for an area (a hot file another session works on,
+        or the area's busy conversations) and when the wait ends, and total the seconds per
+        area and reason for state.json. Run 12's hot-lock waits could not be measured."""
+        b = self.book
+        for n, w in b.waits_now.items():
+            if n not in b.waits:
+                b.waits[n] = (now, w)
+                self.log("area_wait", issue=n, why=w["why"], area=w["area"] or None, files=w["files"])
+        for n in [n for n in b.waits if n not in b.waits_now]:
+            since, w = b.waits.pop(n)
+            b.area_wait_s[f"{w['area'] or '-'}:{w['why']}"] += now - since
+            self.log("area_wait_end", issue=n, why=w["why"], area=w["area"] or None, seconds=round(now - since),
+                     started=n in started)
+
+    def area_waits(self, now: float) -> dict:
+        """area -> {"hot_wait_s", "area_wait_s", "waiting"}: ended waits plus those still on."""
+        out: dict = collections.defaultdict(lambda: {"hot_wait_s": 0.0, "area_wait_s": 0.0, "waiting": 0})
+        for key, sec in self.book.area_wait_s.items():
+            area, why = key.rsplit(":", 1)
+            out[area][f"{why}_wait_s"] += sec
+        for since, w in self.book.waits.values():
+            x = out[w["area"] or "-"]
+            x[f"{w['why']}_wait_s"] += now - since
+            x["waiting"] += 1
+        return {a: {k: (round(v) if isinstance(v, float) else v) for k, v in x.items()} for a, x in out.items()}
+
     def track_areas(self, st: dict) -> None:
         """Route each claimable issue to an area ([areas]): an `area:<name>` label (the
         monitor's override), else the area most of the files its last branch changed lie in,
@@ -5976,6 +6024,7 @@ class Pool:
             self.track_starving(st, now)
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))
             started = admit(due, self.book, self.cfg, now)
+            self.track_waits(now, {u.number for u in started})
         started = [u for u in started if self.start(u)]  # none once stopping
         self.observe(st, now, started, stuck)
         self.prev = st
@@ -6017,6 +6066,7 @@ class Pool:
                        "held": sorted(self.book.accept_held),
                        **({"sample": self.sample_stats()} if self.cfg.author_accept else {})},
             "missing_files": self.book.missing,
+            **({"area_waits": self.area_waits(now)} if self.cfg.areas else {}),
             **({"areas": {a["name"]: {
                 "queue": sum(1 for x in self.book.issue_area.values() if x == a["name"]),
                 "slots": [{"issues": sl.get("issues", 0), "tokens": sl.get("tokens", 0),

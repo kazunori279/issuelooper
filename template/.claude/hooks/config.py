@@ -99,6 +99,7 @@ KEYS = {
     ("areas", "conversations"): "POOL_AREA_CONVERSATIONS",
     ("areas", "second_at"): "POOL_AREA_SECOND_AT",
     ("areas", "hot_lock"): "POOL_AREA_HOT_LOCK",
+    ("areas", "lend_at"): "POOL_AREA_LEND_AT",
     ("review", "enabled"): "REVIEW_GATE",
     ("review", "rules"): "REVIEW_RULES",
     ("review", "production_paths"): "REVIEW_PATHS",

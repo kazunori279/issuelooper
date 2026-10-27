@@ -2447,6 +2447,31 @@ def test_areas_route_issues_to_their_conversations() -> None:
             os.environ.pop("CCROLE_WORKER_CLI", None)
         else:
             os.environ["CCROLE_WORKER_CLI"] = old_cli
+    # Run 12: nine settings issues (no known files) queued behind one conversation while slots sat free.
+    h = Rig(state([iss(n, ["stage:triage", "P2"]) for n in range(30, 40)]), areas=AREAS, area_second_at=3,
+            area_conversations=3, area_lend_at=4)
+    h.pool.track_areas = lambda st: None
+    h.pool.book.issue_area = {n: "cards" for n in range(30, 40)}
+    h.pool.book.issue_files = {}
+    got = sorted((u.info.get("slot", -1), u.info.get("lent") or "") for u in h.step())
+    check("issues with unknown files fill every conversation the queue allows, and the rest go to ordinary "
+          "workers (lent), so no slot sits idle", got,
+          [(-1, "cards")] * 7 + [(0, ""), (1, ""), (2, "")])
+    h = Rig(state([iss(n, ["stage:triage", "P2"]) for n in (41, 42)]), areas=AREAS, area_lend_at=4)
+    h.pool.track_areas = lambda st: None
+    h.pool.book.issue_area, h.pool.book.issue_files = {41: "live", 42: "live"}, {41: ["src/live.py"], 42: ["src/live.py"]}
+    h.step()
+    check("a wait on a hot file is logged when it starts", [json.loads(x)["issue"] for x in
+                                                           (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+                                                           if '"area_wait"' in x], [42])
+    h.finish(h.running()[0])
+    h.st = state([iss(42, ["stage:triage", "P2"])])
+    h.step(120)
+    log = [json.loads(x) for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines() if '"area_wait_end"' in x]
+    check("and when it ends, with its length; state.json totals it per area",
+          ([(r["issue"], r["why"], r["seconds"], r["started"]) for r in log],
+           json.loads((h.pool.cfg.logdir / "state.json").read_text())["area_waits"]["live"]["hot_wait_s"]),
+          ([(42, "hot", 120, True)], 120))
     h = Rig(state([iss(7, ["stage:triage"]), iss(8, ["stage:triage", "area:cards"]), iss(9, ["stage:triage"],
                                                                                          body="Fix `play` in src/js/live_audio.js")]),
             areas=AREAS)

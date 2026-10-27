@@ -138,8 +138,9 @@ issues = 3                   # POOL_EXPLORE_ISSUES
 # style.css are the shell's.
 [areas]
 refresh_after = 6            # POOL_AREA_REFRESH
-conversations = 2            # POOL_AREA_CONVERSATIONS
+conversations = 3            # POOL_AREA_CONVERSATIONS
 second_at = 3                # POOL_AREA_SECOND_AT
+lend_at = 4                  # POOL_AREA_LEND_AT: run 12 queued 9 settings issues behind one conversation
 hot_lock = true              # POOL_AREA_HOT_LOCK
 [areas.live]
 paths = ["src/concierge/main.py", "src/concierge/sessions.py", "src/concierge/memory.py",
