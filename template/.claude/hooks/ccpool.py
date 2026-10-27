@@ -2397,6 +2397,8 @@ class Session(threading.Thread):
         self.quota_idx = -1  # the newest in-turn quota retry already counted (agy's record)
         self.branch_files: list[str] = []  # what a worker's branch changed (Book.convs)
         self.quota_time = 0.0  # seconds its clocks stood still for quota (CLI retries and pool pauses)
+        self.quota_base = -1  # a resumed conversation's newest quota step before this session
+        self.usage_base: dict | None = None  # and its recorded usage (agy) before this session
         self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
         self.dir = pool.cfg.logdir / f"{seq:04d}-{unit.role}-{slug}"
@@ -2457,6 +2459,13 @@ class Session(threading.Thread):
         if first:
             with open(self.dir / "resumes.log", "a") as rl:
                 rl.write(f"{time.time():.0f} started in conversation {first} ({self.unit.kind})\n")
+            # What the conversation already holds: this session's usage and quota retries are
+            # what it adds (run 12: a resumed 399-s session logged 5.1M input, the
+            # conversation's total), and old quota steps are not new ones to pause for.
+            _, self.quota_idx = cli.inturn_quota(first)
+            self.quota_base = self.quota_idx
+            if hasattr(cli, "recorded_usage"):
+                self.usage_base = cli.recorded_usage(first)
         with open(self.dir / "wrapper.err", "w") as err:
             # Under the pool's lock, after a look at stopping: stop() either sees this
             # process and kills it, or it is never started. A worker still claiming its
@@ -2691,6 +2700,30 @@ class Session(threading.Thread):
         timed_out = (rc == 124 or bool(cli.timeout_text and cli.timeout_text in errtext)
                      or elapsed >= seconds(timeout) + 900 + paused or time.time() > ceiling)
         return rc, elapsed, timed_out
+
+    def session_usage(self) -> dict:
+        """Tokens this session used: for a conversation it resumed, what the conversation's
+        record grew by (agy); else the stream's count."""
+        usage = self.cli.usage(self.events())
+        if self.usage_base is not None and hasattr(self.cli, "recorded_usage"):
+            now = self.cli.recorded_usage(self.conversation())
+            if now is not None:
+                usage.update({k: max(0, now.get(k, 0) - self.usage_base.get(k, 0)) for k in now})
+        return usage
+
+    def clear_scratch(self) -> None:
+        """Remove what the session left under its scratch prefix (an extracted tree, shots,
+        logs), except worktrees (cleanup's) and rescued diffs. Run 12 left 617 MB after
+        stop, two thirds of it two testers' 270 MB extracted trees."""
+        for prefix in self.scratch_prefixes()[:1]:
+            for path in glob.glob(prefix + "*"):
+                q = pathlib.Path(path)
+                if path.endswith("-rescued.diff") or (q / ".git").exists():
+                    continue
+                if q.is_dir() and not q.is_symlink():
+                    shutil.rmtree(q, ignore_errors=True)
+                else:
+                    q.unlink(missing_ok=True)
 
     def events(self) -> list[dict]:
         try:
@@ -2984,6 +3017,8 @@ class Session(threading.Thread):
         rc, elapsed, timed_out = self.session(prompt, env)
         if cfg.kill_leftovers:
             self.kill_leftovers()
+        if u.role == "tester":
+            self.clear_scratch()
 
         if self.pool.stopping:
             # The owner stopped the loop: the claim goes back without a failed attempt,
@@ -3010,8 +3045,7 @@ class Session(threading.Thread):
 
         if u.role == "worker" and u.kind != "implement":
             self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
-            for tree in glob.glob(scratch(f"wrk-{self.seq}-*-tree")):
-                shutil.rmtree(tree, ignore_errors=True)
+            self.clear_scratch()
         elif u.role == "worker":
             self.branch_files = self.changed_files(scratch(f"wrk-{self.seq}-*-wt"))
             self.save_wip(scratch(f"wrk-{self.seq}-*-wt"))
@@ -3034,6 +3068,7 @@ class Session(threading.Thread):
             except OSError:
                 pass
             self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
+            self.clear_scratch()
         elif u.role == "merger":
             self.cleanup(scratch(f"mrg-{u.number}-wt"))
         return outcome
@@ -4168,9 +4203,9 @@ class Pool:
             self.record_ux_score(w, outcome)
         extra = {}
         if (w.dir / "session.jsonl").exists():
-            extra["usage"] = w.cli.usage(w.events())
+            extra["usage"] = w.session_usage()
             extra["cli"] = w.cli.name
-            retried, _ = w.cli.inturn_quota(w.conversation()) if w.unit.role != "auto" else (0, 0)
+            retried, _ = w.cli.inturn_quota(w.conversation(), w.quota_base) if w.unit.role != "auto" else (0, 0)
             if retried:
                 extra["quota_retries"] = retried  # inside its turns, all told
         self.log(
@@ -6246,6 +6281,12 @@ def cmd_prune(a) -> int:
         if procs:
             print(f"scratch: killed {len(procs)} process(es) left running: "
                   + "; ".join(f"{p['pid']} {p['cmd'][:60]}" for p in procs[:5]))
+        # The supervisor has stopped: every session's scratch is a leftover, however new
+        # (run 12: "nothing to remove" and 617 MB stayed). Records stay; worktrees with
+        # unpushed work leave a rescued diff.
+        gone = prune_scratch(stale_s=-1)
+        print(f"scratch: removed {len(gone)} left by the sessions" if gone else "scratch: nothing to remove")
+        return 0
     gone = prune_scratch()
     print(f"scratch: removed {len(gone)} left from earlier runs" if gone else "scratch: nothing to remove")
     return 0

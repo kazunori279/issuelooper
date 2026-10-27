@@ -2552,6 +2552,32 @@ def test_routing_follows_the_words_ids_and_specific_files() -> None:
             os.environ["POOL_AREA_SHARED"] = old
 
 
+def test_a_session_leaves_no_scratch_and_counts_only_its_own_usage() -> None:
+    """Run 12: 617 MB of scratch after stop (two testers' 270 MB extracted trees), and a
+    resumed 399-s session logged its conversation's 5.1M input tokens as its own."""
+    h = Rig(state())
+    t = ccpool.Session(h.pool, ccpool.Unit("tester", "ux", "ux:z", "tst:ux:z", None, (2,), {"sha": "a"}), 5)
+    t.port = 8977
+    tree = pathlib.Path(SCRATCH, "tst-8977-tree")
+    (tree / "src").mkdir(parents=True)
+    pathlib.Path(SCRATCH, "tst-8977-shots.png").write_text("x")
+    pathlib.Path(SCRATCH, "tst-8077-tree").mkdir(exist_ok=True)
+    t.clear_scratch()
+    check("a tester's tree and files go when it ends; another port's stay",
+          (tree.exists(), pathlib.Path(SCRATCH, "tst-8977-shots.png").exists(),
+           pathlib.Path(SCRATCH, "tst-8077-tree").exists()), (False, False, True))
+    shutil.rmtree(pathlib.Path(SCRATCH, "tst-8077-tree"))
+    w = ccpool.Session(h.pool, ccpool.Unit("worker", "own-accept", "oac:1", "wrk:1", 1, (2,), {"resume": "c1"}), 6)
+    w.usage_base = {"input": 5_000_000, "output": 100, "thinking": 0, "cache_read": 10}
+    w.cli = type("Fake", (), {"usage": lambda self, ev: {"input": 5_100_000, "output": 150, "turns": 1},
+                              "recorded_usage": lambda self, conv: {"input": 5_100_000, "output": 150, "thinking": 0,
+                                                                    "cache_read": 30},
+                              "session_id": lambda self, ev: "c1"})()
+    w.events = lambda: []
+    check("a resumed conversation's session logs what it added", w.session_usage(),
+          {"input": 100_000, "output": 50, "turns": 1, "thinking": 0, "cache_read": 20})
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""
