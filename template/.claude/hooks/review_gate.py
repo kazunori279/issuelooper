@@ -815,8 +815,60 @@ def parse_verdict(reply) -> dict:
     }
 
 
+def norm_line(line: str) -> str:
+    return re.sub(r"\s+", " ", line.lstrip("+")).strip()
+
+
+def seen_lines(files: list[tuple[str, str]], cap: int = 4000) -> list[str]:
+    """The production lines a review read (added in its diff), normalized: a later review
+    of the same PR names new findings only on lines not among them (new_findings)."""
+    out: list[str] = []
+    for path, part in files:
+        if is_prod(path):
+            out += [norm_line(x) for _, x in added_lines(part) if len(norm_line(x)) >= 6]
+    return list(dict.fromkeys(out))[:cap]
+
+
+def on_seen_lines(finding: dict, seen: set[str]) -> bool:
+    """Whether every line of a finding's `what` was already in a diff an earlier review read."""
+    lines = [norm_line(x) for x in str(finding.get("what") or "").splitlines() if len(norm_line(x)) >= 6]
+    if not lines or not seen:
+        return False
+    return all(ln in seen or any(ln in x or (len(x) >= 12 and x in ln) for x in seen) for ln in lines)
+
+
+def new_findings(findings: list[dict], earlier: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(kept, dropped): on a re-review, a finding stands when it repeats an earlier finding
+    that is still there (not fixed) or lies on a line no earlier review of this PR read; one
+    on a line an earlier review read and did not name is dropped. Run 12, PR #111: the first
+    review named four lines, the second (after a rebase) a `return "cloudy"` that had been
+    in the diff the first one read, and the P0 went around once more."""
+    seen = {x for r in earlier for x in r.get("seen") or []}
+    named = [f for r in earlier for f in r.get("findings") or []]
+    kept, dropped = [], []
+    for f in findings:
+        repeat = any(norm_line(str(f.get("what") or "")) and (norm_line(str(f.get("what"))) in norm_line(str(g.get("what") or ""))
+                                                               or norm_line(str(g.get("what") or "")) in norm_line(str(f.get("what"))))
+                     for g in named if norm_line(str(g.get("what") or "")))
+        if f.get("kind") == "incomplete" or repeat or not on_seen_lines(f, seen):
+            kept.append(f)
+        else:
+            dropped.append(f)
+    return kept, dropped
+
+
+def previous_text(earlier: list[dict]) -> str:
+    """The last reject's findings, for the reviewer to check first."""
+    last = next((r for r in sorted(earlier, key=lambda r: float(r.get("t") or 0), reverse=True)
+                 if r.get("verdict") == "reject" and r.get("findings")), None)
+    if not last:
+        return "(none: this is the first review of this pull request, or the last one passed)"
+    return f"At head {str(last.get('sha', ''))[:12]}:\n" + "\n".join(
+        f"- {f.get('file', '?')}: {str(f.get('what', ''))[:300]} ({f.get('kind', '?')})" for f in last["findings"][:20])
+
+
 def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "",
-                 issue_text: str = "", answer: str = "", spec: list[str] | None = None) -> str:
+                 issue_text: str = "", answer: str = "", spec: list[str] | None = None, previous: str = "") -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
@@ -825,6 +877,7 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
         "ISSUE": issue_text.strip() or "(not readable)",
         "ANSWER": answer.strip() or "(none)",
         "SPEC": "\n".join(f"- {x}" for x in spec or []) or "(none found)",
+        "PREVIOUS": previous or "(none: this is the first review of this pull request, or the last one passed)",
         "PATHS": ", ".join(f"`{p}`" for p in PATHS) or "the repository",
         "RULES": rules.strip() or NO_RULES,
         "LONG": str(LONG_FN),
@@ -1094,7 +1147,7 @@ def review(pr: int, hand: bool = True) -> int:
         gone = left_out(shown, text) if cut else []
         prompt = build_prompt(
             issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone),
-            issue_text, answer, spec,
+            issue_text, answer, spec, previous_text(earlier),
         )
         size = len(prompt.encode())
         if size <= PROMPT_BYTES or prod_limit <= MAX_CHARS:
@@ -1103,6 +1156,7 @@ def review(pr: int, hand: bool = True) -> int:
         room = PROMPT_BYTES - (size - len(text.encode()))
         prod_limit = max(MAX_CHARS, int(len(text) * room / max(1, len(text.encode())) * 0.95))
     hints = {
+        "seen": seen_lines(files),
         "key": key,
         "flags": len(flags),
         "spec_names": len(spec),
@@ -1134,6 +1188,16 @@ def review(pr: int, hand: bool = True) -> int:
     s = round(time.time() - t0, 1)
     if JUDGE_USAGE:
         hints["usage"] = dict(JUDGE_USAGE)
+    if v["verdict"] == "reject" and earlier:
+        kept, dropped = new_findings(v["findings"], earlier)
+        if dropped:
+            hints["dropped"] = dropped
+            if not kept:
+                v = {"verdict": "pass", "findings": [],
+                     "reason": "its findings are on lines an earlier review of this PR read and did not name: "
+                               + "; ".join(str(f.get("what", ""))[:80] for f in dropped[:3])}
+            else:
+                v = dict(v, findings=kept)
     if v["verdict"] == "pass":
         return done(
             "pass", by=by, reason=v["reason"], findings=v["findings"], s=s, **hints

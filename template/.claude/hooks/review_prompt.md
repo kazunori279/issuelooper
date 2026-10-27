@@ -40,6 +40,10 @@ The author's answer to the last rejection of this pull request (weigh it: when i
 
 <<ANSWER>>
 
+The last review's findings on this pull request (check each first: say in your reason which are fixed; one still there is a finding again; name new findings only on lines added or changed since):
+
+<<PREVIOUS>>
+
 Legitimate, do not reject: tests and test fixtures that use fixture data; an honest empty state or error message when a source fails; constants the project's specification defines; generic UI labels as fallbacks ("Untitled", "Item"); defaults for technical parameters that the user does not see as facts (timeouts, retry delays, sample rates, page sizes); prompt text that tells a model not to invent data; a second real source as fallback; anything the project rules above name as legitimate. Do not reject for style, bugs, missing tests or incomplete features: other checks cover those.
 
 These exceptions are narrow. They never cover:
@@ -59,7 +63,7 @@ How to review (do this before deciding; do not stop at the first impression of t
    - the same value written under several keys or names, and whether the diff shows a second name exists only for tests (a finding) or for storage, migration or caching (not a finding);
    - anything the project rules ask you to look for.
 2. For each note, ask: is this value shown to the user as a real fact, or does it make a known test or sample input behave specially? Is it used when the real source, input or setting is missing or different? Does it break a project rule? If yes to any, it is a finding.
-3. Reject if there is at least one finding; otherwise pass.
+3. Reject if there is at least one finding; otherwise pass. Name every finding in this one reply: go to the end of the diff before you answer. A finding a later review names on a line this review read costs the author a whole round, and a later review does not count it.
 4. If the diff below says it was cut and the cut part of a production file could hold a finding, reject with kind `incomplete` and say which file to split; do not pass code you have not seen.
 
 Examples (generic):

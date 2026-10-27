@@ -239,6 +239,26 @@ try:
     check("REVIEW_SPEC_PATHS empty: no lookup", rg.spec_names(named, spec_root), [])
     rg.SPEC_PATHS = keep_spec
 
+    # --- a re-review names new findings only on new lines (run 12, PR #111) ----------
+    first = rg.split_files(diff_for([("src/concierge/weather.py", [
+        "while len(daily) < 5 and daily:", "    daily.append(daily[-1])",
+        "def wmo_to_condition(code):", "    return CODES.get(code) or \"cloudy\""])]))
+    earlier = [{"t": 1, "sha": "e48dd89", "verdict": "reject", "seen": rg.seen_lines(first),
+                "findings": [{"file": "src/concierge/weather.py", "what": "daily.append(daily[-1])", "kind": "fabricated"}]}]
+    found = [{"file": "src/concierge/weather.py", "what": 'return CODES.get(code) or "cloudy"', "kind": "fabricated"},
+             {"file": "src/concierge/weather.py", "what": "daily.append(daily[-1])", "kind": "fabricated"},
+             {"file": "src/concierge/weather.py", "what": "temp = reading or 0.0", "kind": "fabricated"}]
+    kept, dropped = rg.new_findings(found, earlier)
+    check("a re-review keeps an earlier finding still there and one on a new line, and drops one on a line the "
+          "first review read and did not name",
+          ([f["what"] for f in kept], [f["what"] for f in dropped]),
+          (["daily.append(daily[-1])", "temp = reading or 0.0"], ['return CODES.get(code) or "cloudy"']))
+    check("the first review keeps everything", rg.new_findings(found, [])[1], [])
+    p = rg.build_prompt(7, "t", [], [], [], "d", False, previous=rg.previous_text(earlier))
+    check("the prompt shows the last findings to check first, and asks for every finding in one reply",
+          ("At head e48dd89" in p, "daily.append(daily[-1])" in p, "Name every finding in this one reply" in p,
+           "<<PREVIOUS>>" in p), (True, True, True, False))
+
     # --- pre-scan -------------------------------------------------------------------
     files = rg.split_files(
         diff_for(
