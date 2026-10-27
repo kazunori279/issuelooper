@@ -445,6 +445,12 @@ class Config:
     # author sessions without a merge.
     author_resolve: bool = False
     author_resolve_max: int = 2
+    # When the train's acceptance guard fails because of a PR (main alone passes those
+    # guards), the author's conversation is resumed with the failing guards instead of a
+    # hand-back: it fixes its code, or updates a guard whose behavior its issue or the spec
+    # changes (`Guard change:` in the PR body). Hand-back after author_guard_max tries.
+    author_guard: bool = False
+    author_guard_max: int = 2
     auto_cap: int = 4
     ux_gap_s: float = 1500
     ux_idle_gap_s: float = 600
@@ -621,6 +627,8 @@ class Config:
             merger_max=env_int("POOL_MERGER_MAX", 3),
             author_resolve=env_flag("POOL_AUTHOR_RESOLVE"),
             author_resolve_max=env_int("POOL_AUTHOR_RESOLVE_MAX", 2),
+            author_guard=env_flag("POOL_AUTHOR_GUARD"),
+            author_guard_max=env_int("POOL_AUTHOR_GUARD_MAX", 2),
             auto_cap=env_int("POOL_CAP_AUTO", 4),
             ux_gap_s=ux_gap_s(),
             ux_idle_gap_s=gap_s("POOL_UX_IDLE_GAP", 10),
@@ -1032,6 +1040,10 @@ class Book:
         self.accept_settling: set[str] = set()
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
         self.author_runs: collections.Counter = collections.Counter()  # PR -> author resolve sessions, the same way
+        # PR -> {"head", "issue", "failing", "out", "base"}: a head the train's guard failed, waiting for its
+        # author (POOL_AUTHOR_GUARD); PR -> guard-fix sessions on it since its last merge.
+        self.guard_fix: dict[int, dict] = {}
+        self.guard_runs: collections.Counter = collections.Counter()
         # issue -> the conversation that last worked on it: {"conv", "cli", "t", "seq", "area", "slot",
         # "files" (what its branch changed)}; kept in owners.json across restarts (Pool.save_owners).
         self.convs: dict[int, dict] = {}
@@ -1292,6 +1304,23 @@ def plan(
             "needs_live": cfg.live and "needs:live" in labels,
             "branch": pr.get("branch") or "",
         }
+        gf = book.guard_fix.get(pr["number"])
+        if gf and gf["head"] != pr["head"]:
+            del book.guard_fix[pr["number"]]  # the author pushed: the merge path checks the new head
+            gf = None
+        if gf:
+            rec = book.convs.get(n) or {}
+            conv = conv_resumable(rec)
+            if book.guard_runs[pr["number"]] >= cfg.author_guard_max or not conv:
+                units.append(Unit("auto", "guardback", f"guardback:{pr['number']}@{pr['head'][:12]}", f"mrg:{pr['number']}",
+                                  pr["number"], (0, pr["number"]), {**info, **gf}))
+            elif not {conv, (rec.get("area"), rec.get("slot"))} & busy_convs(holding(book, cfg, now, units)):
+                units.append(Unit("worker", "guard-fix",
+                                  f"gfx:{pr['number']}@{pr['head'][:12]}#{book.guard_runs[pr['number']]}",
+                                  f"mrg:{pr['number']}", pr["number"], (0, pr["number"]),
+                                  {**info, **gf, "resume": conv, "cli": rec.get("cli"), "area": rec.get("area"),
+                                   "slot": rec.get("slot"), "timeout": cfg.timeouts.get("worker")}))
+            continue
         state = pr["mergeable"]
         if state == "UNKNOWN":
             first = book.unknown_since.setdefault(pr["number"], now)
@@ -1908,6 +1937,40 @@ The supervisor resumed it for one step: accept it on {where} at commit {sha[:12]
    what the page shows; no source reads, line counts or fixed sleeps.{look}
 Do not change code or open a pull request in this step. Stop the server, remove {tree}, and stop.
 {cl}
+Budget: hard wall-clock timeout of {timeout}."""
+
+
+def guard_fix_prompt(u: Unit, seq: int, timeout: str, guard_cmd: str) -> str:
+    """The author's conversation, resumed for the acceptance guards its PR fails in the train."""
+    pr, n = u.number, u.info["issue"]
+    branch = u.info.get("branch") or f"issue-{n}"
+    wt = scratch(f"wrk-{seq}-{n}-wt")
+    failing = "\n".join(f"    {t}" for t in u.info.get("failing") or [])
+    ids = " ".join(t for t in u.info.get("failing") or [] if "::" in t)
+    on_main = ", ".join(u.info.get("on_main") or [])
+    return f"""This conversation wrote pull request #{pr} for issue #{n}. The merge train merged it onto main
+{str(u.info.get("base", ""))[:8]} and these acceptance guards failed there; they pass on main alone:
+{failing}
+{"(These fail on main alone too and are not yours: " + on_main + ")" if on_main else ""}
+The end of the output:
+{chr(10).join("    " + ln for ln in str(u.info.get("out") or "").splitlines()[-40:])}
+
+Each guard is the regression test of an issue a tester verified. Decide which is right, then act, and stop:
+- Your change broke what the guard checks, and neither #{n} nor the spec changes that behavior: fix your code.
+- #{n}, or a spec requirement it cites, changes the behavior the guard asserts (it was written for the old
+  behavior): update that guard file in tests/accept/ to assert the new behavior, keeping every other assertion, and
+  add a line to the PR body: `Guard change: <path>: <why, quoting #{n} or the spec>`. The review gate checks the
+  change against the issue and the spec, and rejects one that drops or loosens a check they still require. Do not
+  delete a guard. Add a new file under tests/accept/ only when a guard must be replaced, named in that line too.
+A guard starts from a fresh state it makes itself (a fresh browser context, and a fresh server-side conversation
+or user when the app keeps them); one that relied on another test's leftovers or on an empty history is fixed by
+making its own fresh state, not by deleting its assertions.
+
+Steps: git -C "$SHARED_REPO_PATH" fetch -q origin main {branch}; git -C "$SHARED_REPO_PATH" worktree add -B {branch} {wt}
+origin/{branch}; set it up as {PROJECT} says; rebase onto origin/main; run the failing guards
+({guard_cmd or "the project's accept guard"} {ids}); fix; python3 .claude/hooks/sweep_locked.py --update-pr {pr}; run the
+guards again; git push --force-with-lease origin HEAD:{branch}. Stop with #{n} at stage:pr: do not merge or move a label.
+Last line: GUARD-FIXED, or GUARD-STUCK <why>.
 Budget: hard wall-clock timeout of {timeout}."""
 
 
@@ -2898,7 +2961,7 @@ class Session(threading.Thread):
             return (self.dir / REPORTS[u.kind]).exists()
         if u.kind == "accept":
             return (self.dir / "accept_report.md").exists()
-        if u.kind == "resolve":
+        if u.kind in ("resolve", "guard-fix"):
             r = subprocess.run([self.pool.cfg.gh, "pr", "view", str(u.number), "--json", "headRefOid,state"],
                                capture_output=True, text=True, timeout=60, cwd=repo_root())
             try:
@@ -2997,7 +3060,7 @@ class Session(threading.Thread):
         env = self.env()
         if u.role == "auto":
             return {"merge": self.auto_merge, "rebase": self.auto_rebase, "requeue": self.requeue,
-                    "handback": self.merger_handback}.get(u.kind, self.reclaim)(env)
+                    "handback": self.merger_handback, "guardback": self.guard_hand_back}.get(u.kind, self.reclaim)(env)
         claim_file = self.dir / "claim"
         # Only an implement unit claims: an author resumed to accept its issue
         # (stage:accept) or resolve its PR (stage:pr) works on an issue claim.py would
@@ -3056,6 +3119,10 @@ class Session(threading.Thread):
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
             prompt = author_accept_prompt(u, self.seq, self.port, self.timeout(), [a["name"] for a in cfg.areas])
+        elif u.role == "worker" and u.kind == "guard-fix":
+            env.update(RESOLVE_PR=str(u.number), RESOLVE_BRANCH=u.info.get("branch") or f"issue-{u.info['issue']}",
+                       GUARD_EDIT="1")
+            prompt = guard_fix_prompt(u, self.seq, self.timeout(), cfg.accept_guard)
         elif u.role == "worker" and u.kind == "resolve":
             env.update(RESOLVE_PR=str(u.number), RESOLVE_BRANCH=u.info.get("branch") or f"issue-{u.info['issue']}")
             prompt = author_resolve_prompt(u, self.seq, self.timeout(), self.main_commits(u.info.get("branch") or ""))
@@ -3750,6 +3817,23 @@ class Session(threading.Thread):
     def hand_back(self, pr: int, n: int, text: str):
         self.pool.hand_back(pr, n, self.unit.info.get("head") or "", text)
 
+    def guard_hand_back(self, env: dict) -> str:
+        """The author could not land a fix for the guards the train failed (or there is no
+        conversation to resume): back to a worker, with what failed."""
+        u = self.unit
+        pr, n = u.number, u.info["issue"]
+        self.hand_back(pr, n, (
+            "**Not merged: acceptance guards fail with this PR merged** (main alone passes them), and its author's "
+            f"conversation did not land a fix:\n\n" + "\n".join(f"- `{t}`" for t in u.info.get("failing") or [])
+            + "\n\nFix the code, or, if this issue or the spec changes the behavior a guard asserts, update that guard "
+            "(keep its other assertions) with a `Guard change: <path>: <why>` line in the PR body. The end of the "
+            "output:\n\n```\n" + str(u.info.get("out") or "")[-2000:].replace("```", "'" * 3) + "\n```"))
+        with self.pool.lock:
+            self.pool.book.guard_fix.pop(pr, None)
+        self.pool.log("handback", pr=pr, issue=n, by="merge train (guard)", reason=(u.info.get("failing") or ["?"])[0][:200])
+        self.pool.failed_try(n)
+        return "handed back (acceptance guards)"
+
     def merger_handback(self, env: dict) -> str:
         """A PR that conflicted again after POOL_MERGER_MAX merger sessions: back to a worker."""
         u = self.unit
@@ -4191,9 +4275,13 @@ class Pool:
             if u.kind == "resolve" and not outcome.startswith(NOT_A_FAILURE):
                 b.author_runs[u.number] += 1
                 self.hurry_pr, self.hurry_until = u.number, now + 60
+            if u.kind == "guard-fix" and not outcome.startswith(NOT_A_FAILURE):
+                b.guard_runs[u.number] += 1
+                self.hurry_pr, self.hurry_until = u.number, now + 60
             if (u.kind == "merge" and outcome == "ok") or (u.kind == "handback" and outcome.startswith("handed back")):
                 b.merger_runs.pop(u.number, None)
                 b.author_runs.pop(u.number, None)
+                b.guard_runs.pop(u.number, None)
             if u.kind == "handback" and outcome.startswith("handed back"):
                 b.reset_pr(u.number)
             if outcome.startswith("startup crash"):
@@ -4280,7 +4368,7 @@ class Pool:
         later steps resume it (POOL_AUTHOR_RESOLVE, and acceptance). Kept in owners.json."""
         u = w.unit
         conv = w.conversation() if (w.dir / "session.jsonl").exists() else None
-        n = u.info.get("issue") if u.kind == "resolve" else u.number
+        n = u.info.get("issue") if u.kind in ("resolve", "guard-fix") else u.number
         if not conv or n is None:
             return
         with self.lock:
@@ -4302,7 +4390,7 @@ class Pool:
                          tokens=slots[k]["tokens"], resumed=resumed)
         self.save_owners()
 
-    OWNED = ("convs", "author_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
+    OWNED = ("convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
              "area_wait_s")
 
     def save_owners(self) -> None:
@@ -5137,6 +5225,15 @@ class Pool:
                        "checked; tried again later")
             self.train_wait()
             return
+        # Which of the failing tests fail on main alone too: main's, not a PR's. When only
+        # some do, the rest are still a PR's, and the halving looks for those (before, one
+        # test red on main made the whole train main's and blamed nobody).
+        on_main = [t for t in failing if t in set(failing_tests(base_out))] if red else []
+        mine = [t for t in failing if t not in on_main]
+        if red and on_main and [t for t in mine if "::" in t]:
+            self.event(f"merge train of {self.train_label(cars)}: main {base[:8]} fails {', '.join(on_main[:2])} by "
+                       f"itself; looking for the PR that fails {', '.join(mine[:2])}")
+            failing, red = mine, False
         if red:
             self.event(f"merge train of {self.train_label(cars)}: main {base[:8]} fails the same tests by itself; "
                        "no PR is blamed, and until main is green only PRs built on it go")
@@ -5156,23 +5253,49 @@ class Pool:
                 self.train_wait()
                 return
             lo, hi = (lo, mid) if red else (mid, hi)
-        self.train_hand_back(cars[hi - 1], cars[:hi - 1], base, failing, out)
+        self.train_hand_back(cars[hi - 1], cars[:hi - 1], base, failing, out, on_main)
         if hi > 1:
             self.train_land(base, cars[:hi - 1], out, checked=False)
 
-    def train_hand_back(self, car: dict, ahead: list[dict], base: str, failing: list[str], out: str) -> None:
+    def train_hand_back(self, car: dict, ahead: list[dict], base: str, failing: list[str], out: str,
+                        on_main: list[str] | tuple = ()) -> None:
         pr, n, head = car["pr"], car["issue"], car["head"]
         with self.lock:
             self.book.train.pop(pr, None)
         after = f", after {self.train_label(ahead)}, which pass without it" if ahead else ""
+        guards = [t for t in failing if t.startswith("tests/accept/")]
+        report = (
+            f"The supervisor merged this head ({head[:8]}) onto main {base[:8]}{after} and ran the full check "
+            "suite on the result. These fail with this PR merged and pass on main alone:\n\n"
+            + ("\n".join(f"- `{t}`" + (" (an acceptance guard of a verified issue)" if t in guards else "")
+                         for t in failing[:20]) or "- (no test named; see the output)")
+            + ("\n\nThese fail on main alone too, so they are not yours: "
+               + ", ".join(f"`{t}`" for t in on_main[:10]) if on_main else "")
+            + "\n\nThe end of the output:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3) + "\n```\n")
+        rec = self.book.convs.get(n)
+        if (self.cfg.author_guard and guards and guards == [t for t in failing if "::" in t] and conv_resumable(rec)
+                and self.book.guard_runs[pr] < self.cfg.author_guard_max):
+            # Only guards fail: the PR may change behavior an older guard assumes (c60: #32's server-side
+            # history against test_accept_38's "reload starts empty"). Its author decides.
+            with self.lock:
+                self.book.guard_fix[pr] = {"head": head, "issue": n, "failing": failing[:20], "on_main": list(on_main)[:10],
+                                           "out": out.strip()[-3000:], "base": base}
+            self.gh("pr", "comment", str(pr), "--body", "<!-- merger -->\n**Not merged yet: acceptance guards fail with "
+                    "this PR merged.** " + report + "\nThe author's conversation is resumed to fix the code, or to update "
+                    "a guard whose behavior this issue or the spec changes; the supervisor merges the new head after "
+                    "its gates.")
+            self.log("guard_fix", pr=pr, issue=n, failing=failing[:5], on_main=list(on_main)[:5])
+            self.event(f"merge train: PR #{pr} (#{n}) fails acceptance guards merged with main "
+                       f"({', '.join(failing[:2])}); its author is resumed to fix them")
+            self.save_owners()
+            return
         self.hand_back(pr, n, head, (
-            f"**Not merged: the full check fails with this PR merged.** The supervisor merged this head "
-            f"({head[:8]}) onto main {base[:8]}{after}, ran the full check suite on the result, and these fail "
-            "there (main alone passes them):\n\n"
-            + ("\n".join(f"- `{t}`" for t in failing[:20]) or "- (no test named; see the output)")
-            + "\n\nThe end of the output:\n\n```\n" + out.strip()[-2500:].replace("```", "'" * 3) + "\n```\n\n"
+            "**Not merged: the full check fails with this PR merged.** " + report + "\n"
             "Your own sweep ran only the tests your change touches; run these too (or the full suite with "
-            "`sweep_locked.py --full`). Rebase onto origin/main in your worktree, fix it, sweep and push."))
+            "`sweep_locked.py --full`). Rebase onto origin/main in your worktree, fix it, sweep and push."
+            + ("\n\nIf this issue or the spec changes the behavior a failing guard asserts, update that guard to "
+               "the new behavior (keep its other assertions) and add a line `Guard change: <path>: <why, quoting "
+               "the issue or spec>` to the PR body." if guards else "")))
         self.log("handback", pr=pr, issue=n, by="merge train", reason=(failing or ["the full check is red"])[0][:200])
         self.failed_try(n)
         self.event(f"merge train: PR #{pr} (#{n}) fails the full check merged with main "
@@ -5219,6 +5342,7 @@ class Pool:
                         self.book.train.pop(c["pr"], None)
                         self.book.merger_runs.pop(c["pr"], None)
                         self.book.author_runs.pop(c["pr"], None)
+                        self.book.guard_runs.pop(c["pr"], None)
                     merged.append(c["pr"])
                     final = self.fetch_main(final)
                     self.after_merge(c["pr"], c["issue"], c["head"], c["needs_live"],

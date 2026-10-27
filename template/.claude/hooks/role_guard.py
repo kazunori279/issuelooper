@@ -275,6 +275,16 @@ def is_accept_chore(issues: list[str], repo: str) -> bool:
     return False
 
 
+# A PR whose issue or spec changes what an older acceptance guard asserts names each guard
+# file it changes or replaces: `Guard change: tests/accept/test_accept_38.py: <why>`. The
+# review gate checks the change against the issue and the spec.
+GUARD_CHANGE = re.compile(r"(?im)^[ \t>*-]*(?:\*\*)?Guard change(?:\*\*)?:[*`\s]*(tests/accept/[\w./-]+)")
+
+
+def guard_changes(body: str) -> set[str]:
+    return {m.group(1).rstrip("`.:,") for m in GUARD_CHANGE.finditer(body or "")}
+
+
 def refuse_accept_tests(added: list[str]) -> None:
     block(
         f"This pull request adds {', '.join(f'`{p}`' for p in added[:3])} under `{ACCEPT_TESTS}`.\n\n"
@@ -1867,6 +1877,7 @@ def check_pr_merge(command: str) -> None:
         added = [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
                  if isinstance(f, dict) and str(f.get("changeType") or "").upper() == "ADDED"
                  and str(f.get("path") or "").startswith(ACCEPT_TESTS)]
+        added = [a for a in added if a not in guard_changes(body)]  # a guard replaced for a behavior change
         if added and not is_accept_chore(pr_issues(data, body), repo):
             refuse_accept_tests(added)
 
@@ -2677,7 +2688,8 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
         )
 
     # New files under tests/accept/ come only from an acceptance chore.
-    added = [p for p in pr_create_paths(command, cwd, added_only=True) if p.startswith(ACCEPT_TESTS)]
+    added = [p for p in pr_create_paths(command, cwd, added_only=True)
+             if p.startswith(ACCEPT_TESTS) and p not in guard_changes(body)]
     if added and not is_accept_chore([n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body), ""):
         refuse_accept_tests(added)
 

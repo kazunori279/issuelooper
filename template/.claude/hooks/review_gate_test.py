@@ -259,6 +259,14 @@ try:
           ("At head e48dd89" in p, "daily.append(daily[-1])" in p, "Name every finding in this one reply" in p,
            "<<PREVIOUS>>" in p), (True, True, True, False))
 
+    # --- a guard change is judged against the issue and the spec (cohort 60, #32) ------
+    g = rg.guard_text(["tests/accept/test_accept_38.py"],
+                      "Fixes #32\n- **Guard change:** tests/accept/test_accept_38.py: history survives a reload (R-HIST-1)")
+    check("the prompt names the guard, quotes the Guard change line, and says when to reject",
+          ("`tests/accept/test_accept_38.py`" in g, "R-HIST-1" in g, "drops or loosens" in g), (True, True, True))
+    check("no guard: said so", "(this diff changes no acceptance guard)" in rg.build_prompt(7, "t", [], [], [], "d", False),
+          True)
+
     # --- pre-scan -------------------------------------------------------------------
     files = rg.split_files(
         diff_for(

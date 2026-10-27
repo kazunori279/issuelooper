@@ -867,8 +867,27 @@ def previous_text(earlier: list[dict]) -> str:
         f"- {f.get('file', '?')}: {str(f.get('what', ''))[:300]} ({f.get('kind', '?')})" for f in last["findings"][:20])
 
 
+ACCEPT_CHORE_MARK = "<!-- accept-chore -->"
+GUARD_CHANGE = re.compile(r"(?im)^[ \t>*-]*(?:\*\*)?Guard change(?:\*\*)?:.*$")
+
+
+def guard_text(guards: list[str], body: str) -> str:
+    """The prompt's account of the acceptance guards a diff changes ('' when none)."""
+    if not guards:
+        return ""
+    said = "\n".join("    " + m.group(0).strip() for m in GUARD_CHANGE.finditer(body)) or "    (no `Guard change:` line)"
+    return (
+        "This diff changes acceptance guards: " + ", ".join(f"`{g}`" for g in guards) + ". Each is the regression "
+        "test of an issue a tester verified. The pull request body says:\n" + said + "\n"
+        "Judge the guard files' `+` and `-` lines too. Pass such a change only when this issue, or a spec requirement "
+        "it cites, asks for the behavior the changed assertion now checks, and a `Guard change:` line says so. "
+        "Reject it (kind \"test\") when it deletes a guard, drops or loosens an assertion the issue and the spec "
+        "still require, or passes by relying on another test's state instead of making its own fresh state.")
+
+
 def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "",
-                 issue_text: str = "", answer: str = "", spec: list[str] | None = None, previous: str = "") -> str:
+                 issue_text: str = "", answer: str = "", spec: list[str] | None = None, previous: str = "",
+                 guards: str = "") -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
@@ -877,6 +896,7 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
         "ISSUE": issue_text.strip() or "(not readable)",
         "ANSWER": answer.strip() or "(none)",
         "SPEC": "\n".join(f"- {x}" for x in spec or []) or "(none found)",
+        "GUARDS": guards or "(this diff changes no acceptance guard)",
         "PREVIOUS": previous or "(none: this is the first review of this pull request, or the last one passed)",
         "PATHS": ", ".join(f"`{p}`" for p in PATHS) or "the repository",
         "RULES": rules.strip() or NO_RULES,
@@ -1085,7 +1105,11 @@ def review(pr: int, hand: bool = True) -> int:
             hand_back(repo, pr, issue, v)
         return rc
     prod = [p for p, _ in files if is_prod(p)]
-    if not prod:  # after structure_tests: a test-only PR (an acceptance chore's) still gets that
+    issue_text = issue_body(repo, issue)
+    # A change to an acceptance guard outside an acceptance chore (an author updating a guard its
+    # issue changes the behavior of) is reviewed against the issue and the spec, test-only or not.
+    guards = [] if ACCEPT_CHORE_MARK in issue_text else [p for p, _ in files if p.startswith("tests/accept/")]
+    if not prod and not guards:  # after structure_tests: a test-only PR (an acceptance chore's) still gets that
         return done(
             "skipped",
             reason="no production file changed",
@@ -1122,7 +1146,6 @@ def review(pr: int, hand: bool = True) -> int:
     rules, extra = load_rules()
     last_reject = max((float(r.get("t") or 0) for r in earlier if r.get("verdict") == "reject"), default=0.0)
     answer = author_answer(repo, pr, last_reject) if last_reject else ""
-    issue_text = issue_body(repo, issue)
     flags = prescan(files, fixture_tokens(config.repo_root()), extra)
     spec = spec_names(files, config.repo_root())
     longfn = long_functions(files, content_at)
@@ -1147,7 +1170,7 @@ def review(pr: int, hand: bool = True) -> int:
         gone = left_out(shown, text) if cut else []
         prompt = build_prompt(
             issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone),
-            issue_text, answer, spec, previous_text(earlier),
+            issue_text, answer, spec, previous_text(earlier), guard_text(guards, info.get("body") or ""),
         )
         size = len(prompt.encode())
         if size <= PROMPT_BYTES or prod_limit <= MAX_CHARS:

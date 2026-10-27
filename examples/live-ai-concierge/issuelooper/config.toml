@@ -185,6 +185,7 @@ merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
 author_resolve = true        # POOL_AUTHOR_RESOLVE: the author's conversation resolves its PR's conflicts; a merger only
                              # when it cannot (c58: 32 merger sessions, a median 14.5 min, in 4 h)
+author_guard = true          # POOL_AUTHOR_GUARD: c60's hub #32 was handed back twice for guards its own change made stale
 starve_hold_s = 1800         # POOL_STARVE_HOLD_S: run 11's starving PRs on main.py held 9 PRs 179 times in 34 min
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports

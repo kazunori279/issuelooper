@@ -120,6 +120,7 @@ KEYS = {
     ("pool", "hub_at"): "POOL_HUB_AT",
     ("pool", "hub_timeout"): "POOL_HUB_TIMEOUT",
     ("pool", "author_resolve_max"): "POOL_AUTHOR_RESOLVE_MAX",
+    ("pool", "author_guard"): "POOL_AUTHOR_GUARD",
     ("pool", "starve_overlap"): "POOL_STARVE_OVERLAP",
     ("pool", "starve_hold_s"): "POOL_STARVE_HOLD_S",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",

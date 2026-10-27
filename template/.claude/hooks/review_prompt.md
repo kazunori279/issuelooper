@@ -32,6 +32,10 @@ The issue (#<<N>>), as written:
 
 <<ISSUE>>
 
+Acceptance guards:
+
+<<GUARDS>>
+
 Names this diff adds that the spec names too (a test hook, an id, a key the spec requires is the product's, not code for tests: never a `test_specific` finding, whether or not other production code reads it):
 
 <<SPEC>>

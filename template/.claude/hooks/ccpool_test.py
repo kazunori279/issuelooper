@@ -2613,6 +2613,62 @@ def test_a_hub_goes_first_and_is_not_parked() -> None:
             os.environ["CCROLE_WORKER_CLI"] = old_cli
 
 
+def test_guards_the_train_blames_go_back_to_the_author() -> None:
+    """Cohort 60: the train handed #32's PR back twice for acceptance guards it broke by
+    design (test_accept_38 cleared localStorage, reloaded and expected an empty feed, which
+    server-side history changes), and the issue sat 3 h before anyone resumed it."""
+    old_cli = os.environ.get("CCROLE_WORKER_CLI")
+    os.environ["CCROLE_WORKER_CLI"] = "claude"
+    try:
+        gh = gh_log()
+        h = Rig(state([iss(32, ["stage:pr", "P1"])], prs=[pr(128, 32, head="c" * 40)]), gh=gh,
+                author_guard=True, timeouts={"worker": "60m", "merger": "45m", "tester": "60m"})
+        h.pool.book.convs[32] = {"conv": "s-32", "cli": "claude"}
+        car = {"pr": 128, "issue": 32, "head": "c" * 40}
+        h.pool.train_hand_back(car, [], "a" * 40, ["tests/accept/test_accept_38.py::test_accept_38[chromium]"],
+                               "FAILED tests/accept/test_accept_38.py::test_accept_38[chromium]", ["tests/e2e/test_x.py::t"])
+        log = pathlib.Path(gh + ".log").read_text()
+        check("only guards failed: no hand-back; a PR comment with what fails with the PR and what fails on main too",
+              ("issue edit" in log, "pr comment 128" in log, "fail on main alone too" in log,
+               "an acceptance guard of a verified issue" in log, 128 in h.pool.book.guard_fix), (False, True, True, True, True))
+        u = next(u for u in h.step() if u.number == 128)
+        check("the author's conversation is resumed for them, on the worker's time",
+              (u.role, u.kind, u.info["resume"], u.info["failing"][0][:30], u.info["timeout"]),
+              ("worker", "guard-fix", "s-32", "tests/accept/test_accept_38.py", "60m"))
+        prompt = ccpool.guard_fix_prompt(u, 7, "60m", "uv run pytest -q tests/accept")
+        check("its prompt: fix the code, or update the guard with a Guard change line; never delete one; fresh state",
+              ("`Guard change: <path>:" in prompt, "Do not\n  delete a guard" in prompt, "fresh state" in prompt,
+               "uv run pytest -q tests/accept tests/accept/test_accept_38.py" in prompt), (True, True, True, True))
+        h.finish(u.key, "ok")
+        h.pool.book.guard_runs[128] = 2
+        check("after POOL_AUTHOR_GUARD_MAX tries on the same head: handed back to a worker",
+              [x.kind for x in h.step() if x.number == 128], ["guardback"])
+        h.st = state([iss(32, ["stage:pr", "P1"])], prs=[pr(128, 32, head="d" * 40)])
+        h.finish(h.running()[0], "handed back (acceptance guards)")
+        check("a new head goes the merge way again", ([x.kind for x in h.step() if x.number == 128],
+                                                      128 in h.pool.book.guard_fix), (["merge"], False))
+        plain = Rig(state([iss(5, ["stage:pr"])], prs=[pr(50, 5)]), gh=gh_log(), author_guard=True)
+        plain.pool.hand_back = lambda *a: plain.pool.events.append("handed back")
+        plain.pool.train_hand_back({"pr": 50, "issue": 5, "head": "b" * 40}, [], "a" * 40,
+                                   ["tests/e2e/test_a.py::t"], "FAILED tests/e2e/test_a.py::t")
+        check("a failure that is not only guards is handed back as before", plain.pool.events[-2:-1], ["handed back"])
+    finally:
+        if old_cli is None:
+            os.environ.pop("CCROLE_WORKER_CLI", None)
+        else:
+            os.environ["CCROLE_WORKER_CLI"] = old_cli
+    h = Rig(state())
+    calls = {}
+    cars = [{"pr": 7, "issue": 1, "head": "e" * 40, "commit": "f" * 40}]
+    h.pool.train_red_at = lambda wt, commit, failing: (
+        (True, "FAILED tests/e2e/test_main.py::a") if commit == "a" * 40 else (True, ""))
+    h.pool.train_hand_back = lambda car, ahead, base, failing, out, on_main=(): calls.update(failing=failing, on_main=on_main)
+    h.pool.train_bisect("/nowhere", "a" * 40, cars,
+                        "FAILED tests/e2e/test_main.py::a\nFAILED tests/accept/test_accept_12.py::t")
+    check("a train whose failures fail on main only in part blames the PR for the rest, and says which are main's",
+          calls, {"failing": ["tests/accept/test_accept_12.py::t"], "on_main": ["tests/e2e/test_main.py::a"]})
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""

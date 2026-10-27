@@ -2384,6 +2384,11 @@ def test_only_an_acceptance_chore_adds_tests_under_tests_accept() -> None:
           merge(added, bodies={"90": "<!-- merger -->\n<!-- accept-chore -->\nThe tester verified #5"})[0], "allow")
     check("changing an existing guard test is not adding one",
           merge([{"path": "tests/accept/fixture_5.json", "changeType": "MODIFIED"}])[0], "allow")
+    # Cohort 60: #32's server-side history changed what test_accept_38 assumed; its author replaces it.
+    replaced = body + "- **Guard change:** tests/accept/fixture_90.json: #90 keeps history across a reload (R-HIST-1)\n"
+    env, _ = with_fake_gh(prs={"95": {"headRefOid": head, "body": replaced, "files": added}}, linked={"95": ["90"]})
+    check("a guard file the PR body names in a `Guard change:` line may be added",
+          run("gh pr merge 95 --squash", role="merger", extra_env=env)[0], "allow")
 
 
 def test_devcheck_survives_a_rebase_that_only_moves_the_branch() -> None:
