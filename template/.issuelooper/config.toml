@@ -174,6 +174,8 @@ lend_at = 4                  # POOL_AREA_LEND_AT: with every conversation of the
 hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file, from its
                              # start until its PR is open
 hot_hold_max_s = 1800        # POOL_AREA_HOT_HOLD_MAX_S: and for this long at most
+auto_hot_at = 4              # POOL_AREA_AUTO_HOT_AT: a file of an area that conflicts in this many PRs (within
+                             # POOL_SPLIT_WINDOW_S) becomes its hot file for the rest of the run (0 = off)
 lend_free = true             # POOL_AREA_LEND_FREE: with pool slots free, an issue waiting only for a busy area conversation
                              # goes to an ordinary worker
 # shared = []                # POOL_AREA_SHARED: files many areas touch (a strings table, the stylesheet); routing

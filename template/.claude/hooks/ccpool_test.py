@@ -2742,6 +2742,29 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
           sorted((u.number, u.info.get("lent")) for u in lend.step()), [(51, None), (52, "cards")])
 
 
+def test_a_file_that_keeps_conflicting_becomes_hot() -> None:
+    """Cohort 60: settings.js conflicted 25 times (14 train skips); the settings area had no hot list."""
+    import copy
+    areas = copy.deepcopy(CONCIERGE_AREAS)
+    h = Rig(state(), areas=areas, area_auto_hot_at=4, split_after=99, gh=gh_log())
+    f = "src/concierge/static/js/settings.js"
+    for pr_n in (101, 102, 103):
+        h.pool.record_conflicts(pr_n, {f})
+    check("three PRs: not yet", config_is_hot(h, f), False)
+    h.pool.record_conflicts(104, {f})
+    check("the fourth: a hot file of its area, the monitor told", (config_is_hot(h, f),
+          any("now a hot file of the settings area" in e for e in h.pool.events)), (True, True))
+    again = ccpool.Pool(ccpool.Config(**{**h.pool.cfg.__dict__, "areas": copy.deepcopy(CONCIERGE_AREAS)}),
+                        fetcher=state, spawn=False)
+    check("a restarted supervisor keeps it hot", ccpool.config.is_hot(f, again.cfg.areas), True)
+    check("a test file never becomes hot", (h.pool.record_conflicts(105, {"tests/e2e/test_a.py"}),
+                                            ccpool.config.is_hot("tests/e2e/test_a.py", h.pool.cfg.areas)), (None, False))
+
+
+def config_is_hot(h, f):
+    return ccpool.config.is_hot(f, h.pool.cfg.areas)
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""

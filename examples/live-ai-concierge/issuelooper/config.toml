@@ -144,6 +144,7 @@ refresh_after = 6            # POOL_AREA_REFRESH
 conversations = 3            # POOL_AREA_CONVERSATIONS
 second_at = 3                # POOL_AREA_SECOND_AT
 lend_at = 4                  # POOL_AREA_LEND_AT: run 12 queued 9 settings issues behind one conversation
+auto_hot_at = 4              # POOL_AREA_AUTO_HOT_AT: a file conflicting in 4 PRs becomes hot for its area
 hot_lock = true              # POOL_AREA_HOT_LOCK
 shared = ["src/concierge/static/js/i18n.js", "src/concierge/static/js/feed.js", "src/concierge/static/style.css",
           "src/concierge/static/index.html", "src/concierge/static/js/app.js"]
@@ -151,14 +152,15 @@ shared = ["src/concierge/static/js/i18n.js", "src/concierge/static/js/feed.js", 
                              # "Route card" to settings on one hit in i18n.js). Each area's `words` (whole words in the
                              # title) and `ids` (requirement prefixes) weigh most
 [areas.live]
-paths = ["src/concierge/main.py", "src/concierge/sessions.py", "src/concierge/memory.py",
+paths = ["src/concierge/main.py", "src/concierge/live*.py", "src/concierge/sessions.py", "src/concierge/memory.py",
          "src/concierge/static/js/audio.js", "src/concierge/static/js/*live*"]
-hot = ["src/concierge/main.py"]
+hot = ["src/concierge/main.py", "src/concierge/live.py"]   # c60 conflicts: live.py 15, main.py 10
 words = ["live mode", "live session", "voice", "microphone", "mic", "barge-in", "interrupt", "speaking"]
 ids = ["R-RUN", "R-CONV", "R-NF"]
 [areas.settings]
-paths = ["src/concierge/static/js/settings.js", "src/concierge/static/js/i18n.js", "src/concierge/static/js/volume.js",
+paths = ["src/concierge/static/js/settings*.js", "src/concierge/static/js/i18n.js", "src/concierge/static/js/volume.js",
          "src/concierge/static/css/settings*"]
+hot = ["src/concierge/static/js/settings.js"]   # c60: 25 conflicts, the most of any file
 words = ["setting", "settings", "language", "japanese", "profile", "profiles", "memory", "remember", "location"]
 ids = ["R-SET", "R-LANG", "R-PROF", "R-MEM"]
 [areas.cards]
@@ -169,6 +171,7 @@ ids = ["R-WEB", "R-MAP", "R-WX", "R-ROUTE", "R-PLACE", "R-IMG", "R-YT"]
 paths = ["src/concierge/static/index.html", "src/concierge/static/style.css", "src/concierge/static/js/app.js",
          "src/concierge/static/js/feed.js", "src/concierge/static/js/composer.js"]
 hot = ["src/concierge/static/js/app.js", "src/concierge/static/index.html", "src/concierge/static/style.css"]
+                             # c60 conflicts: app.js 17; feed.js (4) is in `shared`
 words = ["layout", "top bar", "feed", "scroll", "history", "starter", "narrow", "two-column"]
 ids = ["R-LAYOUT", "R-HIST"]
 [areas.tools]

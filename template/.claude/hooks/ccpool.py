@@ -486,6 +486,10 @@ class Config:
     # (not past it) and for area_hot_hold_max_s at most. Cohort 60: hot-file waits had a median
     # of 34 min and a p90 of 5 h, and some hot file was locked 11.7 of the 12 h.
     area_hot_hold_max_s: float = 1800
+    # A file of an area that conflicts in this many pull requests within POOL_SPLIT_WINDOW_S
+    # becomes one of its hot files for the rest of the run (0 = off). Cohort 60: settings.js,
+    # in no hot list, conflicted 25 times (14 of them train skips).
+    area_auto_hot_at: int = 4
     # A new dependency edge on a blocker not yet at stage:pr, while this many claimable issues are
     # blocked already, is pointed out to the monitor (0 = never). Cohort 60: the monitor added
     # 236 edges and blocked up to 40 issues (337 issue-hours) while 6-9 of 50 workers ran.
@@ -667,6 +671,7 @@ class Config:
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
+            area_auto_hot_at=env_int("POOL_AREA_AUTO_HOT_AT", 4),
             edge_flag_at=env_int("POOL_EDGE_FLAG_AT", 8),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
@@ -1128,6 +1133,7 @@ class Book:
         self.split_filed: set[str] = set()  # files a split issue was filed for
         self.split_times: list[float] = []  # when each split issue was filed
         self.large: dict[str, int] = {}  # source file on main -> lines, when over the limit
+        self.auto_hot: dict[str, str] = {}  # file -> its area: hot from the run's own conflicts
 
     def role_counts(self) -> collections.Counter:
         return collections.Counter(u.role for u in self.running.values())
@@ -4083,6 +4089,8 @@ class Pool:
         self.load_deploys()
         self.load_ux_scores()
         self.load_owners()
+        for f, area in list(self.book.auto_hot.items()):
+            self.make_hot(f, area)  # hot files the run found before a restart
 
     # --- bookkeeping ---
     def log(self, kind: str, **kv):
@@ -4105,7 +4113,35 @@ class Pool:
             if hard:
                 self.book.hard_conflicts.setdefault(pr, []).append((now, frozenset(files)))
                 self.check_starving(pr, now)
+        self.auto_hot_files(now)
         self.split_hot_files(now)
+
+    def auto_hot_files(self, now: float) -> None:
+        """Make a file that keeps conflicting a hot file of its area ([areas] auto_hot_at)."""
+        cfg = self.cfg
+        if not cfg.areas or not cfg.area_auto_hot_at:
+            return
+        prs: dict[str, set] = collections.defaultdict(set)
+        with self.lock:
+            for t, f, pr in self.book.conflicts:
+                if now - t <= cfg.split_window_s and not is_test(f):
+                    prs[f].add(pr)
+        for f, ps in sorted(prs.items()):
+            area = config.area_of(f, cfg.areas)
+            if len(ps) < cfg.area_auto_hot_at or not area or config.is_hot(f, cfg.areas):
+                continue
+            self.make_hot(f, area)
+            self.log("auto_hot", file=f, area=area, prs=sorted(ps))
+            self.event(f"{f} conflicted in {len(ps)} pull requests ({', '.join(f'#{x}' for x in sorted(ps)[:6])}): it is now "
+                       f"a hot file of the {area} area, one session at a time")
+            self.save_owners()
+
+    def make_hot(self, f: str, area: str) -> None:
+        with self.lock:
+            self.book.auto_hot[f] = area
+            for a in self.cfg.areas:
+                if a["name"] == area and f not in a["hot"]:
+                    a["hot"] = list(a["hot"]) + [f]
 
     def check_starving(self, pr: int, now: float) -> None:
         """A P0/P1 PR whose rebase was left to a merger POOL_STARVE_AFTER times on the same
@@ -4476,7 +4512,7 @@ class Pool:
                          tokens=slots[k]["tokens"], resumed=resumed)
         self.save_owners()
 
-    OWNED = ("chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
+    OWNED = ("auto_hot", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
              "area_wait_s")
 
     def save_owners(self) -> None:
@@ -5200,6 +5236,8 @@ class Pool:
                     out = (m.stderr or m.stdout).strip()
                     self.log("train_skip", pr=e["pr"], conflicts=conflicts[:20],
                              why=out.splitlines()[-1][:300] if out else "")
+                    if conflicts:
+                        self.record_conflicts(e["pr"], conflicts)  # c60: settings.js's 14 train skips went uncounted
                     continue
                 cars.append({**e, "commit": self.git("rev-parse", "HEAD", wt=wt).stdout.strip(),
                              "tree": self.git("rev-parse", "HEAD^{tree}", wt=wt).stdout.strip()})

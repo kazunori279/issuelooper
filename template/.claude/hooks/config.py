@@ -102,6 +102,7 @@ KEYS = {
     ("areas", "lend_at"): "POOL_AREA_LEND_AT",
     ("areas", "lend_free"): "POOL_AREA_LEND_FREE",
     ("areas", "hot_hold_max_s"): "POOL_AREA_HOT_HOLD_MAX_S",
+    ("areas", "auto_hot_at"): "POOL_AREA_AUTO_HOT_AT",
     ("pool", "edge_flag_at"): "POOL_EDGE_FLAG_AT",
     ("areas", "shared"): "POOL_AREA_SHARED",
     ("review", "enabled"): "REVIEW_GATE",
