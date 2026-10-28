@@ -55,7 +55,7 @@ junit = false                # SWEEP_JUNIT: a pytest suite: each pytest run in a
 fast_command = ""            # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit
                              # tests pass) run before a merge on a pull request that is behind main, merged with
                              # main, when the merge train is off; a failure hands it back. Runs in a fresh worktree, so it sets up what it needs.
-                             # It runs under the merge lock, for POOL_FAST_CHECK_S (120) at most; a timeout holds
+                             # It runs right before the merge, for POOL_FAST_CHECK_S (120) at most; a timeout holds
                              # the PR, and a second one on the same head hands it back. Empty = no such check
 main_check = true            # POOL_MAIN_CHECK: after main moves, run the whole suite on the newest main in the
                              # background (not on a main the merge train checked); a red main files a `main is red`

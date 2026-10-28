@@ -3110,7 +3110,8 @@ def auto_session(guard_out: str, review_rc: int = 0, guard_rc: int = 0, guard_cm
     w.dir.mkdir(parents=True)
     outcome = w.work()
     log = (d / "gh.log").read_text().splitlines() if (d / "gh.log").exists() else []
-    return outcome, [x for x in log if not x.startswith("pr view")], pool  # needs_sweep's read
+    # needs_sweep's read, and merge_state's
+    return outcome, [x for x in log if not x.startswith(("pr view", "repo view", "api graphql"))], pool
 
 
 def test_auto_merge_paths() -> None:
@@ -3188,6 +3189,130 @@ def test_the_merge_lock_is_timed() -> None:
     check("state.json carries the summary", json.loads((h.pool.cfg.logdir / "state.json").read_text())["merge_lock"],
           {"n": 0, "wait_s_total": 0.0, "hold_s_total": 0.0, "wait_s": {"p50": 0.0, "p95": 0.0, "max": 0.0},
            "hold_s": {"p50": 0.0, "p95": 0.0, "max": 0.0}})
+
+
+def race_session(mutate: str = "", every: bool = False, issue_labels=("stage:pr",)):
+    """Session.auto_merge with a fake GitHub whose merge state (head, main, labels) a fake
+    guard changes while it runs (the shell in mutate, on its first run or on every one). The
+    guard takes half a second and always allows. Returns (outcome, guard runs, gh log, pool)."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-race-"))
+    st = {"data": {"repository": {
+        "pullRequest": {"headRefOid": "c" * 40, "body": "b", "labels": {"nodes": []}},
+        "issue": {"labels": {"nodes": [{"name": x} for x in issue_labels]}},
+        "ref": {"target": {"oid": "0" * 40}}}}}
+    (d / "state.json").write_text(json.dumps(st))
+    gh = d / "gh"
+    gh.write_text(f'#!/bin/sh\necho "$*" >> {d}/gh.log\n'
+                  f'if [ "$1 $2" = "repo view" ]; then echo o/r; fi\n'
+                  f'if [ "$1 $2" = "api graphql" ]; then cat {d}/state.json; fi\n')
+    review = d / "review"
+    review.write_text("#!/bin/sh\nexit 0\n")
+    guard = d / "guard"
+    guard.write_text(f"#!/bin/sh\ncat > /dev/null\necho run >> {d}/guard.n\nsleep 0.5\n"
+                     + (f"{mutate}\n" if every else f"[ $(wc -l < {d}/guard.n) = 1 ] && {{ {mutate}; }}\n" if mutate else "")
+                     + f"printf '%s' '{ALLOW}'\n")
+    for f in (gh, review, guard):
+        f.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), review_cmd=str(review), guard_cmd=str(guard)),
+                       fetcher=state, spawn=False)
+    u = ccpool.Unit("auto", "merge", "merge:9@x", "mrg:9", 9, (0, 9),
+                    {"issue": 2, "head": "c" * 40, "mergeable": "MERGEABLE", "needs_live": False})
+    w = ccpool.Session(pool, u, 1)
+    w.dir.mkdir(parents=True)
+    outcome = w.work()
+    runs = len((d / "guard.n").read_text().splitlines()) if (d / "guard.n").exists() else 0
+    log = (d / "gh.log").read_text().splitlines()
+    return outcome, runs, log, pool
+
+
+def test_the_merge_gates_run_outside_the_merge_lock() -> None:
+    """Issue #23: the guard (up to 300 s) ran under the merge lock, and every other merge
+    waited. It runs before the lock now; under it, what can change is read again, and the
+    verdict lands only when none of it did."""
+    def lock_lines(pool):
+        return [json.loads(x) for x in (pool.cfg.logdir / "pool.jsonl").read_text().splitlines() if '"merge_lock"' in x]
+
+    def stale_lines(pool):
+        return [json.loads(x)["changed"] for x in (pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+                if '"merge_stale"' in x]
+    outcome, runs, log, pool = race_session()
+    check("nothing changed: the guard ran once, before the lock, and the merge held the lock only briefly",
+          (outcome, runs, sum(x.startswith("pr merge 9") for x in log), lock_lines(pool)[0]["hold_s"] < 0.4),
+          ("ok", 1, 1, True))
+    sub = "python3 -c \"import json,sys; p=sys.argv[1]; s=json.load(open(p)); {}; json.dump(s, open(p,'w'))\" {}"
+    d = "$(dirname $0)/state.json"
+    repo = "s['data']['repository']"
+    outcome, runs, log, pool = race_session(sub.format(f"{repo}['ref']['target']['oid']='2'*40", d))
+    check("main moved while the gates ran: checked again, then merged",
+          (outcome, runs, stale_lines(pool), sum(x.startswith("pr merge 9") for x in log)), ("ok", 2, [["main"]], 1))
+    outcome, runs, log, pool = race_session(sub.format(f"{repo}['pullRequest']['headRefOid']='d'*40", d))
+    check("the head changed: not merged, left for the next poll (whose unit has the new head)",
+          (outcome, runs, any(x.startswith("pr merge") for x in log)),
+          ("held (the head moved to dddddddd; the next poll sees it)", 1, False))
+    outcome, runs, log, pool = race_session(
+        sub.format(f"{repo}['issue']['labels']['nodes'].append({{'name': 'hold:monitor'}})", d))
+    check("a hold set while the gates ran: not merged",
+          (outcome, runs, any(x.startswith("pr merge") for x in log), any("hold:monitor" in e for e in pool.events)),
+          ("held (#2 is at hold:monitor)", 1, False, True))
+    outcome, runs, log, pool = race_session(
+        sub.format(f"{repo}['pullRequest']['body']+='x'", d))
+    check("the PR body changed (Gate 2 and 7 read it): checked again",
+          (outcome, runs, stale_lines(pool)), ("ok", 2, [["body"]]))
+    outcome, runs, log, pool = race_session(
+        sub.format(f"{repo}['ref']['target']['oid']=sys.argv[2]*40", f"{d} $(wc -l < $(dirname $0)/guard.n)"),
+        every=True)
+    check("main moving on every check: twice checked again, then the gates run under the lock, as before",
+          (outcome, runs, len(stale_lines(pool)), lock_lines(pool)[-1]["hold_s"] >= 0.5,
+           sum(x.startswith("pr merge 9") for x in log)), ("ok", 3, 2, True, 1))
+    outcome, runs, log, pool = race_session(issue_labels=("stage:pr", "on hold"))
+    check("a hold already there: no gates run", (outcome, runs), ("held (#2 is at on hold)", 0))
+
+
+def test_two_prs_check_their_gates_side_by_side() -> None:
+    """Issue #23: while one PR's gates ran (under the lock), another PR's waited. Two merges
+    at once, before (merge_state unreadable: the gates run under the lock, as before) and
+    after: the guards overlap, and the second merge's wait for the lock is gone."""
+    def two(readable: bool):
+        d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-two-"))
+        (d / "state.json").write_text(json.dumps({"data": {"repository": {
+            "pullRequest": {"headRefOid": "c" * 40, "body": "b", "labels": {"nodes": []}},
+            "issue": {"labels": {"nodes": []}}, "ref": {"target": {"oid": "0" * 40}}}}}))
+        gh = d / "gh"
+        gh.write_text("#!/bin/sh\n" + (f'if [ "$1 $2" = "repo view" ]; then echo o/r; fi\n'
+                                       f'if [ "$1 $2" = "api graphql" ]; then cat {d}/state.json; fi\n'
+                                       if readable else ""))
+        review = d / "review"
+        review.write_text("#!/bin/sh\nexit 0\n")
+        guard = d / "guard"
+        guard.write_text(f"#!/bin/sh\ncat > /dev/null\necho \"start $(date +%s.%N)\" >> {d}/spans\nsleep 0.6\n"
+                         f"echo \"end $(date +%s.%N)\" >> {d}/spans\nprintf '%s' '{ALLOW}'\n")
+        for f in (gh, review, guard):
+            f.chmod(0o755)
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), review_cmd=str(review),
+                                         guard_cmd=str(guard)), fetcher=state, spawn=False)
+        outcomes = {}
+
+        def go(pr, n, seq):
+            u = ccpool.Unit("auto", "merge", f"merge:{pr}@x", f"mrg:{pr}", pr, (0, pr),
+                            {"issue": n, "head": "c" * 40, "mergeable": "MERGEABLE", "needs_live": False})
+            w = ccpool.Session(pool, u, seq)
+            w.dir.mkdir(parents=True)
+            outcomes[pr] = w.work()
+        threads = [threading.Thread(target=go, args=(pr, n, k)) for k, (pr, n) in enumerate(((9, 2), (10, 3)), 1)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        spans = [ln.split() for ln in (d / "spans").read_text().splitlines()]
+        starts = sorted(float(t) for k, t in spans if k == "start")
+        ends = sorted(float(t) for k, t in spans if k == "end")
+        return outcomes, starts[1] < ends[0], pool.merge_lock_stats()["wait_s"]["max"]
+    outcomes, overlap, wait = two(False)
+    check("before: the second PR's gates waited for the first's, under the lock",
+          (outcomes, overlap, wait >= 0.5), ({9: "ok", 10: "ok"}, False, True))
+    outcomes, overlap, wait = two(True)
+    check("after: both PRs' gates run at once, and neither waits long for the lock",
+          (outcomes, overlap, wait < 0.3), ({9: "ok", 10: "ok"}, True, True))
 
 
 def test_auto_merge_when_the_review_waits_for_the_owner() -> None:
@@ -3737,9 +3862,11 @@ def test_ux_runs_never_run_out() -> None:
 
 
 def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, record: bool = False,
-                    main_check: dict | None = None, sweeps: list | None = None, devchecks: list | None = None):
+                    main_check: dict | None = None, sweeps: list | None = None, devchecks: list | None = None,
+                    merge_state: bool = False):
     """auto_merge with a fake resweep that notes whether the merge lock was held, a gh
-    whose `pr view` prints `body` (None: gh pr view fails), and a guard script."""
+    whose `pr view` prints `body` (None: gh pr view fails), and a guard script. With
+    merge_state, gh also answers merge_state's read (so the gates run before the lock)."""
     calls = []
     real = ccpool.Session.resweep
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-resweep-"))
@@ -3769,6 +3896,12 @@ def resweep_session(body: str | None, guard_script: str, sweep_ok: bool = True, 
         gh = d / "gh"
         view = (f'if [ "$1 $2" = "pr view" ]; then cat {d}/body; exit 0; fi\n' if body is not None
                 else 'if [ "$1 $2" = "pr view" ]; then exit 1; fi\n')
+        if merge_state:
+            (d / "state.json").write_text(json.dumps({"data": {"repository": {
+                "pullRequest": {"headRefOid": "c" * 40, "body": "b", "labels": {"nodes": []}},
+                "issue": {"labels": {"nodes": []}}, "ref": {"target": {"oid": "0" * 40}}}}}))
+            view += (f'if [ "$1 $2" = "repo view" ]; then echo o/r; fi\n'
+                     f'if [ "$1 $2" = "api graphql" ]; then cat {d}/state.json; fi\n')
         gh.write_text(f'#!/bin/sh\necho "$*" >> {d}/gh.log\n{view}')
         gh.chmod(0o755)
         (d / "body").write_text(body or "")
@@ -4232,6 +4365,24 @@ def test_gate7_after_a_rebase_replays_the_live_check() -> None:
         ccpool.Unit("merger", "land", "k", "f", 9, (0,), {"issue": 2, "head": "c" * 40, "mergeable": "X"}), "45m")
     check("the merger reruns it without judging whether the behavior changed",
           "naming another sha than your" in " ".join(m.split()), True)
+
+
+def test_gates_before_the_lock_still_sweep_and_replay_first() -> None:
+    """With the gates run before the merge lock (issue #23), a refusal that wants a sweep or
+    a live-check replay still gets it, outside the lock, and the gates are asked again."""
+    fresh = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "c" * 12 + "\n"
+    outcome, calls, log, _ = resweep_session(fresh, GATE7_ONCE, record=True, merge_state=True)
+    check("Gate 7 wants a replay: replayed outside the lock, then merged",
+          (outcome, calls, log.count("pr merge 9")), ("ok", [("devcheck", "aeb98a0d9c57", False)], 1))
+    outcome, calls, log, _ = resweep_session(None, SWEEP_REFUSED_ONCE, merge_state=True)
+    check("the gates want a sweep: swept outside the lock, then merged",
+          (outcome, calls, log.count("pr merge 9")), ("ok", [(9, "issue-2", "c" * 40, False)], 1))
+    always = ("echo '{\"decision\": \"block\", \"reason\": \"Gate 7 (live check): the live check ran at "
+              "`aeb98a0d9c57`, and the head `8857c8d4597a` changes something else.\"}'\n")
+    outcome, calls, log, _ = resweep_session(fresh, always, record=True, merge_state=True)
+    check("still refused after the replay: handed back, replayed once",
+          (outcome, sum(1 for c in calls if c[0] == "devcheck"), "pr merge" in log),
+          ("refused by the merge gates (handed back)", 1, False))
 
 
 def test_auto_merge_resweeps_outside_the_merge_lock() -> None:

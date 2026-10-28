@@ -31,10 +31,16 @@ UNITS
           would refuse for its sweep is swept here first, outside the merge lock; a
           gate 7 refusal after a rebase replays the live check outside the lock; a PR
           held after a red re-sweep is not swept again for the same head and main, and
-          one failing only where an earlier red main failed is rebased, not handed back). With POOL_FAST_CHECK_CMD set, a
+          one failing only where an earlier red main failed is rebased, not handed back).
+          The gates run before the merge lock is taken; under it, the PR head and body,
+          its issue's labels (a hold stops the merge), main on GitHub, the shared
+          checkout and the config are read again, and the verdict lands only if none
+          changed; otherwise the gates run again, and after two misses under the lock.
+          pool.jsonl's merge_lock lines and state.json's merge_lock give the lock's
+          waits and holds. With POOL_FAST_CHECK_CMD set, a
           PR whose head is behind main is first merged with main in a worktree and
-          the command runs there, under the merge lock right before the merge: a
-          failure hands the PR back, unless main alone fails it too. It gets POOL_FAST_CHECK_S
+          the command runs there, right before the gates (its result counts only for
+          that main): a failure hands the PR back, unless main alone fails it too. It gets POOL_FAST_CHECK_S
           (120); a timeout is not retried: the PR is held, and handed back after a second
           timeout on the same head. rebase: a CONFLICTING PR is first rebased here, once per
           head and main, and not again for a head whose rebase failed; when every
@@ -286,6 +292,17 @@ BRANCH = re.compile(r"^issue-(\d+)\b")
 
 # Open issues and open pull requests are read page by page ($ia, $pa: the cursors);
 # the recently closed issues and main come with the first page only.
+# What a merge gates' verdict depends on that can change after the gates ran
+# (Session.merge_state): the PR's head, body and labels, its issue's labels (holds,
+# needs:live) and main on GitHub, in one call.
+MERGE_STATE_QUERY = """query($owner: String!, $name: String!, $pr: Int!, $issue: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) { headRefOid body labels(first: 50) { nodes { name } } }
+    issue(number: $issue) { labels(first: 50) { nodes { name } } }
+    ref(qualifiedName: "refs/heads/main") { target { oid } }
+  }
+}"""
+
 QUERY = """
 query($owner: String!, $name: String!, $ia: String, $pa: String, $first: Boolean!) {
   repository(owner: $owner, name: $name) {
@@ -877,6 +894,17 @@ GATE7_MOVED = re.compile(r"Gate 7 \(live check\): the live check ran at `([0-9a-
 # Gate 2's reading of a PR body (role_guard.SWEEP_SHA_PATTERN and SWEEP_WAIVER).
 SWEEP_SHA = re.compile(r"(?i)\bSweep\s+SHA\b[*`:\s]*([0-9a-f]{7,40})")
 SWEEP_WAIVED = re.compile(r"(?i)\bSweep\b[*`:\s]*waived\s*[-–—:]\s*(loop/process|docs\s+only|owner\s+ruling)\b")
+
+
+def merge_state_changed(before: dict, after: dict | None, head: str) -> list[str]:
+    """What changed between the merge state a gate verdict was checked on and the state
+    under the merge lock ([] when nothing did, and the PR head is still the one checked)."""
+    if after is None:
+        return ["unreadable"]
+    changed = [k for k in sorted(before) if before.get(k) != after.get(k)]
+    if after.get("head") != head and "head" not in changed:
+        changed.insert(0, "head")
+    return changed
 
 
 def failing_tests(out: str) -> list[str]:
@@ -3445,7 +3473,8 @@ class Session(threading.Thread):
         swept = None  # this unit's re-sweep of the head: None (none yet), True or False
         recheck = ""  # the earlier head whose live check gate 7 wants replayed on this one
         want_sweep = False  # the gates asked for a sweep
-        for attempt in range(3):
+        stale = 0  # gate verdicts checked outside the merge lock that were stale under it
+        for attempt in range(6):
             # A missing or stale sweep record is mechanical: sweep the head here before
             # anything is handed back (most merge-gate hand-backs were a missing sweep
             # line or record). Outside the merge lock: a merger's clean re-rebase comes
@@ -3481,7 +3510,7 @@ class Session(threading.Thread):
                         return self.swept_hold(pr, self.flaky_hold(pr, "re-sweep", out, again))
                     else:
                         return self.swept_hold(pr, self.sweep_hand_back(pr, n, head, again))
-            if recheck:
+            if recheck and recheck != "done":
                 # Gate 7 refuses a head whose change moved since its live check, and a rebase
                 # that resolves a conflict moves it; each such refusal cost a worker session.
                 # Replay the recorded check on this head here, outside the lock, as the sweep.
@@ -3493,41 +3522,135 @@ class Session(threading.Thread):
                 if not passed:
                     return self.devcheck_hand_back(pr, n, head, recheck, out)
                 recheck = "done"
-            with self.pool.merge_locked("merge", pr):
-                # A head swept on an older main says nothing about the merged result: one PR
-                # moved an import, another (swept before it) still used it, GitHub saw no
-                # conflict, and main stopped starting. A rebase and full sweep per merge would
-                # serialize the merges (most were behind main), so a quick check runs on the
-                # head merged with the current main instead. It runs under the lock, right
-                # before the merge: a check made before the review went stale when other
-                # merges landed meanwhile, and main broke three times in one run that way.
-                # The merge train's full sweep of the merged tree replaces the quick check.
-                if self.pool.cfg.fast_check_cmd and not self.pool.cfg.merge_train:
-                    held = self.merged_check(pr, n, head, branch, env)
-                    if held:
-                        return held
-                held = self.red_main_hold(pr, head, branch)  # main may have turned red meanwhile
+            # The gates run outside the merge lock (issue #23): a guard run takes up to five
+            # minutes, and every other merge waited behind it. Their verdict is tagged with
+            # what it depends on that can change (merge_state: the head, main, the PR body
+            # and labels, the issue's holds, the shared checkout, the config); under the lock
+            # that is read again, and the verdict lands only if none of it changed. Otherwise
+            # the gates run again, and after two such misses under the lock, as before.
+            checked = None
+            state = self.merge_state(pr, n, env) if stale < 2 else None
+            if state is not None:
+                held = (self.head_moved(pr, head, state) or self.holds_merge(pr, n, state)
+                        or self.merge_checks(pr, n, head, branch, env))
                 if held:
                     return held
-                verdict = gates()
-                moved = GATE7_MOVED.search(str(verdict.get("reason") or "")) \
-                    if verdict.get("decision") in ("block", "deny") else None
-                if moved and not recheck:
-                    recheck = moved.group(1)
-                    continue  # leave the lock, replay the live check on this head, ask again
-                if not moved and swept is None and verdict.get("decision") in ("block", "deny") and re.search(
-                    r"(?i)sweep", str(verdict.get("reason") or "")
-                ):
-                    want_sweep = True
-                    continue  # the gates want a sweep after all: leave the lock, sweep, ask again
+                checked = (state, gates())
+                nxt = self.gates_want(checked[1], recheck, swept)
+                if nxt:
+                    recheck, want_sweep = (nxt, want_sweep) if nxt != "sweep" else (recheck, True)
+                    continue  # replay the live check or sweep first, outside the lock, then ask again
+            with self.pool.merge_locked("merge", pr):
+                if checked is not None:
+                    held = self.red_main_hold(pr, head, branch)  # main may have turned red meanwhile
+                    if held:
+                        return held
+                    now_state = self.merge_state(pr, n, env)
+                    changed = merge_state_changed(checked[0], now_state, head)
+                    if changed:
+                        stale += 1
+                        self.note(f"merge gates' result is stale ({', '.join(changed)} changed); checked again")
+                        self.pool.log("merge_stale", pr=pr, changed=changed)
+                        held = (self.head_moved(pr, head, now_state) or self.holds_merge(pr, n, now_state)
+                                if now_state else "")
+                        if held:
+                            return held
+                        continue
+                    verdict = checked[1]
+                else:
+                    held = self.merge_checks(pr, n, head, branch, env)
+                    if held:
+                        return held
+                    verdict = gates()
+                    nxt = self.gates_want(verdict, recheck, swept)
+                    if nxt:
+                        recheck, want_sweep = (nxt, want_sweep) if nxt != "sweep" else (recheck, True)
+                        continue  # leave the lock, replay the live check or sweep, ask again
                 if self.pool.cfg.merge_train and verdict.get("decision") == "allow":
                     return self.pool.enqueue(u)
                 outcome = self.land(pr, n, head, verdict)
                 if outcome:
                     return outcome
                 break
+        else:
+            self.pool.event(f"auto-merge of PR #{pr} held: its merge gates kept asking for more; tried again on a later poll")
+            return "held (the merge gates were not settled)"
         self.pool.after_merge(pr, n, head, bool(u.info.get("needs_live")), "the review gate and the merge gates passed")
         return "ok"
+
+    def merge_checks(self, pr: int, n: int, head: str, branch: str, env: dict) -> str:
+        """Before the gates: '' or the unit's outcome. A head swept on an older main says
+        nothing about the merged result: one PR moved an import, another (swept before it)
+        still used it, GitHub saw no conflict, and main stopped starting. A rebase and full
+        sweep per merge would serialize the merges (most were behind main), so a quick check
+        runs on the head merged with the current main instead, as late as it can: a check
+        made before the review went stale when other merges landed meanwhile, and main
+        broke three times in one run that way. Its result holds for the main it merged;
+        under the merge lock, a moved main means it runs again. The merge train's full
+        sweep of the merged tree replaces the quick check."""
+        if self.pool.cfg.fast_check_cmd and not self.pool.cfg.merge_train:
+            held = self.merged_check(pr, n, head, branch, env)
+            if held:
+                return held
+        return self.red_main_hold(pr, head, branch)  # main may have turned red meanwhile
+
+    @staticmethod
+    def gates_want(verdict: dict, recheck: str, swept: bool | None) -> str:
+        """What a refusal asks for before the gates are asked again: the earlier head whose
+        live check Gate 7 wants replayed on this one, "sweep" when they want a sweep this
+        unit has not run, or ''."""
+        if verdict.get("decision") not in ("block", "deny"):
+            return ""
+        reason = str(verdict.get("reason") or "")
+        moved = GATE7_MOVED.search(reason)
+        if moved:
+            return "" if recheck else moved.group(1)
+        return "sweep" if swept is None and re.search(r"(?i)sweep", reason) else ""
+
+    def merge_state(self, pr: int, n: int, env: dict) -> dict | None:
+        """What the merge gates' verdict depends on that can change after they ran
+        (MERGE_STATE_QUERY, plus the shared checkout Gate 0 reads and the guard's command
+        and environment). None when GitHub cannot be read: then no verdict is carried."""
+        repo = self.pool.repo_name()
+        if "/" not in repo:
+            return None
+        owner, name = repo.split("/", 1)
+        r = self.gh("api", "graphql", "-f", f"query={MERGE_STATE_QUERY}", "-F", f"owner={owner}",
+                    "-F", f"name={name}", "-F", f"pr={pr}", "-F", f"issue={n or 0}")
+        try:
+            data = json.loads(r.stdout)["data"]["repository"]
+            pull, issue = data["pullRequest"], data.get("issue") or {"labels": {"nodes": []}}
+            state = {"head": pull["headRefOid"], "main": data["ref"]["target"]["oid"],
+                     "body": hashlib.sha256(str(pull.get("body") or "").encode()).hexdigest()[:16],
+                     "pr_labels": sorted(x["name"] for x in pull["labels"]["nodes"]),
+                     "issue_labels": sorted(x["name"] for x in issue["labels"]["nodes"])}
+        except (ValueError, KeyError, TypeError):
+            return None
+        if not state["head"] or not state["main"]:
+            return None
+        root = str(repo_root())
+        gate0 = (self.git(root, "status", "--porcelain").stdout + "\0"
+                 + self.git(root, "rev-list", "origin/main..main").stdout)
+        state["checkout"] = hashlib.sha256(gate0.encode()).hexdigest()[:16]
+        state["config"] = hashlib.sha256((self.pool.cfg.guard_cmd + json.dumps(sorted(env.items())))
+                                         .encode()).hexdigest()[:16]
+        return state
+
+    def head_moved(self, pr: int, head: str, state: dict) -> str:
+        """'' unless the PR's head on GitHub is no longer this unit's: the merge, pinned to
+        this head, would be refused, and the next poll makes a unit for the new one."""
+        if state.get("head") == head:
+            return ""
+        self.note(f"the PR head moved from {head[:12]} to {str(state.get('head'))[:12]}; left for the next poll")
+        return f"held (the head moved to {str(state.get('head'))[:8]}; the next poll sees it)"
+
+    def holds_merge(self, pr: int, n: int, state: dict) -> str:
+        """'' unless the issue now carries a hold label (set after the poll that started this)."""
+        hold = sorted(set(state.get("issue_labels") or []) & HOLDS)
+        if not hold:
+            return ""
+        self.pool.event(f"auto-merge of PR #{pr} held: #{n} is at {hold[0]}")
+        return f"held (#{n} is at {hold[0]})"
 
     def flaky_hold(self, pr: int, what: str, first: str, second: str) -> str:
         """Two red runs that failed differently: flaky, not the PR's fault. Held for a later try."""
@@ -4780,6 +4903,14 @@ class Pool:
     # --- main's own check ---
     def gh(self, *args: str) -> subprocess.CompletedProcess:
         return run_gh(self.cfg, args, log=self.log)
+
+    def repo_name(self) -> str:
+        """owner/name: [pool] repo, else asked of gh once and kept ("" while gh cannot say)."""
+        if not self.cfg.repo:
+            r = self.gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+            if r.returncode == 0 and "/" in r.stdout.strip():
+                self.cfg.repo = r.stdout.strip()
+        return self.cfg.repo
 
     def main_check_due(self, st: dict):
         """Start the full check of the newest origin/main, unless one is running. The
