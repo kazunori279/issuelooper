@@ -224,6 +224,7 @@ import argparse
 import ast
 import collections
 import collections.abc
+import contextlib
 import dataclasses
 import datetime as dt
 import fnmatch
@@ -3492,7 +3493,7 @@ class Session(threading.Thread):
                 if not passed:
                     return self.devcheck_hand_back(pr, n, head, recheck, out)
                 recheck = "done"
-            with self.pool.merge_lock:
+            with self.pool.merge_locked("merge", pr):
                 # A head swept on an older main says nothing about the merged result: one PR
                 # moved an import, another (swept before it) still used it, GitHub saw no
                 # conflict, and main stopped starting. A rebase and full sweep per merge would
@@ -4111,6 +4112,8 @@ class Pool:
         self.crashes: collections.Counter = collections.Counter()
         self.deploying = False
         self.merge_lock = threading.Lock()
+        self.merge_lock_times: collections.deque = collections.deque(maxlen=500)  # (wait_s, hold_s), newest
+        self.merge_lock_total = {"n": 0, "wait_s": 0.0, "hold_s": 0.0}  # every acquisition since start
         self.deploy_tried: set[str] = set()
         self.main_checks: dict[str, bool] = {}  # main sha -> its fast check passed
         self.main_check_sha = ""  # the newest main a full check started on
@@ -4167,6 +4170,39 @@ class Pool:
         with self.lock:
             self.events.append(text)
         self.log("event", text=text)
+
+    @contextlib.contextmanager
+    def merge_locked(self, who: str, pr: int = 0):
+        """self.merge_lock, timed: each acquisition's wait and hold go to pool.jsonl
+        (merge_lock) and their summary to state.json. Every merge waits on this lock, and
+        nothing measured how long (issue #23)."""
+        asked, got = time.time(), 0.0
+        try:
+            with self.merge_lock:
+                got = time.time()
+                yield
+        finally:
+            if got:
+                wait, hold = got - asked, time.time() - got
+                with self.lock:
+                    self.merge_lock_times.append((wait, hold))
+                    tot = self.merge_lock_total
+                    tot["n"], tot["wait_s"], tot["hold_s"] = tot["n"] + 1, tot["wait_s"] + wait, tot["hold_s"] + hold
+                self.log("merge_lock", who=who, **({"pr": pr} if pr else {}), wait_s=round(wait, 2),
+                         hold_s=round(hold, 2))
+
+    def merge_lock_stats(self) -> dict:
+        """For state.json: acquisitions and total wait and hold since start, and the p50, p95
+        and max of the last 500."""
+        with self.lock:
+            times, tot = list(self.merge_lock_times), dict(self.merge_lock_total)
+
+        def dist(xs: list[float]) -> dict:
+            xs = sorted(xs)
+            pick = (lambda q: round(xs[min(len(xs) - 1, int(q * len(xs)))], 2)) if xs else (lambda q: 0.0)
+            return {"p50": pick(0.5), "p95": pick(0.95), "max": round(xs[-1], 2) if xs else 0.0}
+        return {"n": tot["n"], "wait_s_total": round(tot["wait_s"], 1), "hold_s_total": round(tot["hold_s"], 1),
+                "wait_s": dist([w for w, _ in times]), "hold_s": dist([h for _, h in times])}
 
     def record_conflicts(self, pr: int, files, hard: bool = False) -> None:
         """hard: the rebase was left to a merger (a hunk changes existing lines)."""
@@ -5552,7 +5588,7 @@ class Pool:
         sweep was green on the last car's tree, so that main needs no check of its own."""
         merged: list[int] = []
         final = base
-        with self.merge_lock:
+        with self.merge_locked("train"):
             self.train_landing = True
             try:
                 now_main = self.fetch_main()
@@ -6652,6 +6688,7 @@ class Pool:
             "feed_pending_since": self.pending_since,
             "main_check": self.main_check_last,
             "train": {"running": self.train_running, "queue": sorted(self.book.train)},
+            "merge_lock": self.merge_lock_stats(),
             "accept": {"ready": self.book.accept_ready, "build": self.book.accept_target[:12],
                        "held": sorted(self.book.accept_held),
                        **({"sample": self.sample_stats()} if self.cfg.author_accept else {})},

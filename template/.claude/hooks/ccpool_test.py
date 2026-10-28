@@ -3168,6 +3168,28 @@ def test_auto_merge_paths() -> None:
     )
 
 
+def test_the_merge_lock_is_timed() -> None:
+    """Issue #23: every merge waits on the merge lock, and nothing measured how long."""
+    outcome, _, pool = auto_session(ALLOW)
+    recs = [json.loads(x) for x in (pool.cfg.logdir / "pool.jsonl").read_text().splitlines() if '"merge_lock"' in x]
+    check("a merge logs its wait for the merge lock and how long it held it",
+          (outcome, [(r["who"], r["pr"]) for r in recs], all(r["wait_s"] >= 0 and r["hold_s"] >= 0 for r in recs)),
+          ("ok", [("merge", 9)], True))
+    pool.merge_lock.acquire()
+    threading.Timer(0.3, pool.merge_lock.release).start()
+    with pool.merge_locked("train"):
+        time.sleep(0.1)
+    stats = pool.merge_lock_stats()
+    check("a holder that waits: its wait and hold are summarized",
+          (stats["n"], stats["wait_s"]["max"] >= 0.25, stats["hold_s"]["max"] >= 0.1,
+           stats["wait_s_total"] >= 0.2), (2, True, True, True))
+    h = Rig(state())
+    h.step()
+    check("state.json carries the summary", json.loads((h.pool.cfg.logdir / "state.json").read_text())["merge_lock"],
+          {"n": 0, "wait_s_total": 0.0, "hold_s_total": 0.0, "wait_s": {"p50": 0.0, "p95": 0.0, "max": 0.0},
+           "hold_s": {"p50": 0.0, "p95": 0.0, "max": 0.0}})
+
+
 def test_auto_merge_when_the_review_waits_for_the_owner() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-reviewowner-"))
     old = os.environ.get("REVIEW_DIR")
