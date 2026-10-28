@@ -532,7 +532,13 @@ class Config:
     # agent hours in 4 h, a median 13 min for one issue.
     author_accept: bool = False
     accept_sample: int = 4
-    accept_escalate_at: float = 0.15
+    # Issues every author verdict of is checked independently: by label (and any type:feature*).
+    # Cohort 60: authors verified 68 of 68, the 1-in-4 sample disagreed 2 of 34 times, and
+    # report-only QA failed 25 % of author-verified issues, most of them seed features.
+    accept_sample_labels: list = dataclasses.field(default_factory=lambda: [
+        "owner-request", "P0", "needs:live", "seed", "type:feature-request"])
+    accept_escalate_at: float = 0.05
+    accept_min_samples: int = 3
     accept_window: int = 20
     accept_neighbourhood_min: float = 10  # the author's look around its change after a verified verdict (0 = off)
     author_wait_s: float = 1800  # an issue whose author's conversation stays busy this long goes to a tester
@@ -679,7 +685,11 @@ class Config:
             accept_chore_priority=e("POOL_ACCEPT_CHORE_PRIORITY", "").strip() or "P1",
             author_accept=env_flag("POOL_AUTHOR_ACCEPT"),
             accept_sample=env_int("POOL_ACCEPT_SAMPLE", 4),
-            accept_escalate_at=float(e("POOL_ACCEPT_ESCALATE_AT", "") or 0.15),
+            accept_sample_labels=[x.strip() for x in (e("POOL_ACCEPT_SAMPLE_LABELS", "")
+                                                      or "owner-request,P0,needs:live,seed,type:feature-request").split(",")
+                                  if x.strip()],
+            accept_escalate_at=float(e("POOL_ACCEPT_ESCALATE_AT", "") or 0.05),
+            accept_min_samples=env_int("POOL_ACCEPT_MIN_SAMPLES", 3),
             accept_window=env_int("POOL_ACCEPT_WINDOW", 20),
             accept_neighbourhood_min=float(e("POOL_ACCEPT_NEIGHBOURHOOD_MIN", "") or 10),
             author_wait_s=float(e("POOL_AUTHOR_WAIT_S", "") or 1800),
@@ -1927,9 +1937,15 @@ The supervisor resumed it for one step: accept it on {where} at commit {sha[:12]
    the background with all three redirects{", in live mode" if x.get("live") else ", in scripted mode"}).
 2. Drive what #{n} asked for with a Playwright script ({pre}accept.py) from a fresh start, through these checklist
    rows: {rows}. Read every screenshot. Your scripts and live check from before the merge do not count: only this build.
-3. Comment once on #{n}: first line `<!-- worker -->`, second line `{AUTHOR_ACCEPT}`, then what you ran and what you
-   saw (quote the screen), a line `rows: <ids>` with the rows you ran, a line `skip: <id> <why>` for each that cannot
-   apply, and a last line of its own: `accept-verified: <what ran>` only when every part works on this build,
+   Then try to break it, as a user who did not write it would: the other language, 390 and 320 px, a reload in
+   the middle of a turn and after it, the server dropped for 20 s and back, every entry point the issue or its
+   spec requirement names, an empty or odd input. Read the spec requirements the issue cites and check what they
+   say, not only the issue's words. Reading your code, or your tests passing, is not evidence: only what the
+   screen of this build shows is.
+3. Comment once on #{n}: first line `<!-- worker -->`, second line `{AUTHOR_ACCEPT}`, then what you ran, and for
+   each row a line `<row id>: <screenshot path> "<the text you asserted on screen>"` (with no rows listed, one such
+   line per part of the issue), a line `rows: <ids>` with the rows you ran, a line `skip: <id> <why>` for each that
+   cannot apply, and a last line of its own: `accept-verified: <what ran>` only when every part works on this build,
    `accept-blocked: <what is missing>` when you could not run the check at all, neither when something is wrong
    (say what: it comes back to you as a fix). A tester who did not write it checks a sample of these verdicts, and
    one it cannot reproduce counts against the loop.
@@ -2060,9 +2076,13 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             f"Your unit: these merged issues, accepted at commit {sha[:12]} ("
             + ("the deployed build" if u.info.get("deployed") else "origin/main; this repository does not deploy")
             + f"), started from that commit on your port as {PROJECT} says:\n{rows}\n\n"
-            "Someone else wrote each change. For each issue, read it, its comments and its merged PR, then drive "
-            "what it asked for on screen with a script, in scripted mode or in live mode where marked, through "
-            "the checklist rows its change needs. Then comment once on that issue, signed `<!-- tester -->`: "
+            "Someone else wrote each change, and its author already says it works: check as if you had not seen "
+            "that. For each issue, read it, its comments, its merged PR and every spec requirement it cites (with "
+            "the spec's strings for every language), then drive what it asked for on screen with a script, in "
+            "scripted mode or in live mode where marked, through the checklist rows its change needs, and try to "
+            "break it: each viewport down to 390 and 320 px, the other language, a reload mid-turn and after, the "
+            "server dropped for 20 s and back, every entry point, an empty or odd input. Judge polish too (clipped, "
+            "cramped, stretched, untranslated is a failure). Then comment once on that issue, signed `<!-- tester -->`: "
             "what you ran and what you saw (quote the screen), ending with a line of its own, "
             "`accept-verified: <what ran>` when every part works, or `accept-blocked: <what is missing>` when "
             "you could not run the check at all; neither when something is wrong or missing (say what). Before "
@@ -2241,6 +2261,26 @@ def unchecked_rows(body: str, rows: list[str]) -> list[str]:
     skipped = {m.group(1).lower() for m in ACCEPT_SKIP.finditer(body)} - {r.lower() for r in no_skip}
     named = {r for r in rows if re.search(rf"(?<![\w:-]){re.escape(r.lower())}(?![\w-])", text)}
     return [r for r in rows if r not in named and r.lower() not in skipped]
+
+
+SHOT = re.compile(r"\S+\.(?:png|jpe?g|webp)\b", re.I)
+SEEN_TEXT = re.compile(r"[\"“「][^\"”」]{2,}[\"”」]")
+
+
+def rows_without_evidence(body: str, rows: list[str]) -> list[str]:
+    """The rows (ids) an author's verdict names without the evidence it must give for each:
+    a line holding the row id, a screenshot path and the text asserted on screen in quotes.
+    With no rows, one such line must exist ("-" when it does not). Cohort 60: authors
+    verified 68 of their own 68 issues; QA failed a quarter of them."""
+    lines = [ln for ln in body.splitlines() if not ACCEPT_SKIP_LINE.match(ln)]
+    skipped = {m.group(1).lower() for m in ACCEPT_SKIP.finditer(body)} - {r.lower() for r in config.checklist()["no_skip"]}
+
+    def proved(line: str) -> bool:
+        return bool(SHOT.search(line) and SEEN_TEXT.search(line))
+    if not rows:
+        return [] if any(proved(ln) for ln in lines) else ["-"]
+    return [r for r in rows if r.lower() not in skipped and not any(
+        re.search(rf"(?<![\w:-]){re.escape(r)}(?![\w-])", ln, re.I) and proved(ln) for ln in lines)]
 
 
 def touches_live(paths) -> bool:
@@ -5804,8 +5844,9 @@ class Pool:
 
     def sample_pick(self, labels: set) -> bool:
         """Whether an issue the author verified also gets an independent check: always for
-        an owner request or a P0, else 1 in N."""
-        if labels & {"owner-request", "P0"}:
+        the labels POOL_ACCEPT_SAMPLE_LABELS names (owner requests, P0, needs:live, the seed
+        backlog, features) and any type:feature* label; 1 in N for the rest (bugs, chores)."""
+        if labels & set(self.cfg.accept_sample_labels) or any(x.startswith("type:feature") for x in labels):
             return True
         n = self.sample_every()
         if n <= 0:
@@ -5831,7 +5872,8 @@ class Pool:
         stats = self.sample_stats()
         self.log("accept_sample", issue=n, agree=agree, **stats)
         every = stats["every"]
-        if (stats["window"] >= min(5, self.cfg.accept_window) and stats["rate"] is not None
+        if (stats["window"] >= min(max(1, self.cfg.accept_min_samples), self.cfg.accept_window)
+                and stats["rate"] is not None
                 and stats["rate"] > self.cfg.accept_escalate_at and every > 1):
             new = max(1, every // 2)
             with self.lock:
@@ -5887,8 +5929,9 @@ class Pool:
                     "names, which only the owner can provide. Waiting at stage:owner.")
             self.event(f"#{n}: the author's acceptance check could not run (accept-blocked); moved to stage:owner.")
             how = "blocked"
-        elif ACCEPT_VERIFIED.search(body) and unchecked_rows(body, x.get("rows") or []):
-            how = "rows missing"  # a tester checks it, through every row
+        elif ACCEPT_VERIFIED.search(body) and (unchecked_rows(body, x.get("rows") or [])
+                                               or rows_without_evidence(body, x.get("rows") or [])):
+            how = "rows missing"  # rows named without a screenshot and the text seen: a tester checks it
         elif ACCEPT_VERIFIED.search(body):
             sampled = self.sample_pick(labels)
             how = "verified, sampled" if sampled else "verified"

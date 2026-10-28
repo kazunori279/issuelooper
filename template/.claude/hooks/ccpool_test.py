@@ -1249,7 +1249,8 @@ def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
         return [ln.split(" --comment")[0] for ln in log.read_text().splitlines() if not ln.startswith("issue view")]
 
     def author(body, at="2026-10-23T12:30:00Z"):
-        return {"author": loop, "body": f"<!-- worker -->\n{ccpool.AUTHOR_ACCEPT}\n" + body, "createdAt": at,
+        proof = '- sheet: shots/320.png "Escape closes only the dialog"\n' if "accept-verified" in body else ""
+        return {"author": loop, "body": f"<!-- worker -->\n{ccpool.AUTHOR_ACCEPT}\n" + proof + body, "createdAt": at,
                 "url": "https://x/c/2"}
 
     calls = settle([author("rows: always:x\naccept-verified: script at 3 viewports")])
@@ -1260,6 +1261,17 @@ def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
           calls[:2], ["issue edit 9 --remove-label stage:accept", "issue close 9 --reason completed"])
     calls = settle([author("accept-verified: script")], labels=("stage:accept", "owner-request"))
     check("an owner request is always sampled", ccpool.ACCEPT_SAMPLE in calls[0], True)
+    for kind in ("type:feature-request", "seed", "needs:live"):
+        calls = settle([author("accept-verified: script")], labels=("stage:accept", kind))
+        check(f"cohort 60: {kind} is always sampled", ccpool.ACCEPT_SAMPLE in calls[0], True)
+    calls = settle([{"author": loop, "body": f"<!-- worker -->\n{ccpool.AUTHOR_ACCEPT}\nIt works.\naccept-verified: script",
+                     "createdAt": "2026-10-23T12:30:00Z", "url": "u"}])
+    check("a verified with no screenshot and no asserted text goes to a tester, unclosed",
+          (calls, pool.book.accept_author[9]["verdict"]), ([], "rows missing"))
+    check("evidence per row: each row needs its line with a screenshot and the text seen",
+          (ccpool.rows_without_evidence('viewport:320x640: a/320.png "Ready"\nlang:ja: (looked fine)', ["viewport:320x640", "lang:ja"]),
+           ccpool.rows_without_evidence('lang:ja: b/ja.png "準備完了"\nskip: viewport:320x640 no layout change',
+                                        ["viewport:320x640", "lang:ja"])), (["lang:ja"], []))
     calls = settle([author("accept-blocked: no .env")])
     check("accept-blocked: the owner", calls[0], "issue edit 9 --remove-label stage:accept --add-label stage:owner")
     calls = settle([author("Escape still closes the whole sheet at 320 px.")])
@@ -1280,12 +1292,12 @@ def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
     for k, agree in enumerate([True, False, True, True, False, True]):
         pool.record_sample(100 + k, agree)
     stats = pool.sample_stats()
-    check("2 of the first 5 disagree (40 %, over 15 %): the sample goes from 1 in 4 to 1 in 2, the monitor hears it, "
-          "and the window starts again",
-          (pool.sample_every(), any("from 1 in 4 to 1 in 2" in e for e in pool.events), stats["window"]), (2, True, 1))
+    check("1 of the first 3 disagree (33 %, over 5 %; POOL_ACCEPT_MIN_SAMPLES 3): 1 in 4 becomes 1 in 2, then 1 in 1, "
+          "and the monitor hears it",
+          (pool.sample_every(), any("from 1 in 4 to 1 in 2" in e for e in pool.events), stats["window"]), (1, True, 0))
     for k in range(6):
         pool.record_sample(200 + k, True)
-    check("agreeing samples leave it there", pool.sample_every(), 2)
+    check("agreeing samples leave it there", pool.sample_every(), 1)
     pool.book.accept_author[9] = {"entry": since, "verdict": "verified", "sample": True}
     log = d / "gh.log"
     os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="loop-bot", FAKE_GH_VIEW=json.dumps(
@@ -1304,7 +1316,7 @@ def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
           (1, False, "retry"))
     again = ccpool.Pool(pool.cfg, fetcher=state, spawn=False)
     check("a restarted supervisor keeps the sample and its rate", (len(again.book.samples), again.sample_every()),
-          (len(pool.book.samples), 2))
+          (len(pool.book.samples), 1))
 
 
 def _book(**kw):

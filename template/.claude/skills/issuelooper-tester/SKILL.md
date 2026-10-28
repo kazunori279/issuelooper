@@ -113,6 +113,13 @@ issue:
    implementations are what this check exists for: the narrow phone, Escape
    closing too much, a half-translated second language, voice but not typed (or
    the reverse), scripted but not live.
+   Check it the way the independent QA does (cohort 60's QA failed a quarter of what
+   authors and testers had verified): read every spec requirement the issue cites
+   and the spec's strings for each language, and check what they say, not only the
+   issue's words; try to break it (390 and 320 px, the other language, a reload
+   mid-turn, the server dropped for 20 s and back, an empty or odd input, every entry
+   point); judge polish (clipped, cramped, stretched or untranslated text is a
+   failure). The author's own verdict, when there is one, is not evidence.
 3. Read every screenshot. Then comment once on the issue, signed `<!-- tester -->`:
    what you ran, what you saw (quote the screen), a line `rows: <ids>` naming the
    checklist rows you ran (your prompt lists the ones the issue's change needs), a line

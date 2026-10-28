@@ -76,9 +76,10 @@ units = 3                    # POOL_ACCEPT_UNITS: acceptance units side by side,
                              # behind 10-15 merges an hour and stage:accept reached 62); with author on, they run the
                              # independent sample and the issues whose author cannot be resumed
 author = true                # POOL_AUTHOR_ACCEPT: the author's conversation accepts its own issue on the deployed build
-sample = 4                   # POOL_ACCEPT_SAMPLE: a tester also checks owner requests, P0 and 1 in 4 of the rest
-escalate_at = 0.15           # POOL_ACCEPT_ESCALATE_AT: over 15 % of the last 20 samples failing what the author
-window = 20                  # POOL_ACCEPT_WINDOW: verified doubles the sample rate (c55's QA: 16.5 %)
+sample = 4                   # POOL_ACCEPT_SAMPLE: a tester also checks 1 in 4 bugs and chores (sample_labels: always)
+escalate_at = 0.05           # POOL_ACCEPT_ESCALATE_AT: over 5 % of the last 20 samples failing what the author verified
+window = 20                  # POOL_ACCEPT_WINDOW: doubles the sample rate for bugs and chores (c60: 2 of 34 disagreed
+min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES: while QA failed a quarter); features and seeds are always sampled
 neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: the author's look around its change after verifying it
 guard = "uv run pytest -q -p no:cacheprovider tests/accept"   # ACCEPT_GUARD: the accepted issues' Playwright
                              # scripts, run on each deploy with no model; a failure files `Regression of #N`

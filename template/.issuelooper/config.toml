@@ -76,8 +76,12 @@ author = false               # POOL_AUTHOR_ACCEPT: the author's conversation, re
                              # the deployed build (same verdict lines); off: tester units accept every issue
 sample = 4                   # POOL_ACCEPT_SAMPLE: with author on, a tester who did not write it also checks owner
                              # requests, P0, and 1 in this many of the rest (0: only those two kinds)
-escalate_at = 0.15           # POOL_ACCEPT_ESCALATE_AT: when more of the last `window` samples than this failed what
+sample_labels = ["owner-request", "P0", "needs:live", "seed", "type:feature-request"]
+                             # POOL_ACCEPT_SAMPLE_LABELS: issues with any of these (or a type:feature* label) are always
+                             # checked independently; the 1 in `sample` is for the rest (bugs, chores)
+escalate_at = 0.05           # POOL_ACCEPT_ESCALATE_AT: when more of the last `window` samples than this failed what
 window = 20                  # POOL_ACCEPT_WINDOW: their author verified, the sample rate doubles (N halves, to 1)
+min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES: samples in the window before it can escalate
 neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: after a verified verdict the author looks around its change
                              # this long and files at most 3 issues (0 = off)
 chore_priority = "P1"        # POOL_ACCEPT_CHORE_PRIORITY: the priority of the chore (type:chore) that turns verified

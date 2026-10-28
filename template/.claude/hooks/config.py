@@ -136,6 +136,8 @@ KEYS = {
     ("accept", "author"): "POOL_AUTHOR_ACCEPT",
     ("accept", "sample"): "POOL_ACCEPT_SAMPLE",
     ("accept", "escalate_at"): "POOL_ACCEPT_ESCALATE_AT",
+    ("accept", "sample_labels"): "POOL_ACCEPT_SAMPLE_LABELS",
+    ("accept", "min_samples"): "POOL_ACCEPT_MIN_SAMPLES",
     ("accept", "window"): "POOL_ACCEPT_WINDOW",
     ("accept", "neighbourhood_min"): "POOL_ACCEPT_NEIGHBOURHOOD_MIN",
     ("accept", "author_wait_s"): "POOL_AUTHOR_WAIT_S",

@@ -8,7 +8,8 @@ under it holds the labels and the issues it is blocked by
 (`meta: type:bug P0 needs:live | blocked_by: 2 3`), and everything up to the next
 heading is the body. Lines starting with `>` are notes and are not filed.
 
-Every issue is filed at `stage:triage`, so workers can claim it at once. A blocker
+Every issue is filed at `stage:triage` with the label `seed`, so workers can claim it at
+once and the supervisor knows the backlog's issues (it always samples their acceptance). A blocker
 becomes a native GitHub dependency and a "Blocked by: #N" line in the body.
 
 Running it again files only the issues whose title is not in the repository yet, so
@@ -104,7 +105,7 @@ def main() -> None:
         ".[].name",
     ).split("\n")
     missing = sorted(
-        {x for i in issues for x in i["labels"] + ["stage:triage"]} - set(have)
+        {x for i in issues for x in i["labels"] + ["stage:triage", "seed"]} - set(have)
     )
     if missing:
         sys.exit(
@@ -137,7 +138,8 @@ def main() -> None:
         payload = {
             "title": i["title"],
             "body": body,
-            "labels": ["stage:triage", *i["labels"]],
+            # `seed`: the supervisor always checks a seed issue's acceptance independently.
+            "labels": ["stage:triage", "seed", *i["labels"]],
         }
         out = json.loads(
             gh(

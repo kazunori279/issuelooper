@@ -268,6 +268,7 @@ type:feature-request|a2eeef|New behavior
 type:documentation|0075ca|Documentation only
 type:spike|cfd3d7|Investigation
 type:chore|ededed|Maintenance
+seed|f9d0c4|From the project's seed backlog
 EOF
   say "labels created or updated"
 fi
