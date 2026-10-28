@@ -1402,13 +1402,13 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
         (logdir / "accept/test_accept_5.py").write_text("print('five')\n")
         (logdir / "accept/test_accept_6.py").write_text("print('six')\n")
         log.write_text("")
-        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept_guard="pytest tests/accept"),
-                           fetcher=state, spawn=False)
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept_guard="pytest tests/accept",
+                                         accept_chore_batch=1), fetcher=state, spawn=False)
         (logdir / "accept/test_accept_8.py").write_text("print(len(open('src/a.py').read().splitlines()))\n")
         pool.accept_chore(logdir, [5, 6, 7, 8], {8: "Split src/app.js: it is where parallel work collides"})
         created = [x for x in log.read_text().splitlines() if x.startswith("issue create")]
         check("the chore carries the marker the guard looks for, and asks for lean tests; a split issue is left out",
-              (ccpool.ACCEPT_CHORE in created[0], "never fixed sleeps" in created[0], "never a server started" in created[0],
+              (ccpool.ACCEPT_CHORE in created[0], "never fixed sleeps" in created[0], "never a server it starts itself" in created[0],
                "#8" in created[0]), (True, True, True, False))
         check("the verified scripts become one chore issue, but not one whose test is on main already",
               ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
@@ -1416,8 +1416,34 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               (["issue create --title Acceptance tests for #6"], True, False))
         check("the chore asks each guard to make its own fresh state (cohort 60's test_accept_38)",
               ("a fresh state the test makes itself" in created[0], "never an assumption that" in created[0]), (True, True))
-        check("filed as a chore at P1 (run 11: four sat unclaimed at P2, one without type:chore)",
-              ("--label type:chore --label P1 --label stage:triage" in created[0]), True)
+        check("filed as a chore at P2 (cohort 60: 95 P1 chores of 211 merges crowded out product work)",
+              ("--label type:chore --label P2 --label stage:triage" in created[0]), True)
+        # Batching: one chore per [accept] chore_batch scripts, appended while one is open and unclaimed.
+        log.write_text("")
+        for k in (61, 62, 63):
+            (logdir / f"accept/test_accept_{k}.py").write_text(f"print({k})\n")
+        pool.cfg.accept_chore_batch = 3
+        pool.book.chore_pending = []
+        pool.accept_chore(logdir, [61])
+        pool.accept_chore(logdir, [62])
+        check("under a batch: nothing filed yet, the scripts wait",
+              ([x for x in log.read_text().splitlines() if x.startswith("issue create")],
+               [x["n"] for x in pool.book.chore_pending]), ([], [61, 62]))
+        pool.accept_chore(logdir, [63])
+        created = [x for x in log.read_text().splitlines() if x.startswith("issue create")]
+        check("a full batch: one chore for all three", (len(created), "#61, #62, #63" in created[0], pool.book.chore_pending),
+              (1, True, []))
+        log.write_text("")
+        os.environ["FAKE_GH_LIST"] = json.dumps([{"number": 90, "title": "Acceptance tests for #61, #62, #63",
+                                                   "labels": [{"name": "stage:triage"}, {"name": "type:chore"}]}])
+        (logdir / "accept/test_accept_64.py").write_text("print(64)\n")
+        pool.accept_chore(logdir, [64])
+        lines = log.read_text().splitlines()
+        check("an open, unclaimed chore gets the next scripts appended (comment and title), no new chore",
+              ([x.split(" --body")[0] for x in lines if x.startswith(("issue comment", "issue edit"))][:2],
+               any(x.startswith("issue create") for x in lines)),
+              (["issue comment 90", "issue edit 90 --title Acceptance tests for #61, #62, #63, #64"], False))
+        os.environ.pop("FAKE_GH_LIST", None)
         log.write_text("")
         pool.cfg.accept_guard = ""
         pool.accept_chore(logdir, [6])

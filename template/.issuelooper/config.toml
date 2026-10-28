@@ -84,8 +84,11 @@ window = 20                  # POOL_ACCEPT_WINDOW: their author verified, the sa
 min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES: samples in the window before it can escalate
 neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: after a verified verdict the author looks around its change
                              # this long and files at most 3 issues (0 = off)
-chore_priority = "P1"        # POOL_ACCEPT_CHORE_PRIORITY: the priority of the chore (type:chore) that turns verified
-                             # scripts into tests/accept/; at P2 behind a P1 queue they sat unclaimed
+chore_priority = "P2"        # POOL_ACCEPT_CHORE_PRIORITY: the priority of the chore (type:chore) that turns verified
+                             # scripts into tests/accept/ (c60: P1 chores were 95 of 211 merges)
+chore_batch = 5              # POOL_ACCEPT_CHORE_BATCH: verified scripts per chore, or the oldest waits chore_every_s
+chore_every_s = 3600         # POOL_ACCEPT_CHORE_EVERY_S
+chore_append = true          # POOL_ACCEPT_CHORE_APPEND: append to an open chore nobody claimed instead of filing another
 guard_timeout_s = 1200       # POOL_ACCEPT_GUARD_S: the guard's time limit (the train's check: the sweep's
                              # POOL_MAIN_CHECK_S plus this)
 # The acceptance checklist the worker's live check (devcheck.py, merge gate 7) and the

@@ -81,6 +81,8 @@ escalate_at = 0.05           # POOL_ACCEPT_ESCALATE_AT: over 5 % of the last 20 
 window = 20                  # POOL_ACCEPT_WINDOW: doubles the sample rate for bugs and chores (c60: 2 of 34 disagreed
 min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES: while QA failed a quarter); features and seeds are always sampled
 neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: the author's look around its change after verifying it
+chore_priority = "P2"        # POOL_ACCEPT_CHORE_PRIORITY: c60 filed 97 P1 chores, 95 of its 211 merges
+chore_batch = 5              # POOL_ACCEPT_CHORE_BATCH: one chore per 5 verified scripts (or per hour)
 guard = "uv run pytest -q -p no:cacheprovider tests/accept"   # ACCEPT_GUARD: the accepted issues' Playwright
                              # scripts, run on each deploy with no model; a failure files `Regression of #N`
 # The acceptance checklist (ids: viewport:<size>, lang:<code>, always:/live:<first three

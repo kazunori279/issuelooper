@@ -523,7 +523,10 @@ class Config:
     accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
     # The priority acceptance chores are filed at. Run 11: four chores sat unclaimed at P2
     # behind the P1 queue (one also lacked type:chore, which the monitor added to the rest).
-    accept_chore_priority: str = "P1"
+    accept_chore_priority: str = "P2"
+    accept_chore_batch: int = 5  # verified scripts per chore (or the oldest waits chore_every_s)
+    accept_chore_every_s: float = 3600
+    accept_chore_append: bool = True  # append to an open, unclaimed chore instead of filing another
     # The author accepts its own merged issue on the deployed build, in its conversation
     # (POOL_AUTHOR_ACCEPT); a tester who did not write it checks a sample: owner requests,
     # P0, and 1 in accept_sample of the rest. When the sample disagrees with the author
@@ -682,7 +685,10 @@ class Config:
             accept_units=env_int("POOL_ACCEPT_UNITS", 2),
             accept_guard_s=float(e("POOL_ACCEPT_GUARD_S", "") or 1200),
             accept_guard=e("ACCEPT_GUARD", "").strip(),
-            accept_chore_priority=e("POOL_ACCEPT_CHORE_PRIORITY", "").strip() or "P1",
+            accept_chore_priority=e("POOL_ACCEPT_CHORE_PRIORITY", "").strip() or "P2",
+            accept_chore_batch=env_int("POOL_ACCEPT_CHORE_BATCH", 5),
+            accept_chore_every_s=float(e("POOL_ACCEPT_CHORE_EVERY_S", "") or 3600),
+            accept_chore_append=env_flag("POOL_ACCEPT_CHORE_APPEND", True),
             author_accept=env_flag("POOL_AUTHOR_ACCEPT"),
             accept_sample=env_int("POOL_ACCEPT_SAMPLE", 4),
             accept_sample_labels=[x.strip() for x in (e("POOL_ACCEPT_SAMPLE_LABELS", "")
@@ -1067,6 +1073,7 @@ class Book:
         self.sample_since = 0
         self.sample_count = 0
         self.accept_ready_since: dict[int, float] = {}  # issue -> first seen ready for acceptance
+        self.chore_pending: list[dict] = []  # verified scripts waiting for a chore: {"n", "path", "t"}
         # Areas (Pool.track_areas): issue -> its area ('' none) and the files it names (for the
         # hot-file lock); issue -> (updatedAt, area, files) last worked out; area -> its
         # conversations by slot: {"conv", "cli", "issues", "notes", "tokens", "t"}.
@@ -4430,7 +4437,7 @@ class Pool:
                          tokens=slots[k]["tokens"], resumed=resumed)
         self.save_owners()
 
-    OWNED = ("convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
+    OWNED = ("chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
              "area_wait_s")
 
     def save_owners(self) -> None:
@@ -5966,57 +5973,110 @@ class Pool:
         self.log("accept_settled", issue=n, verdict=how, by="author")
         self.save_owners()
 
+    CHORE_RULES = (
+        "Add each as `tests/accept/test_accept_<N>.py`, one compact test per issue that keeps what the user "
+        "sees the script check:\n"
+        "- scripted mode, unless the issue needs live mode;\n"
+        "- the suite's own fixtures (a conftest the accept tests see): its shared app server only for a check that "
+        "changes and relies on no server-side state; a check that reloads, or relies on or changes conversations, "
+        "settings or other server-side data, uses the fresh-state fixture .issuelooper/project.md names (an app, "
+        "user or profile of its own), never a server it starts itself;\n"
+        "- a fresh state the test makes itself: its own browser context, never another test's leftovers, never an "
+        "assumption that history is empty or that a reload starts blank (cohort 60: test_accept_38 cleared "
+        "localStorage, reloaded and expected an empty feed, and broke when history moved to the server);\n"
+        "- no endpoint only tests use (a `DELETE /api/history` to reset state) and no monkeypatched navigation "
+        "(`page.goto`, `page.reload`): the review gate rejects both;\n"
+        "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
+        "`wait_for_selector`), never fixed sleeps;\n"
+        "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
+        "- well under 100 lines, a few seconds to run.\n\n"
+        "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
+        "`Regression of #N`. In cohort 55 that suite reached 288 tests and 14 minutes: 126 of 138 files started "
+        "their own server and all slept. Only this chore's PR may add files there.\n"
+    )
+
     def accept_chore(self, logdir: pathlib.Path, verified: list[int], titles: dict[int, str] | None = None) -> None:
-        """One chore issue for the scripts of the issues this acceptance unit verified
-        ($LOGDIR/accept/test_accept_<N>.py), with [accept] guard set: a worker turns them
-        into tests/accept/test_accept_<N>.py through the usual gates. Not for an issue
-        whose test is already on main, nor for a split issue: its acceptance is that
-        nothing changed, and in cohort 55 its scripts became six line-count tests."""
+        """Queue the scripts of the issues an acceptance unit verified
+        ($LOGDIR/accept/test_accept_<N>.py), with [accept] guard set, for a chore issue: a
+        worker turns them into tests/accept/test_accept_<N>.py through the usual gates. Not
+        for an issue whose test is already on main, nor for a split issue: its acceptance is
+        that nothing changed, and in cohort 55 its scripts became six line-count tests.
+        flush_chores files or appends them."""
         if not self.cfg.accept_guard or not verified:
             return
         self.git("fetch", "-q", "origin", "main")
-        found = []
+        with self.lock:
+            queued = {x["n"] for x in self.book.chore_pending}
         for n in verified:
-            if str((titles or {}).get(n, "")).startswith("Split "):
+            if str((titles or {}).get(n, "")).startswith("Split ") or n in queued:
                 continue
             path = logdir / "accept" / f"test_accept_{n}.py"
             if path.is_file() and self.git("cat-file", "-e", f"origin/main:tests/accept/test_accept_{n}.py").returncode:
-                found.append((n, path.read_text(errors="replace")))
-        if not found:
-            return
-        names = ", ".join(f"#{n}" for n, _ in found)
-        body = (
-            f"<!-- merger -->\n{ACCEPT_CHORE}\nThe tester verified {names} on the deployed build with these scripts. "
-            "Add each as `tests/accept/test_accept_<N>.py`, one compact test per issue that keeps what the user "
-            "sees the script check:\n"
-            "- scripted mode, unless the issue needs live mode;\n"
-            "- the suite's shared app server (the session fixture the e2e tests use; move it to a conftest the "
-            "accept tests see if needed), never a server started per file;\n"
-            "- a fresh state the test makes itself: its own browser context (a new page per test), and, when the "
-            "app keeps conversations or user data on the server, a fresh server-side state (the fresh-session "
-            "fixture .issuelooper/project.md names); never another test's leftovers, and never an assumption that "
-            "history is empty or that a reload starts blank (cohort 60: test_accept_38 cleared localStorage, "
-            "reloaded and expected an empty feed, and broke when history moved to the server);\n"
-            "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
-            "`wait_for_selector`), never fixed sleeps;\n"
-            "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
-            "- well under 100 lines, a few seconds to run.\n\n"
-            "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
-            "`Regression of #N`. In cohort 55 that suite reached 288 tests and 14 minutes: 126 of 138 files started "
-            "their own server and all slept. Only this chore's PR may add files there.\n"
-        )
-        for n, text in found:
-            room = 60000 - len(body)
-            if room < 2000:
-                body += f"\n#{n}: `{logdir / 'accept' / f'test_accept_{n}.py'}` (too long to quote here)\n"
+                with self.lock:
+                    self.book.chore_pending.append({"n": n, "path": str(path), "t": round(self.clock(), 1)})
+        self.flush_chores(append_only=True)
+
+    def chore_scripts(self, items: list[dict], room: int = 60000) -> str:
+        out = ""
+        for x in items:
+            try:
+                text = pathlib.Path(x["path"]).read_text(errors="replace")
+            except OSError:
+                text = ""
+            if room - len(out) < 2000 or not text:
+                out += f"\n#{x['n']}: `{x['path']}`" + (" (too long to quote here)\n" if text else " (gone)\n")
                 continue
-            body += (f"\n### #{n}\n\n```python\n" + text[: min(12000, room - 200)].replace("```", "'" * 3)
-                     + "\n```\n")
+            out += f"\n### #{x['n']}\n\n```python\n" + text[:12000].replace("```", "'" * 3) + "\n```\n"
+        return out
+
+    def flush_chores(self, append_only: bool = False) -> None:
+        """Turn the queued verified scripts into chore work. When an acceptance chore is open
+        and nobody has claimed it (stage:triage or stage:ready), they are appended to it (a
+        comment, and its title). Otherwise one new chore is filed once [accept] chore_batch
+        scripts wait or the oldest has waited [accept] chore_every_s; append_only: only the
+        first. Cohort 60: one P1 chore per acceptance unit made 95 of D's 211 merges, and
+        product merges fell from c55's 133 to 109."""
+        with self.lock:
+            items = list(self.book.chore_pending)
+        if not items:
+            return
+        due = (len(items) >= max(1, self.cfg.accept_chore_batch)
+               or self.clock() - min(x["t"] for x in items) >= self.cfg.accept_chore_every_s)
+        if append_only and not due and not self.cfg.accept_chore_append:
+            return
+        names = ", ".join(f"#{x['n']}" for x in items)
+        open_chore = None
+        if self.cfg.accept_chore_append:
+            r = self.gh("issue", "list", "--state", "open", "--search", "Acceptance tests for in:title",
+                        "--json", "number,title,labels")
+            try:
+                rows = json.loads(r.stdout or "[]") if r.returncode == 0 else []
+            except ValueError:
+                rows = []
+            open_chore = next((i for i in rows if str(i.get("title", "")).startswith("Acceptance tests for")
+                               and {str(x.get("name") if isinstance(x, dict) else x) for x in i.get("labels") or []}
+                               & set(CLAIMABLE)), None)
+        if open_chore:
+            n = open_chore["number"]
+            self.gh("issue", "comment", str(n), "--body",
+                    f"<!-- merger -->\n{ACCEPT_CHORE}\nMore issues verified on the deployed build: {names}. Add their "
+                    "scripts to this chore as the body says.\n" + self.chore_scripts(items))
+            self.gh("issue", "edit", str(n), "--title", f"{open_chore['title']}, {names}"[:200])
+            self.log("accept_chore", issues=[x["n"] for x in items], appended=n, ok=True)
+            with self.lock:
+                self.book.chore_pending = [x for x in self.book.chore_pending if x not in items]
+            return
+        if not due:
+            return
+        body = (f"<!-- merger -->\n{ACCEPT_CHORE}\nThe tester verified {names} on the deployed build with these scripts. "
+                + self.CHORE_RULES + self.chore_scripts(items))
         r = self.file_issue(f"Acceptance tests for {names}", ["type:chore", self.cfg.accept_chore_priority,
                                                               "stage:triage"], body)
         m = re.search(r"/issues/(\d+)", r.stdout)
-        self.log("accept_chore", issues=[n for n, _ in found], ok=bool(m))
+        self.log("accept_chore", issues=[x["n"] for x in items], ok=bool(m))
         if m:
+            with self.lock:
+                self.book.chore_pending = [x for x in self.book.chore_pending if x not in items]
             self.event(f"filed #{m.group(1)}: turn the acceptance scripts of {names} into tests/accept/ guards")
 
     def file_issue(self, title: str, labels: list[str], body: str) -> subprocess.CompletedProcess:
@@ -6318,6 +6378,10 @@ class Pool:
         good, _ = self.deployments()
         self.track_accept(st)  # git and gh reads: outside the lock
         self.track_areas(st)
+        pending = self.book.chore_pending
+        if pending and (len(pending) >= max(1, self.cfg.accept_chore_batch)
+                        or time.time() - min(x["t"] for x in pending) >= self.cfg.accept_chore_every_s):
+            self.flush_chores()  # a full batch, or the hourly one
         with self.lock:
             self.track_live(st)
             self.track_holds(st, now)
