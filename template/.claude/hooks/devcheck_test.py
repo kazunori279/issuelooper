@@ -155,22 +155,44 @@ def test_change_key_ignores_where_the_change_sits() -> None:
           devcheck.change_key(a), devcheck.change_key(blank))
     indented = a.replace("+added", "+    added")
     check("indentation does", devcheck.change_key(a) == devcheck.change_key(indented), False)
-    # Cohort 52, PRs 98 and 101: the same own lines, aligned differently by git once the
-    # base moved (a replaced block shown as two hunks, or one hunk in another order).
-    head = ("diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1,4 +1,4 @@\n-def f():\n+def f(x):\n"
-            "-    return 1\n+    return x\n keep\n@@ -9,2 +9,3 @@\n ctx\n+log()\n" + a)
-    aligned = (a + "diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1,5 +1,6 @@\n-def f():\n-    return 1\n"
-               "+def f(x):\n+log()\n+    return x\n keep\n")
-    check("the same lines, aligned and ordered differently by git: the same key",
-          devcheck.change_key(head), devcheck.change_key(aligned))
-    moved_line = aligned.replace("+log()\n", "").replace("+    return x\n", "+    return x\n+log2()\n")
-    check("a line that really changed: another key", devcheck.change_key(head) == devcheck.change_key(moved_line), False)
-    swapped = aligned.replace("-    return 1\n", "").replace("+    return x\n", "+    return x\n-    return 1\n")
-    check("a removed line still counts as removed, wherever git shows it",
-          devcheck.change_key(head), devcheck.change_key(swapped))
-    flipped = aligned.replace("+log()\n", "-log()\n")
+    # Cohort 52, PR 101: the same own lines, but once the base moved git showed an added
+    # line before a removed block in one diff and after it in the other.
+    hdr = "diff --git a/feed.js b/feed.js\n--- a/feed.js\n+++ b/feed.js\n@@ -1,5 +1,6 @@\n"
+    checked = (hdr + " const card = make();\n+if (!card) return;\n \n-if (narrow()) {\n"
+               "-  place(card);\n+const turn = ensure();\n+turn.push(card);\n")
+    head = (hdr + " const card = make();\n \n-if (narrow()) {\n-  place(card);\n"
+            "+if (!card) return;\n+const turn = ensure();\n+turn.push(card);\n")
+    check("PR 101: an added line on the other side of a removed block: the same key",
+          devcheck.change_key(checked), devcheck.change_key(head))
+    # PR 98: a new method inserted before one with the same closing braces; git put the
+    # two lines of `}` at the start of the added block in one diff and at its end in the
+    # other.
+    hdr = "diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1,6 +1,12 @@\n"
+    checked = (hdr + "   handle(key) {\n    if (key) {\n      this.a();\n+    }\n+  }\n+\n"
+               "+  added(v) {\n+    if (v) {\n+      this.b(v);\n     }\n   }\n")
+    head = (hdr + "   handle(key) {\n    if (key) {\n      this.a();\n     }\n   }\n+\n"
+            "+  added(v) {\n+    if (v) {\n+      this.b(v);\n+    }\n+  }\n")
+    check("PR 98: lines of only brackets aligned elsewhere: the same key",
+          devcheck.change_key(checked), devcheck.change_key(head))
+    # Issue #21: the same lines in another order are another change.
+    prefix = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n-old()\n"
+    check("the same added lines in another order: another key",
+          devcheck.change_key(prefix + "+authorize()\n+transfer_money()\n")
+          == devcheck.change_key(prefix + "+transfer_money()\n+authorize()\n"), False)
+    swapped_removed = "-a()\n-b()\n+c()\n".join(["diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ -1,2 +1 @@\n", ""])
+    check("the same removed lines in another order: another key",
+          devcheck.change_key(swapped_removed)
+          == devcheck.change_key(swapped_removed.replace("-a()\n-b()", "-b()\n-a()")), False)
+    changed = head.replace("+      this.b(v);", "+      this.c(v);")
+    check("a line that really changed: another key",
+          devcheck.change_key(head) == devcheck.change_key(changed), False)
+    flipped = prefix + "+authorize()\n-transfer_money()\n"
     check("adding a line and removing it are different changes",
-          devcheck.change_key(head) == devcheck.change_key(flipped), False)
+          devcheck.change_key(prefix + "+authorize()\n+transfer_money()\n")
+          == devcheck.change_key(flipped), False)
+    moved = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n+authorize()\n-old()\n+transfer_money()\n"
+    check("a removed line shown between two added ones: the same key",
+          devcheck.change_key(prefix + "+authorize()\n+transfer_money()\n"), devcheck.change_key(moved))
 
 
 def test_a_passing_check_writes_its_record() -> None:

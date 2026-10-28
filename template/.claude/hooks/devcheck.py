@@ -138,13 +138,16 @@ def git(root: str, *args: str, stdin: str | None = None) -> str | None:
 
 
 def change_key(diff: str) -> str:
-    """A hash of what a diff changes: each file's name and its added and removed lines,
-    each as a sorted list, so the order git aligns them in does not count. Context
-    lines, line numbers and blob ids are left out, so the same change on a moved base
-    keeps its key; so are blank lines and trailing whitespace, which resolving a rebase
-    conflict adds or drops between two blocks (every Gate 7 hand-back in one run was a
-    single added blank line). In another run git aligned the same lines differently
-    once the base moved (PRs 98 and 101), and the in-order key handed both back."""
+    """A hash of what a diff changes: each file's name, its added lines in file order,
+    then its removed lines in file order. Context lines, line numbers, blob ids and hunk
+    boundaries are left out, and so is how git interleaves additions with removals, so
+    the same change on a moved base keeps its key (cohort 52, PR 101: an added line shown
+    before a removed block, then after it). So are blank lines and trailing whitespace,
+    which resolving a rebase conflict adds or drops between two blocks (every Gate 7
+    hand-back in one run was a single added blank line), and lines of only brackets and
+    punctuation, which git aligns to either end of a block (PR 98: two lines of `}`).
+    The order of the lines that remain counts: calling authorize() then transfer() is
+    another change from the reverse (issue #21)."""
     files: dict[str, tuple[list[str], list[str]]] = {}
     cur = None
     for ln in diff.splitlines():
@@ -152,13 +155,16 @@ def change_key(diff: str) -> str:
             cur = files.setdefault(ln, ([], []))
         elif ln.startswith(("+++", "---")) or cur is None:
             continue
-        elif ln.startswith(("+", "-")) and ln[1:].strip():
+        elif ln.startswith(("+", "-")) and not _PUNCT_ONLY.fullmatch(ln[1:]):
             cur[ln[0] == "-"].append(ln.rstrip())
     keep = []
     for name in sorted(files):
         added, removed = files[name]
-        keep += [name, *sorted(added), *sorted(removed)]
+        keep += [name, *added, *removed]
     return hashlib.sha256("\n".join(keep).encode()).hexdigest()[:20]
+
+
+_PUNCT_ONLY = re.compile(r"[\s{}()\[\];,]*")
 
 
 def branch_key(root: str, base: str, head: str) -> str | None:
