@@ -153,8 +153,11 @@ model quota error is resumed in the same conversation up to POOL_QUOTA_RESUMES
 times, each after a wait that doubles from POOL_QUOTA_WAIT_S up to
 POOL_QUOTA_WAIT_MAX_S; one that still ends on it is "quota error": no try spent and
 the claim released without a failed attempt. Every quota error also holds new
-agent sessions pool-wide for a doubling pause (quota_seen), reset when a session
-ends ok. While the CLI itself retries a failed model call inside a turn (agy: the
+agent sessions of its quota group for a doubling pause (quota_seen), reset when a
+session of the group ends ok. A role's quota group is its CLI and model
+(`agy/gemini-3.8-pro`), or the [agents.quota_groups] group (POOL_QUOTA_GROUPS) its model
+is in; a role with no model set is in the group `*`, whose pause holds every group and
+which waits for any group's pause (with no model set anywhere, one pool-wide pause). While the CLI itself retries a failed model call inside a turn (agy: the
 stream's last event is an error_message step), the session's clocks (timeout,
 wrap-up, stall) stand still, up to POOL_RETRY_PAUSE_MAX_S per session. Whatever
 paused, a session is killed at POOL_TIMEOUT_CEILING (1.5) times its timeout of wall
@@ -372,6 +375,25 @@ def ux_gap_s() -> float:
 DEPLOY_LOCK_PAUSE_S = 5  # deploy() retries a ref-lock failure after 5 s, then 10 s
 
 
+QUOTA_ANY = "*"  # the quota group of a role whose model is not known: every group's
+
+
+def quota_group(role: str, cfg: "Config", env=None) -> str:
+    """The quota a role's sessions draw on: the [agents.quota_groups] group its model (or
+    "<cli>/<model>") matches, else "<cli>/<model>". QUOTA_ANY when the model is not set,
+    since the CLI's default may be any group's model."""
+    try:
+        cli, model = agent_cli.cli_for(role, env), agent_cli.model_for(role, env)
+    except Exception:  # noqa: BLE001 - an unreadable setting: the conservative group
+        return QUOTA_ANY
+    if not cli or not model:
+        return QUOTA_ANY
+    for group, globs in (cfg.quota_groups or {}).items():
+        if any(fnmatch.fnmatchcase(model, g) or fnmatch.fnmatchcase(f"{cli}/{model}", g) for g in globs):
+            return group
+    return f"{cli}/{model}"
+
+
 def quota_backoff(k: int, base: float, cap: float) -> float:
     """The wait before the k-th (1-based) resume after a quota error: base, 2x, 4x ..., capped."""
     return min(cap, base * 2 ** max(0, k - 1))
@@ -433,6 +455,9 @@ class Config:
     # The CLI's own retries of a quota error inside a turn (agy's record of them) pause new
     # sessions pool-wide, as a quota error that ends a turn does (Pool.quota_seen).
     inturn_quota: bool = True
+    # [agents.quota_groups] (config.quota_groups): {group: [model globs]}, models that share
+    # one quota, so a quota error of one pauses the others (quota_group).
+    quota_groups: dict = dataclasses.field(default_factory=dict)
     transient_resumes: int = 2  # resumes after a turn the CLI ended on a retryable error
     # Wall clock a session may run, as a multiple of its timeout, whatever paused its
     # clocks: a merger with 25 minutes of paused clocks ran 52 minutes on a 45-minute
@@ -659,6 +684,7 @@ class Config:
             kill_leftovers=env_flag("POOL_KILL_LEFTOVERS", True),
             retry_pause_max_s=float(e("POOL_RETRY_PAUSE_MAX_S", "") or 2400),
             inturn_quota=env_flag("POOL_INTURN_QUOTA", True),
+            quota_groups=config.quota_groups(),
             transient_resumes=env_int("POOL_TRANSIENT_RESUMES", 2),
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             quota_extend_max_s=float(e("POOL_QUOTA_EXTEND_MAX_S", "") or 1800),
@@ -1085,6 +1111,15 @@ def busy_convs(units) -> set:
 class Book:
     """What the supervisor has started and how it ended."""
 
+    def quota_paused(self, group: str, now: float) -> float:
+        """Until when new sessions of this quota group wait (0: they do not). A pause of
+        QUOTA_ANY holds every group, and QUOTA_ANY waits for any group's pause."""
+        if group == QUOTA_ANY:
+            until = max(self.quota_until.values(), default=0.0)
+        else:
+            until = max(self.quota_until.get(group, 0.0), self.quota_until.get(QUOTA_ANY, 0.0))
+        return until if until > now else 0.0
+
     def __init__(self):
         self.running: dict[str, Unit] = {}  # family -> unit
         self.started_at: dict[str, float] = {}  # unit key -> when it started (the hot-file hold's cap)
@@ -1150,8 +1185,10 @@ class Book:
         # still shows stage:pr, and PR #131 was merged again 2 s later on the same head.
         self.handed_back: dict[int, list] = {}
         self.paused: dict[str, float] = {}  # role -> until (crash breaker)
-        self.quota_until = 0.0  # no new agent sessions before this (model quota errors)
-        self.quota_streak = 0  # pauses in a row without a session ending ok
+        self.quota_until: dict[str, float] = {}  # quota group -> no new sessions of it before this
+        self.quota_streak: collections.Counter = collections.Counter()  # group -> pauses in a row, none ending ok
+        self.quota_hits: collections.Counter = collections.Counter()  # group -> quota errors seen (paused or not)
+        self.quota_paused_s: collections.Counter = collections.Counter()  # group -> seconds of pauses started
         self.live_entry: dict[int, str] = {}  # issue -> updatedAt when it entered stage:live
         self.missing: list[str] = []  # required files gone from the shared checkout (Pool.check_files)
         self.holds: dict[int, float] = {}  # issue -> when hold:monitor was first seen on it
@@ -1736,7 +1773,7 @@ def admit(due: list[Unit], book: Book, cfg: Config, now: float) -> list[Unit]:
     for u in due:
         if book.paused.get(u.role, 0) > now:
             continue
-        if u.role != "auto" and book.quota_until > now:
+        if u.role != "auto" and book.quota_paused(quota_group(u.role, cfg), now):
             continue
         if u.role == "auto":
             if cfg.auto_cap and counts["auto"] >= cfg.auto_cap:
@@ -2695,6 +2732,7 @@ class Session(threading.Thread):
             self.cli = agent_cli.for_role(unit.role)
         except ValueError:  # session() names the bad setting when it starts
             self.cli = agent_cli.get(agent_cli.DEFAULT)
+        self.quota_group = quota_group(unit.role, pool.cfg)  # session() sets it from its env
 
     def run(self):
         try:
@@ -2723,6 +2761,7 @@ class Session(threading.Thread):
         role = self.unit.role
         timeout = self.timeout()
         cli = self.cli = agent_cli.for_role(role, env)
+        self.quota_group = quota_group(role, cfg, env)
         (self.dir / "prompt.txt").write_text(prompt)
         env = dict(
             env,
@@ -2833,8 +2872,9 @@ class Session(threading.Thread):
                         hits, self.quota_idx = self.cli.inturn_quota(self.conversation(), self.quota_idx)
                         if hits:
                             self.inturn_hits += hits
-                            self.pool.quota_seen(role, inturn=True)
-                    pool_paused = not retrying and self.pool.book.quota_until > now
+                            self.pool.quota_seen(role, inturn=True, group=self.quota_group)
+                    # Only its own group's pause: a 429 of another model's quota stops nothing here.
+                    pool_paused = not retrying and bool(self.pool.book.quota_paused(self.quota_group, now))
                     if retrying or (pool_paused and paused < cfg.retry_pause_max_s):
                         add = min(step, cfg.retry_pause_max_s - paused)
                         paused += add
@@ -2941,7 +2981,7 @@ class Session(threading.Thread):
                     conv = self.quota_stalled(quiet=wait)
                     if conv and quota_k < cfg.quota_resumes and min(hard, ceiling) - time.time() > 120:
                         quota_k += 1
-                        self.pool.quota_seen(role)
+                        self.pool.quota_seen(role, group=self.quota_group)
                         resume(conv, f"stalled while alive, quota resume {quota_k} after {wait:.0f} s")
                     continue
                 # The CLI exited. After a quota error it usually does, so also resume here
@@ -2969,7 +3009,7 @@ class Session(threading.Thread):
                     conv = None
                 if conv and quota_k < cfg.quota_resumes and not self.work_done():
                     wait = quota_backoff(quota_k + 1, cfg.quota_wait_s, cfg.quota_wait_max_s)
-                    self.pool.quota_seen(role)
+                    self.pool.quota_seen(role, group=self.quota_group)
                     if time.time() + wait < min(hard, ceiling) - 120:
                         quota_k += 1
                         with open(self.dir / "resumes.log", "a") as rl:
@@ -4549,26 +4589,42 @@ class Pool:
             w.start()
         return w
 
-    def quota_seen(self, role: str, inturn: bool = False) -> None:
-        """A session hit a model quota error: hold new agent sessions, for a time that
-        doubles with each pause in a row (reset when a session ends ok). inturn: the CLI
-        retries it inside a running turn (it did not end the turn)."""
+    def quota_seen(self, role: str, inturn: bool = False, group: str | None = None) -> None:
+        """A session hit a model quota error: hold new agent sessions of its quota group
+        (quota_group; every session for QUOTA_ANY), for a time that doubles with each
+        pause in a row (reset when a session of the group ends ok). inturn: the CLI retries
+        it inside a running turn (it did not end the turn)."""
         now = self.clock()
+        group = group or quota_group(role, self.cfg)
         with self.lock:
             b = self.book
-            if b.quota_until > now:
+            b.quota_hits[group] += 1
+            if b.quota_until.get(group, 0.0) > now:
                 return
-            b.quota_streak += 1
-            wait = quota_backoff(b.quota_streak, self.cfg.quota_wait_s, self.cfg.quota_wait_max_s)
-            b.quota_until = now + wait
+            b.quota_streak[group] += 1
+            streak = b.quota_streak[group]
+            wait = quota_backoff(streak, self.cfg.quota_wait_s, self.cfg.quota_wait_max_s)
+            b.quota_until[group] = now + wait
+            b.quota_paused_s[group] += wait
+            which = "agent sessions" if group == QUOTA_ANY else f"{group} sessions"
             self.events.append(
-                f"model quota errors ({role} session{', retried inside its turn' if inturn else ''}): no new agent "
-                f"sessions for {wait:.0f} s (pause {b.quota_streak} in a row); running sessions wait and resume"
+                f"model quota errors ({role} session{', retried inside its turn' if inturn else ''}): no new {which} "
+                f"for {wait:.0f} s (pause {streak} in a row); running sessions wait and resume"
             )
-        self.log("quota_pause", role=role, seconds=wait, streak=b.quota_streak, inturn=inturn)
+        self.log("quota_pause", role=role, group=group, seconds=wait, streak=streak, inturn=inturn)
+
+    def quota_state(self, now: float) -> dict:
+        """For state.json, per quota group that has hit its quota: the end of its pause (0:
+        not paused now), the pauses in a row, the quota errors seen, the seconds of pause."""
+        with self.lock:
+            b = self.book
+            return {g: {"until": round(t, 1) if t > now else 0, "streak": b.quota_streak[g],
+                        "hits": b.quota_hits[g], "paused_s": round(b.quota_paused_s[g])}
+                    for g, t in b.quota_until.items()}
 
     def finished(self, w: Session, outcome: str):
         u, now = w.unit, self.clock()
+        group = getattr(w, "quota_group", "") or quota_group(u.role, self.cfg)
         with self.lock:
             b = self.book
             b.running.pop(u.family, None)
@@ -4581,7 +4637,7 @@ class Pool:
                 if u.kind == "live":
                     b.clean.add(u.info["base"])  # this entry into stage:live is checked
             if outcome == "ok" and u.role != "auto":
-                b.quota_streak = 0
+                b.quota_streak[group] = 0
             if outcome == "ok":
                 # Only failures count toward POOL_FAMILY_MAX: a merged PR that a live check
                 # or a reopen sends back is progress, not a loop.
@@ -4652,7 +4708,7 @@ class Pool:
                     f"{u.role} session {w.seq} on {u.kind} {self.label(u)} {outcome} (log {w.dir})"
                 )
         if outcome.startswith("quota error"):
-            self.quota_seen(u.role)
+            self.quota_seen(u.role, group=group)
         if u.role == "worker":
             self.record_conv(w)
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
@@ -6807,12 +6863,13 @@ class Pool:
             "due_not_started": [u.key for u in due if u not in started],
             "stuck": [u.key for u in stuck],
             "paused": self.book.paused,
+            "quota": self.quota_state(now),
             "queue": queue_snapshot(st),
             "sessions": [
                 {"seq": w.seq, "role": w.unit.role, "kind": w.unit.kind, "number": w.unit.number,
                  "unit": w.unit.key, "started": w.started, "dir": str(w.dir),
                  "timeout_s": seconds(w.timeout()) if w.unit.role in self.cfg.timeouts else 0,
-                 "cli": w.cli.name}
+                 "cli": w.cli.name, "quota_group": w.quota_group}
                 for w in list(self.sessions.values())
             ],
             "feed_pending": len(self.events),

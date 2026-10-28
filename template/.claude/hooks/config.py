@@ -245,6 +245,11 @@ def env_from(cfg: dict) -> tuple[dict[str, str], list[str]]:
             if table == "areas" and isinstance(v, dict):
                 areas[key] = v
                 continue
+            if table == "agents" and key == "quota_groups" and isinstance(v, dict):
+                out["POOL_QUOTA_GROUPS"] = json.dumps(
+                    {str(g): [str(x) for x in (p if isinstance(p, list) else [p])] for g, p in v.items()},
+                    ensure_ascii=False)
+                continue
             if table == "agents" and isinstance(v, dict):
                 if key not in ROLES:
                     unknown.append(f"agents.{key}")
@@ -331,6 +336,17 @@ def areas() -> list[dict]:
         if paths:
             out.append({"name": str(name), "paths": paths, "hot": hot, "words": words, "ids": ids})
     return out
+
+
+def quota_groups() -> dict[str, list[str]]:
+    """[agents.quota_groups] ($POOL_QUOTA_GROUPS): {group: [model globs]}, models that share
+    one quota. A glob matches the model name or "<cli>/<model>". {} = none."""
+    try:
+        raw = json.loads(os.environ.get("POOL_QUOTA_GROUPS") or "{}")
+    except ValueError:
+        return {}
+    return {str(g): [str(x) for x in p if str(x).strip()] for g, p in raw.items()
+            if isinstance(p, list)} if isinstance(raw, dict) else {}
 
 
 def area_shared() -> list[str]:

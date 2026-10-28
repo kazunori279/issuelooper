@@ -15,6 +15,13 @@ model = ""                   # CCROLE_MODEL: the model for every role; empty = t
 # [agents.reviewer]
 # model = "..."
 
+# A model quota error pauses new sessions of its quota group: by default the role's CLI and
+# model ("agy/gemini-3.8-pro"). Models that draw on one quota go in one group here (globs
+# match the model or "<cli>/<model>"). A role with no model set pauses, and is paused by,
+# every group (POOL_QUOTA_GROUPS).
+# [agents.quota_groups]
+# vertex-gemini = ["gemini-3.8-*", "gemini-4-*"]
+
 [monitor]
 host = "herdr"               # POOL_MONITOR_HOST: "herdr" (the monitor and aides in herdr panes you talk to)
                              # or "broker" (a headless monitor reached with `issuelooper say`)

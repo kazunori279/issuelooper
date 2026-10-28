@@ -334,6 +334,20 @@ def test_ownership_lines() -> None:
     check("all off: nothing", dm.ownership_lines({}), [])
 
 
+def test_quota_pauses_per_group() -> None:
+    """Issue #24: quota pauses are per quota group; one from before groups is pool-wide."""
+    run = pathlib.Path(tempfile.mkdtemp(prefix="dash-quota-"))
+    log = [{"t": NOW - 100, "kind": "quota_pause", "role": "worker", "group": "agy/gemini-3.8-pro", "seconds": 400},
+           {"t": NOW - 50, "kind": "quota_pause", "role": "tester", "group": "claude/sonnet", "seconds": 20}]
+    h = dm.health(run, {}, log, {}, NOW)
+    check("only the group still paused, with its time left; the longest is the headline",
+          (h["quota_pauses"], h["quota_pause_s"], dm.quota_groups_text(h)),
+          ({"agy/gemini-3.8-pro": 300.0}, 300.0, f" (agy/gemini-3.8-pro {dm.ago(300.0)})"))
+    h = dm.health(run, {}, [{"t": NOW - 10, "kind": "quota_pause", "role": "worker", "seconds": 60}], {}, NOW)
+    check("a pause with no group is the pool-wide one, named as before",
+          (h["quota_pauses"], dm.quota_groups_text(h)), ({"*": 50.0}, ""))
+
+
 def test_empty_run_dir() -> None:
     run = pathlib.Path(tempfile.mkdtemp(prefix="dash-empty-"))
     os.environ.update(POOL_LOGDIR=str(run / "pool"), REVIEW_DIR=str(run / "none"))

@@ -3065,16 +3065,77 @@ def test_quota_backoff_and_pause() -> None:
     first = h.step()
     check("two workers start", sorted(u.number for u in first), [1, 2])
     h.finish(first[0].key, "quota error (exit 3)")
-    check("a quota error pauses new agent sessions", h.pool.book.quota_until, h.now + 60)
+    group = ccpool.quota_group("worker", h.pool.cfg)
+    check("a quota error pauses new agent sessions", h.pool.book.quota_paused(group, h.now), h.now + 60)
     check("and spends no try", h.pool.book.tries[first[0].key], 0)
     check("nothing starts during the pause", h.step(30), [])
     again = h.step(31)
     check("the unit is due again after it", [u.number for u in again], [first[0].number])
     h.finish(again[0].key, "quota error (exit 3)")
-    check("the next pause in a row is twice as long", h.pool.book.quota_until, h.now + 120)
+    check("the next pause in a row is twice as long", h.pool.book.quota_paused(group, h.now), h.now + 120)
     check("the monitor hears each pause once", sum("no new agent sessions" in e for e in h.pool.events), 2)
     h.finish(first[1].key, "ok")
-    check("a session that ends ok resets the streak", h.pool.book.quota_streak, 0)
+    check("a session that ends ok resets the streak", h.pool.book.quota_streak[group], 0)
+
+
+def test_quota_pauses_per_quota_group() -> None:
+    """Issue #24: one 429 paused every agent session, whatever model or provider it used."""
+    env = {"CCROLE_WORKER_CLI": "agy", "CCROLE_MODEL_WORKER": "gemini-3.8-pro",
+           "CCROLE_MERGER_CLI": "agy", "CCROLE_MODEL_MERGER": "gemini-4-flash",
+           "CCROLE_TESTER_CLI": "claude", "CCROLE_MODEL_TESTER": "claude-sonnet-5",
+           "CCROLE_MODEL_MONITOR": "", "CCROLE_MODEL": ""}
+    restore = with_env(env)
+    try:
+        plain = ccpool.Config(logdir=pathlib.Path(tempfile.mkdtemp()) / "pool")
+        check("the default group is the role's CLI and model; no model set: the pool-wide group",
+              [ccpool.quota_group(r, plain) for r in ("worker", "merger", "tester", "monitor")],
+              ["agy/gemini-3.8-pro", "agy/gemini-4-flash", "claude/claude-sonnet-5", "*"])
+        shared = ccpool.Config(logdir=plain.logdir, quota_groups={"vertex-gemini": ["gemini-3.8-*", "agy/gemini-4-*"]})
+        check("[agents.quota_groups] puts models that share a quota in one group (by model or cli/model)",
+              [ccpool.quota_group(r, shared) for r in ("worker", "merger", "tester")],
+              ["vertex-gemini", "vertex-gemini", "claude/claude-sonnet-5"])
+        os.environ["POOL_QUOTA_GROUPS"] = json.dumps({"vertex-gemini": ["gemini-3.8-*"]})
+        check("read from the environment the config file sets", ccpool.config.quota_groups(),
+              {"vertex-gemini": ["gemini-3.8-*"]})
+        os.environ.pop("POOL_QUOTA_GROUPS")
+
+        h = Rig(state(), quota_groups={"vertex-gemini": ["gemini-3.8-*", "gemini-4-*"]},
+                quota_wait_s=60, quota_wait_max_s=900)
+        units = {r: ccpool.Unit(r, "x", f"{r}:1", f"{r}-f", 1, (1,), {}) for r in ("worker", "merger", "tester", "monitor")}
+
+        def admitted(t):
+            return sorted(u.role for u in ccpool.admit(list(units.values()), h.pool.book, h.pool.cfg, t))
+        check("nothing paused: all start", admitted(h.now), ["merger", "monitor", "tester", "worker"])
+        h.pool.quota_seen("worker")
+        check("a 429 in one group: its roles wait together, another provider's group goes on, and a role "
+              "whose model is not known waits too", admitted(h.now), ["tester"])
+        check("the monitor hears which group", any("no new vertex-gemini sessions for 60 s" in e for e in h.pool.events),
+              True)
+        h.pool.quota_seen("merger", inturn=True)
+        check("a second 429 of the group during its pause does not extend it",
+              h.pool.book.quota_paused("vertex-gemini", h.now), h.now + 60)
+        check("after the pause all start again", admitted(h.now + 61), ["merger", "monitor", "tester", "worker"])
+        h.now += 61
+        h.pool.quota_seen("merger")
+        check("the next pause in a row of the group is twice as long, the other group's streak untouched",
+              (h.pool.book.quota_paused("vertex-gemini", h.now), h.pool.book.quota_streak["claude/claude-sonnet-5"]),
+              (h.now + 120, 0))
+        check("state.json's view of it: 429s seen (also during a pause), pause time, streak",
+              h.pool.quota_state(h.now), {"vertex-gemini": {"until": h.now + 120, "streak": 2, "hits": 3, "paused_s": 180}})
+        h.pool.quota_seen("tester")
+        check("each group pauses on its own",
+              {g: v["until"] > 0 for g, v in h.pool.quota_state(h.now).items()},
+              {"claude/claude-sonnet-5": True, "vertex-gemini": True})
+        w = ccpool.Session(h.pool, units["worker"], 1)
+        h.pool.finished(w, "ok")
+        check("a session of the group that ends ok resets its streak, not the other's",
+              (h.pool.book.quota_streak["vertex-gemini"], h.pool.book.quota_streak["claude/claude-sonnet-5"]), (0, 1))
+        h.now += 200
+        h.pool.quota_seen("monitor")
+        check("a 429 of a role whose model is not known pauses every group, as before groups",
+              admitted(h.now), [])
+    finally:
+        restore()
 
 
 ALLOW = '{"decision": "allow"}'
@@ -4831,7 +4892,7 @@ def test_inturn_quota_pauses_the_pool_and_a_retryable_error_resumes() -> None:
     calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
     log = (d / "pool" / "pool.jsonl").read_text()
     check("an in-turn quota retry pauses new sessions pool-wide",
-          (w.inturn_hits, pool.book.quota_until > 0, '"inturn": true' in log), (1, True, True))
+          (w.inturn_hits, bool(pool.book.quota_until), '"inturn": true' in log), (1, True, True))
     check("a retryable error is resumed in the same conversation, and the session ends ok",
           (rc, timed_out, len(calls), calls[-1][-2:]), (0, False, 2, ["--conversation", "conv-t"]))
     v = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:7@x", "wrk:7", 7, (4,), {}), 2)
@@ -4932,7 +4993,7 @@ def test_quota_time_moves_the_deadlines_and_is_no_failure() -> None:
                                      timeout_ceiling=1.5, stall_s=0, quota_extend_max_s=10,
                                      caps={r: 0 for r in ccpool.ROLES}, kill_leftovers=False),
                        fetcher=state, spawn=False)
-    pool.book.quota_until = time.time() + 3600  # the pool is paused for quota all along
+    pool.book.quota_until[ccpool.QUOTA_ANY] = time.time() + 3600  # the pool is paused for quota all along
     t0 = time.time()
     w = pool.start(ccpool.Unit("tester", "ux", "ux:q", "tst:ux:q", None, (2,), {"sha": "a" * 40}))
     outcome = w.work()
@@ -4944,6 +5005,29 @@ def test_quota_time_moves_the_deadlines_and_is_no_failure() -> None:
     check("the pause is logged with its parts", "while the pool was paused" in (w.dir / "resumes.log").read_text(), True)
     pool.finished(w, outcome)
     check("and its key is due again (no try spent)", pool.book.tries["ux:q"], 0)
+
+
+def test_another_groups_quota_pause_leaves_a_sessions_clocks_running() -> None:
+    """Issue #24: a session's clocks stand still only for its own quota group's pause."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-quotagroup-"))
+    agent = d / "ccrole"
+    agent.write_text("#!/bin/sh\nfor i in $(seq 120); do echo '{\"event\": \"step_update\"}'; sleep 1; done\n")
+    agent.chmod(0o755)
+    restore = with_env({"CCROLE_TESTER_CLI": "claude", "CCROLE_MODEL_TESTER": "claude-sonnet-5"})
+    try:
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agent), render="cat", timeouts={"tester": "4s"},
+                                         timeout_ceiling=1.5, stall_s=0, quota_extend_max_s=10,
+                                         caps={r: 0 for r in ccpool.ROLES}, kill_leftovers=False),
+                           fetcher=state, spawn=False)
+        pool.book.quota_until["agy/gemini-3.8-pro"] = time.time() + 3600  # another provider's quota
+        t0 = time.time()
+        w = pool.start(ccpool.Unit("tester", "ux", "ux:g", "tst:ux:g", None, (2,), {"sha": "a" * 40}))
+        outcome = w.work()
+        took = time.time() - t0
+    finally:
+        restore()
+    check("its clocks ran on: killed at the first tick past the ceiling, an ordinary timeout",
+          (w.quota_group, took < 25, outcome.startswith("timed out after 4s")), ("claude/claude-sonnet-5", True, True))
 
 
 def git_repo(d: pathlib.Path):

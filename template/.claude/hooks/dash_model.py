@@ -257,14 +257,26 @@ def load(
     return model
 
 
+def quota_groups_text(h: dict) -> str:
+    """" (agy/gemini-3.8-pro 4m)" for the quota groups paused now, unless only the pool-wide one."""
+    pauses = h.get("quota_pauses") or {}
+    if not pauses or list(pauses) == ["*"]:
+        return ""
+    return " (" + ", ".join(f"{g} {ago(s)}" for g, s in sorted(pauses.items())) + ")"
+
+
 def health(
     run: pathlib.Path, state: dict, log: list[dict], mon: dict, now: float
 ) -> dict:
     paused = {
         r: until for r, until in (state.get("paused") or {}).items() if until > now
     }
-    quota = [r for r in log if r.get("kind") == "quota_pause"]
-    q_until = (quota[-1]["t"] + float(quota[-1].get("seconds") or 0)) if quota else 0
+    # Each quota group's latest pause (a line with no group is from before groups: "*").
+    q_until: dict[str, float] = {}
+    for r in log:
+        if r.get("kind") == "quota_pause":
+            q_until[str(r.get("group") or "*")] = r["t"] + float(r.get("seconds") or 0)
+    quota = {g: t - now for g, t in q_until.items() if t > now}
     deploys = [r for r in log if r.get("kind") in ("deployed", "deploy_failed")]
     return {
         "supervisor": alive(run / "pool.pid"),
@@ -274,7 +286,8 @@ def health(
         "deployed_ago_s": (now - deploys[-1]["t"])
         if deploys and deploys[-1]["kind"] == "deployed"
         else None,
-        "quota_pause_s": max(0.0, q_until - now),
+        "quota_pause_s": max(quota.values(), default=0.0),
+        "quota_pauses": quota,  # quota group -> seconds left of its pause
         "paused_roles": paused,
         "monitor": mon.get("state", "gone"),
         # the supervisor's last full check of origin/main: {sha, ok, t, failing}
@@ -468,7 +481,8 @@ def describe(r: dict) -> str | None:
     if k == "handback":
         return f"PR #{r.get('pr')} (#{r.get('issue')}) handed back by {r.get('by')}: {r.get('reason')}"
     if k == "quota_pause":
-        return f"quota error from a {r.get('role')}: new sessions paused {ago(r.get('seconds'))}"
+        which = "" if (r.get("group") or "*") == "*" else f" {r.get('group')}"
+        return f"quota error from a {r.get('role')}: new{which} sessions paused {ago(r.get('seconds'))}"
     if k in ("deployed", "deploy_failed", "deploy"):
         return f"{k.replace('_', ' ')} {r.get('sha', '')}"
     if k == "feed":
@@ -594,7 +608,8 @@ def attention(m: dict, state: dict, log: list[dict], now: float) -> list[dict]:
     if h["quota_pause_s"] > 0:
         add(
             "yellow",
-            f"Model quota errors: new sessions paused for {ago(h['quota_pause_s'])}.",
+            f"Model quota errors: new sessions paused for {ago(h['quota_pause_s'])}"
+            + quota_groups_text(h) + ".",
             "Wait, or check quota",
         )
     for role, until in h["paused_roles"].items():
@@ -662,7 +677,7 @@ def text(m: dict, width: int = 100) -> str:
         f"monitor {h['monitor']} · main {h['main'][:8]}"
         + main_check_text(h["main_check"])
         + (f" · deployed {h['deployed'][:8]}" if h["deployed"] else "")
-        + (f" · QUOTA PAUSE {ago(h['quota_pause_s'])}" if h["quota_pause_s"] else ""),
+        + (f" · QUOTA PAUSE {ago(h['quota_pause_s'])}{quota_groups_text(h)}" if h["quota_pause_s"] else ""),
         "",
     ]
     if m["attention"]:

@@ -98,7 +98,7 @@ def header(m: dict) -> str:
             f'deployed <code>{esc(h["deployed"][:8])}</code> <span class="dim">{dm.ago(h["deployed_ago_s"])} ago</span>'
         )
     if h["quota_pause_s"]:
-        items.append(f'<b class="warn">quota pause {dm.ago(h["quota_pause_s"])}</b>')
+        items.append(f'<b class="warn">quota pause {dm.ago(h["quota_pause_s"])}{esc(dm.quota_groups_text(h))}</b>')
     return '<div class="bar">' + "".join(f"<span>{x}</span>" for x in items) + "</div>"
 
 

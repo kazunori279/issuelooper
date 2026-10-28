@@ -251,8 +251,10 @@ finished is ended `POOL_UNSEEN_IDLE_S` after the last step, once nothing it star
 in its scratch paths is still working), and a session's clocks stand still while the agent CLI retries a failed model
 call (agy), up to a hard ceiling of 1.5 times its timeout (`POOL_TIMEOUT_CEILING`); quota
 errors agy retries inside a turn (read from its conversation record) pause new sessions
-pool-wide, and while the pool is paused for quota every running session's clocks stand
-still too (its ceiling moves by up to `POOL_QUOTA_EXTEND_MAX_S`); a session that times out
+of that quota group, and while a group is paused for quota its running sessions' clocks stand
+still too (its ceiling moves by up to `POOL_QUOTA_EXTEND_MAX_S`). A role's quota group is its
+CLI and model, or a group named in `[agents.quota_groups]`; a role with no model set shares
+one pool-wide pause with every group, as all roles do when no model is set. A session that times out
 mostly in quota waits is no failed attempt. A turn agy ends on an error it calls retryable is
 resumed, not counted as a failure, and an acceptance unit's posted verdicts settle however
 its session ended. A UX report's first line stays `Score: provisional`, which is not logged,

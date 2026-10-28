@@ -38,6 +38,8 @@ cli = "claude"
 model = "big-model"
 [agents.monitor]
 cli = "agy"
+[agents.quota_groups]
+vertex-gemini = ["gemini-3.8-*", "gemini-4-*"]
 [sweep]
 command = "make verify"
 slots = 2
@@ -70,6 +72,8 @@ with tempfile.TemporaryDirectory() as d:
     check("cli", values.get("CCROLE_CLI"), "claude")
     check("role model", values.get("CCROLE_MODEL_TESTER"), "big-model")
     check("role cli", values.get("CCROLE_MONITOR_CLI"), "agy")
+    check("quota groups", json.loads(values.get("POOL_QUOTA_GROUPS") or "{}"),
+          {"vertex-gemini": ["gemini-3.8-*", "gemini-4-*"]})
     check("int", values.get("SWEEP_SLOTS"), "2")
     check("main check off", values.get("POOL_MAIN_CHECK"), "0")
     check("journeys", values.get("POOL_UX_JOURNEYS"), "ux/journeys.py")
