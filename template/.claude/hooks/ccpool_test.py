@@ -5349,9 +5349,10 @@ def test_a_test_main_does_not_have_is_the_prs_not_mains() -> None:
         t.where = lambda wt: ",".join(sorted(p.name for p in pathlib.Path(wt).iterdir() if p.name in ("pr1", "newt")))
         t.pool.sweep_tree, t.pool.rerun_tests = sweep, rerun
         t.pool.run_train()
-        check("not found on main is not failing on main: no red main, the PR that adds the test goes back",
+        check("not found on main is not failing on main: no red main, the PR that adds the test goes back, and the "
+              "one ahead merges after its own full check (which is main's: green)",
               (t.pool.main_check_last.get("ok"), [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")],
-               "pr comment 12" in (t.d / "gh.log").read_text()), (None, ["11"], True))
+               "pr comment 12" in (t.d / "gh.log").read_text()), (True, ["11"], True))
     finally:
         t.close()
 
