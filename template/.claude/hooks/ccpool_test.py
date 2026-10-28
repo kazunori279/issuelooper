@@ -1462,14 +1462,14 @@ def test_long_dependency_waits_are_pointed_out() -> None:
     check("a new wait: nothing said", [e for e in h.pool.events if "open blocker" in e], [])
     h.step(3600)
     said = [e for e in h.pool.events if "open blocker" in e]
-    check("an hour later the monitor is told once, about the P1 only",
-          [e.split(" has")[0] for e in said], ["#238 (P1)"])
+    check("an hour later the monitor is told once about each, P2 too (cohort 60: most of 40 blocked issues were P2)",
+          [e.split(" has")[0] for e in said], ["#238 (P1)", "#240 (P2)"])
     h.step(600)
-    check("once", sum("open blocker" in e for e in h.pool.events), 1)
-    check("and every update lists it", "P0/P1 issues blocked over 60 min: #238 (70 min)" in h.pool.summary(h.st), True)
+    check("once", sum("open blocker" in e for e in h.pool.events), 2)
+    check("and every update lists it", "Issues blocked over 60 min: #238 (70 min)" in h.pool.summary(h.st), True)
     h.st = state([iss(238, ["stage:triage", "P1"]), low])
     h.step()
-    check("an unblocked issue is forgotten", sorted(h.pool.book.blocked), [])
+    check("an unblocked issue is forgotten", sorted(h.pool.book.blocked), [240])
 
 
 def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
@@ -2707,6 +2707,39 @@ def test_guards_the_train_blames_go_back_to_the_author() -> None:
                         "FAILED tests/e2e/test_main.py::a\nFAILED tests/accept/test_accept_12.py::t")
     check("a train whose failures fail on main only in part blames the PR for the rest, and says which are main's",
           calls, {"failing": ["tests/accept/test_accept_12.py::t"], "on_main": ["tests/e2e/test_main.py::a"]})
+
+
+def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
+    """Cohort 60: 236 monitor-added edges blocked up to 40 issues (337 issue-hours) while 6-9
+    of 50 workers ran; hot-file waits had a median of 34 min and a p90 of 5 h."""
+    blocked = [iss(n, ["stage:triage", "P2"], body="Blocked by: #1") for n in range(10, 19)]
+    h = Rig(state([iss(1, ["stage:triage", "P2"]), iss(2, ["stage:triage", "P2"])] + blocked), edge_flag_at=8)
+    h.step()
+    h.st = state([iss(1, ["stage:triage", "P2"]), iss(2, ["stage:triage", "P2"], body="Blocked by: #1")] + blocked)
+    h.step()
+    check("a new edge on an unbuilt blocker, with 8+ issues blocked already: the monitor is asked to justify it",
+          [e[:40] for e in h.pool.events if e.startswith("new dependency")], ["new dependency: #2 now waits on #1, whic"])
+    h = Rig(state([iss(41, ["stage:triage", "P2"]), iss(42, ["stage:triage", "P2"])]), areas=AREAS,
+            area_hot_hold_max_s=1800, global_cap=8)
+    h.pool.track_areas = lambda st: None
+    h.pool.book.issue_area, h.pool.book.issue_files = {41: "live", 42: "live"}, {41: ["src/live.py"], 42: ["src/live.py"]}
+    first = h.step()
+    check("one session holds the hot file", [u.number for u in first], [41])
+    h.st = state([iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)])
+    check("once its PR is open, the hot file is free (not until the merge)", [u.number for u in h.step()], [42])
+    h2 = Rig(state([iss(41, ["stage:triage", "P2"]), iss(42, ["stage:triage", "P2"])]), areas=AREAS,
+             area_hot_hold_max_s=1800, global_cap=8)
+    h2.pool.track_areas = lambda st: None
+    h2.pool.book.issue_area, h2.pool.book.issue_files = h.pool.book.issue_area, h.pool.book.issue_files
+    h2.step()
+    check("still editing, within POOL_AREA_HOT_HOLD_MAX_S: the other waits", [u.number for u in h2.step(60)], [])
+    check("past it, the hold ends", [u.number for u in h2.step(1800)], [42])
+    lend = Rig(state([iss(n, ["stage:triage", "P2"]) for n in (51, 52)]), areas=AREAS, global_cap=8,
+               area_conversations=1, area_lend_at=4)
+    lend.pool.track_areas = lambda st: None
+    lend.pool.book.issue_area, lend.pool.book.issue_files = {51: "cards", 52: "cards"}, {}
+    check("with pool slots free, an issue waiting only for a busy area conversation goes to an ordinary worker",
+          sorted((u.number, u.info.get("lent")) for u in lend.step()), [(51, None), (52, "cards")])
 
 
 def test_leftover_processes_are_killed() -> None:

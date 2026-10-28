@@ -108,10 +108,14 @@ A dependency (`blocked_by`) keeps an issue out of every worker's reach until the
 other is merged (a blocker at `stage:accept` or `stage:live` counts as done: its code
 is on main; if its acceptance check fails it goes back to `stage:triage` and blocks
 again), so it is the most expensive label you set: one P1 fix waited 6.7
-hours on three of them while workers took lower-ranked issues around it. Add one
-only when the issue cannot work without the other (it builds on code that does
-not exist yet) or both would rewrite the same lines; not for "related", not for
-"should come first", and not for a dependency of a dependency. Say why in the
+hours on three of them while workers took lower-ranked issues around it, and in
+cohort 60 the monitor's 236 edges blocked up to 40 issues while 41 of 50 worker
+slots sat empty. Add one only when the issue cannot be built without the other's
+code (it calls or renders something that does not exist yet); not for "related",
+not for "should come first", not for "both touch the same file" (the supervisor
+serializes hot files itself), and not for a dependency of a dependency. At most one
+edge per issue unless it truly needs two pieces of unbuilt code. Prefer no edge
+when the blocker is not even claimed yet: the two can be built side by side. Say why in the
 same pass, in one comment on the blocked issue ("Blocked by #M: <what it needs
 from #M>"):
 
@@ -120,9 +124,10 @@ gh api -X POST "repos/{owner}/{repo}/issues/$N/dependencies/blocked_by" -F issue
 gh api -X DELETE "repos/{owner}/{repo}/issues/$N/dependencies/blocked_by/$(gh api repos/{owner}/{repo}/issues/$M -q .id)"
 ```
 
-When the supervisor says a P0 or P1 issue has waited an hour on its blockers,
-look at each one again: remove the ones it can do without, with a comment, and
-for the rest say what the blocker still owes it.
+When the supervisor says an issue (of any priority) has waited an hour on its
+blockers, or that a new edge sits on an unbuilt blocker while many issues are
+blocked, look at each one again: remove the ones it can do without, with a comment,
+and for the rest say what code the blocker still owes it.
 
 ## Split a large issue
 

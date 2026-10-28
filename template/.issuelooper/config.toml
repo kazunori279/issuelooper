@@ -171,7 +171,11 @@ second_at = 3                # POOL_AREA_SECOND_AT: conversation k (from 0) star
                              # the area, whatever their files; only a hot file makes an issue wait
 lend_at = 4                  # POOL_AREA_LEND_AT: with every conversation of the area busy, this many waiting there send
                              # the rest to ordinary workers (0 = they wait)
-hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file
+hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file, from its
+                             # start until its PR is open
+hot_hold_max_s = 1800        # POOL_AREA_HOT_HOLD_MAX_S: and for this long at most
+lend_free = true             # POOL_AREA_LEND_FREE: with pool slots free, an issue waiting only for a busy area conversation
+                             # goes to an ordinary worker
 # shared = []                # POOL_AREA_SHARED: files many areas touch (a strings table, the stylesheet); routing
                              # ignores them
 # [areas.ui]
@@ -207,6 +211,8 @@ author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after th
 author_guard = false         # POOL_AUTHOR_GUARD: when the train's acceptance guards fail only because of a PR, its author's
                              # conversation is resumed to fix the code or update a guard its issue changes (`Guard change:`
                              # line, checked by the review gate); handed back after POOL_AUTHOR_GUARD_MAX (2) tries
+edge_flag_at = 8             # POOL_EDGE_FLAG_AT: a new dependency on a blocker not yet at stage:pr, while this many
+                             # claimable issues are blocked, is pointed out to the monitor (0 = never)
 hub_at = 3                   # POOL_HUB_AT: an issue this many open issues depend on is a hub: it takes its dependents'
                              # priority and one level more, hub_timeout times the worker timeout, resumes its last
                              # worker's conversation, and failures never park it at stage:owner (0 = off)

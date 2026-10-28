@@ -480,6 +480,16 @@ class Config:
     area_second_at: int = 3
     area_hot_lock: bool = True
     area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
+    # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
+    area_lend_free: bool = True
+    # A session holds the hot files its issue names from its start until its pull request is open
+    # (not past it) and for area_hot_hold_max_s at most. Cohort 60: hot-file waits had a median
+    # of 34 min and a p90 of 5 h, and some hot file was locked 11.7 of the 12 h.
+    area_hot_hold_max_s: float = 1800
+    # A new dependency edge on a blocker not yet at stage:pr, while this many claimable issues are
+    # blocked already, is pointed out to the monitor (0 = never). Cohort 60: the monitor added
+    # 236 edges and blocked up to 40 issues (337 issue-hours) while 6-9 of 50 workers ran.
+    edge_flag_at: int = 8
     unknown_s: float = 300
     split_after: int = 4
     starve_after: int = 2  # conflicts left to a merger on the same files before a P0/P1 PR is starving
@@ -655,6 +665,9 @@ class Config:
             area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
+            area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
+            area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
+            edge_flag_at=env_int("POOL_EDGE_FLAG_AT", 8),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
             starve_after=env_int("POOL_STARVE_AFTER", 2),
@@ -1030,6 +1043,7 @@ class Book:
 
     def __init__(self):
         self.running: dict[str, Unit] = {}  # family -> unit
+        self.started_at: dict[str, float] = {}  # unit key -> when it started (the hot-file hold's cap)
         self.tries: collections.Counter = collections.Counter()  # key -> starts
         self.family_starts: collections.Counter = collections.Counter()
         self.clean: set[str] = set()  # keys whose session ended cleanly
@@ -1229,10 +1243,15 @@ def plan(
         return (prio, -deps[n], n)
     for i in sorted(claimable, key=claim_rank):
         n = i["number"]
-        where = place_in_area(n, book, cfg, holding(book, cfg, now, units), queue) if cfg.areas else {}
+        free = (cfg.global_cap - sum(1 for u in book.running.values() if u.role != "auto")
+                - sum(1 for u in units if u.role != "auto" and not book.why_not(u, cfg, now))) if cfg.global_cap else 0
+        where = place_in_area(n, book, cfg, holding(book, cfg, now, units), queue, now=now, pr_of=pr_of,
+                              free=free) if cfg.areas else {}
         if where is None:
             continue  # its area's conversations are busy, or its hot file is being worked on
         info = {"title": i["title"], **where}
+        if n in pr_of:
+            info["pr_at_start"] = True  # a hand-back: its PR existed before this session
         if cfg.hub_at and deps[n] >= cfg.hub_at:
             info["hub"] = deps[n]
             info["timeout"] = f"{int(seconds(cfg.timeouts.get('worker') or '45m') * cfg.hub_timeout)}s"
@@ -1515,7 +1534,26 @@ def area_notes(area: str, slot: int) -> str:
     return scratch(f"areas/{area}-{slot}.md")
 
 
-def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) -> dict | None:
+def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: dict | None) -> set:
+    """The hot files sessions hold now: a worker's from its start until its pull request is
+    open (a hand-back, whose PR was open from the start, holds them to its end) and for
+    POOL_AREA_HOT_HOLD_MAX_S at most."""
+    held = set()
+    for u in active:
+        if u.role != "worker" or not u.info.get("hot"):
+            continue
+        n = u.info.get("issue") if u.kind in ("resolve", "guard-fix") else u.number
+        if u.kind == "implement" and pr_of is not None and n in pr_of and not u.info.get("pr_at_start"):
+            continue  # its PR is open: the edit is done; the merge path takes it from here
+        since = book.started_at.get(u.key)
+        if cfg.area_hot_hold_max_s and since is not None and now - since > cfg.area_hot_hold_max_s:
+            continue
+        held.update(u.info["hot"])
+    return held
+
+
+def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, now: float = 0.0,
+                  pr_of: dict | None = None, free: int = 0) -> dict | None:
     """Where issue n's worker runs ([areas]): {} for no area, else {"area", "slot", "resume",
     "files", "hot", "notes"}; None while it must wait. An issue naming a hot file waits
     while another session works one (POOL_AREA_HOT_LOCK). The area's conversation in a
@@ -1533,7 +1571,7 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) ->
     files = set(book.issue_files.get(n) or [])
     hot = {f for f in files if config.is_hot(f, cfg.areas)} if cfg.area_hot_lock else set()
     area = book.issue_area.get(n) or ""
-    held = hot & {f for u in active if u.role == "worker" for f in u.info.get("hot") or []}
+    held = hot & hot_holders(book, cfg, active, now, pr_of)
     if held:
         book.waits_now[n] = {"why": "hot", "area": area, "files": sorted(held)}
         return None
@@ -1556,7 +1594,7 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue) ->
             continue
         return {"area": area, "slot": k, "resume": conv or None, "files": sorted(files), "hot": sorted(hot),
                 "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh}
-    if cfg.area_lend_at and queue[area] >= cfg.area_lend_at:
+    if (cfg.area_lend_at and queue[area] >= cfg.area_lend_at) or (cfg.area_lend_free and free > 0):
         return {"lent": area, "files": sorted(files), "hot": sorted(hot)}
     book.waits_now[n] = {"why": "area", "area": area, "files": []}
     return None
@@ -4231,6 +4269,7 @@ class Pool:
             (self.cfg.logdir / "seq").write_text(str(self.seq))
             b = self.book
             b.running[u.family] = u
+            b.started_at[u.key] = self.clock()
             b.tries[u.key] += 1
             b.family_starts[u.family] += 1
             if u.kind == "ux":
@@ -5512,7 +5551,7 @@ class Pool:
         return (
             f"Untriaged (yours): {', '.join(untriaged) or 'none'}. "
             + (f"Your holds older than {self.cfg.hold_review_s / 60:.0f} min: {', '.join(old)}. " if old else "")
-            + (f"P0/P1 issues blocked over {self.cfg.blocked_review_s / 60:.0f} min: {', '.join(waits)}. "
+            + (f"Issues blocked over {self.cfg.blocked_review_s / 60:.0f} min: {', '.join(waits)}. "
                if waits else "")
             + f"Queue: {len(st['open'])} open ({stages}); {len(st['prs'])} open PRs; recently closed "
             f"{len(st['closed'])}. main {st['main'][:8]}, {deployed}. Sessions running: {sessions}. "
@@ -6246,16 +6285,18 @@ class Pool:
                            "your hold comment names and lift the hold if it is met")
 
     def track_blocked(self, st: dict, now: float) -> None:
-        """Point the monitor, once, to a claimable P0 or P1 issue that has waited
+        """Point the monitor, once, to a claimable issue of any priority that has waited
         POOL_BLOCKED_REVIEW_MIN on open blockers. One P1 fix waited 6.7 hours on three
         dependencies while workers took lower-ranked issues around it, and nobody
-        looked at whether it still needed them."""
+        looked at whether it still needed them; in cohort 60 most of the 40 blocked issues
+        were P2, which this left out."""
         b = self.book
         done = accepted(st)  # a blocker at stage:accept is merged: nothing to review
-        native = {i["number"]: native_blockers(i, done) for i in st["open"]}
+        open_numbers = {i["number"] for i in st["open"]}
+        native = {i["number"]: native_blockers(i, done) + line_blockers(i, open_numbers, done) for i in st["open"]}
         waiting = {
             i["number"]: i for i in st["open"]
-            if native[i["number"]] and set(i["labels"]) & {"P0", "P1"} and set(i["labels"]) & CLAIMABLE
+            if native[i["number"]] and set(i["labels"]) & CLAIMABLE
             and not set(i["labels"]) & (HOLDS | IGNORED)
         }
         for n in waiting:
@@ -6266,7 +6307,7 @@ class Pool:
         for n, i in sorted(waiting.items()):
             if n not in b.blocked_told and now - b.blocked[n] >= self.cfg.blocked_review_s:
                 b.blocked_told.add(n)
-                prio = next(p for p in ("P0", "P1") if p in i["labels"])
+                prio = next((p for p in ("P0", "P1", "P2") if p in i["labels"]), "no priority")
                 which = ", ".join(f"#{x}" for x in native[n] if x != "?")
                 self.event(
                     f"#{n} ({prio}) has waited {(now - b.blocked[n]) / 60:.0f} min on {len(native[n])} open "
@@ -6274,6 +6315,38 @@ class Pool:
                     f"each only if #{n} cannot work or would conflict without it, and remove the rest "
                     "(issuelooper-monitor skill, Dependencies)"
                 )
+
+    def track_edges(self, st: dict) -> None:
+        """Point out each new dependency edge whose blocker is not built yet (claimable or
+        stage:doing, no PR) while POOL_EDGE_FLAG_AT claimable issues are blocked already: the
+        monitor's skill allows an edge only when the issue cannot be built without the
+        other's code."""
+        prev = self.prev
+        if not self.cfg.edge_flag_at or prev is None:
+            return
+
+        def edges(state: dict) -> set:
+            nums = {i["number"] for i in state["open"]}
+            out = set()
+            for i in state["open"]:
+                on = set(i.get("blockers") or [])
+                for m in claimlib.BLOCKED_LINE.finditer(i.get("body") or ""):
+                    on.update(int(x) for x in claimlib.NUM.findall(m.group(1)))
+                out |= {(i["number"], b) for b in on & nums}
+            return out
+        by = {i["number"]: i for i in st["open"]}
+        n_blocked = sum(1 for i in st["open"] if set(i["labels"]) & CLAIMABLE
+                      and blocked(i, set(by), accepted(st)))
+        if n_blocked < self.cfg.edge_flag_at:
+            return
+        for d, b in sorted(edges(st) - edges(prev)):
+            labels = set(by[b]["labels"])
+            if labels & (CLAIMABLE | {claimlib.DOING}):
+                self.log("edge_flagged", issue=d, blocker=b, blocked=n_blocked)
+                self.event(
+                    f"new dependency: #{d} now waits on #{b}, which is not built yet, while {n_blocked} claimable issues "
+                    f"are blocked already. Keep it only if #{d} cannot be built without #{b}'s code (not for ordering "
+                    f"or because they are related): remove it otherwise (issuelooper-monitor skill, Dependencies)")
 
     def failed_try(self, n: int | None) -> None:
         """Count a failure of issue n's own toward asking for its split (ask_decompose)."""
@@ -6386,6 +6459,7 @@ class Pool:
             self.track_live(st)
             self.track_holds(st, now)
             self.track_blocked(st, now)
+            self.track_edges(st)
             self.ask_decompose(st)
             self.check_files()
             self.check_disk()
