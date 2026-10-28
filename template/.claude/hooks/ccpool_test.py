@@ -4916,6 +4916,76 @@ def test_inturn_quota_pauses_the_pool_and_a_retryable_error_resumes() -> None:
     check("and not a failed attempt", "transient error (exit 3)".startswith(ccpool.NOT_A_FAILURE), True)
 
 
+def test_session_events_are_read_incrementally() -> None:
+    """Issue #27: events() read and parsed the whole stream on every call, several times a
+    tick. It parses only what was appended now, and gives what a full read gives."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-events-"))
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool"), fetcher=state, spawn=False)
+    w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:6@x", "wrk:6", 6, (4,), {}), 1)
+    w.dir.mkdir(parents=True)
+    path = w.dir / "session.jsonl"
+    check("no stream yet: nothing", w.events(), [])
+
+    def full():
+        return ccpool.agent_cli.parse(path.read_text(errors="replace").splitlines())
+    parsed = []
+    real = ccpool.agent_cli.parse
+
+    def counting(lines):
+        lines = list(lines)
+        parsed.append(len(lines))
+        return real(lines)
+    ccpool.agent_cli.parse = counting
+    try:
+        def add(text):
+            with open(path, "a") as f:
+                f.write(text)
+            parsed.clear()
+            got = w.events()
+            return got, sum(parsed)
+        got, n = add('{"event": "init", "conversation_id": "c1"}\nnot json\n{"event": "step_update"')
+        check("a broken line is skipped and a partial last line is not an event yet",
+              (got, got == full()), ([{"event": "init", "conversation_id": "c1"}], True))
+        got, n = add('}\n')
+        check("completed, it is parsed once: only that line", (len(got), got == full(), n), (2, True, 1))
+        got, n = add('{"event": "result", "result": {}}')
+        check("a complete last line with no newline counts, as in a full read", (len(got), got == full()), (3, True))
+        got, n = add('\n')
+        check("and is not counted twice once its newline comes", (len(got), got == full()), (3, True))
+        got, n = add("")
+        check("nothing new: nothing parsed", (got == full(), n), (True, 0))
+        path.write_text('{"event": "init", "conversation_id": "c2"}\n')
+        check("truncated (shorter): read again from the start", (w.events(), w.events() == full()),
+              ([{"event": "init", "conversation_id": "c2"}], True))
+        path.write_text('{"event": "init", "conversation_id": "c3"}\n' + '{"event": "step_update"}\n' * 5)
+        check("rewritten in place, longer than before: read again", (w.events()[0]["conversation_id"], w.events() == full()),
+              ("c3", True))
+        other = d / "new.jsonl"
+        other.write_text('{"event": "init", "conversation_id": "c4"}\n' + '{"event": "step_update"}\n' * 9)
+        os.replace(other, path)
+        check("replaced by another file: read again", (w.events()[0]["conversation_id"], w.events() == full()), ("c4", True))
+        got = w.events()
+        got.append({"x": 1})
+        check("a caller's change to the list does not reach the next call", w.events() == full(), True)
+        path.unlink()
+        check("gone: nothing", w.events(), [])
+    finally:
+        ccpool.agent_cli.parse = real
+
+    line = json.dumps({"event": "step_update", "step_update": {"state": "DONE", "step_type": "tool", "text": "x" * 200}})
+    path.write_text((line + "\n") * 20000)
+    t0 = time.perf_counter()
+    first = w.events()
+    whole = time.perf_counter() - t0
+    with open(path, "a") as f:
+        f.write((line + "\n") * 10)
+    t0 = time.perf_counter()
+    after = w.events()
+    appended = time.perf_counter() - t0
+    check("benchmark: 10 lines appended to 20,000 cost a small part of the first read, and the result is a full read's",
+          (len(first), len(after), appended < whole / 5, after == full()), (20000, 20010, True, True))
+
+
 def test_the_author_resolves_its_own_conflict() -> None:
     """Proposal §1 step 2: c58's 32 merger sessions (median 14.5 min) each re-read the issue,
     the PR and main; the author's conversation, resumed, knows the change."""

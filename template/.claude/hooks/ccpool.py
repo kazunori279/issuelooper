@@ -2735,6 +2735,8 @@ class Session(threading.Thread):
         self.quota_base = -1  # a resumed conversation's newest quota step before this session
         self.usage_base: dict | None = None  # and its recorded usage (agy) before this session
         self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
+        self._stream: dict | None = None  # events(): what of session.jsonl was read and parsed
+        self._stream_lock = threading.Lock()  # events() runs in the session's thread and the pool's
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
         self.dir = pool.cfg.logdir / f"{seq:04d}-{unit.role}-{slug}"
         try:
@@ -3066,10 +3068,40 @@ class Session(threading.Thread):
                     q.unlink(missing_ok=True)
 
     def events(self) -> list[dict]:
+        """agent_cli.parse of the whole stream (session.jsonl), read incrementally: the
+        supervisor asks for it several times a tick, and a long session's stream was read
+        and parsed whole each time (issue #27). Only the complete lines appended since the
+        last call are parsed; a last line with no newline yet is parsed each time but kept
+        for later, so the result is what a full read gives. A new file (another inode), one
+        shorter than what was read, or one whose bytes before that point changed (rewritten
+        in place) is read again from the start."""
+        with self._stream_lock:
+            return self._events()
+
+    def _events(self) -> list[dict]:
+        def same_bytes(f, c: dict) -> bool:  # the last bytes read are still there
+            f.seek(c["off"] - len(c["mark"]))
+            return f.read(len(c["mark"])) == c["mark"]
         try:
-            return agent_cli.parse((self.dir / "session.jsonl").read_text(errors="replace").splitlines())
+            with open(self.dir / "session.jsonl", "rb") as f:
+                st = os.fstat(f.fileno())
+                c = self._stream
+                if c is not None and (c["ino"] != st.st_ino or st.st_size < c["off"] or not same_bytes(f, c)):
+                    c = None
+                if c is None:
+                    c = self._stream = {"ino": st.st_ino, "off": 0, "mark": b"", "events": []}
+                f.seek(c["off"])
+                data = f.read()
         except OSError:
+            self._stream = None
             return []
+        cut = data.rfind(b"\n") + 1
+        if cut:
+            c["events"] += agent_cli.parse(data[:cut].decode(errors="replace").splitlines())
+            c["off"] += cut
+            c["mark"] = (c["mark"] + data[:cut])[-64:]
+        tail = data[cut:]
+        return c["events"] + agent_cli.parse(tail.decode(errors="replace").splitlines()) if tail else list(c["events"])
 
     def quiet_s(self) -> float:
         """Seconds since the session last wrote to its stream (0 when it has none)."""
