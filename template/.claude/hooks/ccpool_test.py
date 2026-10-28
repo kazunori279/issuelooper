@@ -2773,6 +2773,40 @@ def config_is_hot(h, f):
     return ccpool.config.is_hot(f, h.pool.cfg.areas)
 
 
+def test_a_train_prefix_merges_only_when_checked_and_guards_rerun_alone() -> None:
+    """Cohort 60: after the train split out PR 129, PRs 126 and 130 merged unchecked, and 126's
+    guard test_accept_50 failed at its own commit (main red 15 min); #32's 11 guards failed
+    together, and passed one at a time."""
+    h = Rig(state())
+    cars = [{"pr": 126, "issue": 1, "head": "1" * 40, "commit": "c1" * 20},
+            {"pr": 129, "issue": 2, "head": "2" * 40, "commit": "c2" * 20}]
+    h.pool.train_red_at = lambda wt, commit, failing: (commit == "c2" * 20, "")  # PR 129's tree fails
+    h.pool.train_hand_back = lambda *a, **k: None
+    h.pool.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+    landed = []
+    h.pool.train_land = lambda base, cs, out, checked: landed.append(([c["pr"] for c in cs], checked))
+    h.pool.train_check = lambda wt: (False, "FAILED tests/accept/test_accept_50.py::t")
+    h.pool.train_second_look = lambda wt, base, cs, out: (False, out)
+    h.pool.train_bisect("/nowhere", "a" * 40, cars, "FAILED tests/e2e/test_x.py::t")
+    check("the prefix fails its own full check (a broken guard): nothing lands, the monitor hears",
+          (landed, any("failed its own full check" in e for e in h.pool.events)), ([], True))
+    h.pool.train_check = lambda wt: (True, "green")
+    h.pool.train_bisect("/nowhere", "a" * 40, cars, "FAILED tests/e2e/test_x.py::t")
+    check("checked green on exactly its tree: it lands as checked", landed, [([126], True)])
+    g = Rig(state(), rerun_cmd="pytest {tests}")
+    runs = []
+    g.pool.rerun_tests = lambda wt, ids, env=None: (runs.append(list(ids)) or (len(ids) == 1, ""))
+    guards = ["tests/accept/test_accept_12.py::t", "tests/accept/test_accept_42.py::t"]
+    check("guards that fail together and pass one at a time are not the PR's",
+          (g.pool.passes_alone("/wt", guards), runs), (True, [[guards[0]], [guards[1]]]))
+    check("a failing test that is not a guard is never excused that way",
+          g.pool.passes_alone("/wt", guards + ["tests/e2e/test_a.py::t"]), False)
+    g.pool.report_flaky = lambda where, failing: g.pool.events.append("flaky: " + where)
+    ok, _ = g.pool.train_second_look("/wt", "a" * 40, cars[:1], "\n".join(f"FAILED {t}" for t in guards))
+    check("so the train counts as green and files the isolation as flaky",
+          (ok, any("test isolation" in e for e in g.pool.events)), (True, True))
+
+
 def test_leftover_processes_are_killed() -> None:
     """A server or test run a session started with setsid outlives it; when the session
     ends, what runs in its scratch paths is killed, and nothing else."""
@@ -5197,7 +5231,8 @@ def test_a_red_train_hands_back_only_the_pr_that_breaks_it() -> None:
         merges = [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")]
         check("the failing tests run again on the tree, on main alone, then halving: PR #12 is found",
               t.reruns, ["bad,pr1,pr3,pr4", "", "bad,pr1", "pr1"])
-        check("one full sweep only (the rerun names the tests)", len(t.sweeps), 1)
+        check("the train's full sweep, then one on the prefix that merges (cohort 60: 6 trains merged unchecked)",
+              (len(t.sweeps), t.sweeps[-1]), (2, "merge-train:pr1"))
         check("PR #11 before it merges, #12 goes back with its failure, #13 and #14 wait",
               (merges, sorted(t.pool.book.train), t.main_files()), (["11"], [13, 14], ["app.py", "pr1"]))
         text = (t.d / "gh.log").read_text()
@@ -5207,8 +5242,8 @@ def test_a_red_train_hands_back_only_the_pr_that_breaks_it() -> None:
         check("its issue back to triage, counted as its own failure, remembered at its head",
               ("issue edit 2 --remove-label stage:pr --add-label stage:triage" in t.gh_log(),
                t.pool.book.failed_tries[2], t.pool.book.handed_back.get(12)), (True, 1, [t.heads[2], False]))
-        check("main after a partial batch was not swept as a whole: it gets its own check",
-              (t.logs("train")[-1]["checked"], t.pool.main_check_sha), (False, ""))
+        check("the merged prefix was checked whole on its own tree, which covers that main",
+              (t.logs("train")[-1]["checked"], t.pool.main_check_sha == t.g("rev-parse", "origin/main")), (True, True))
         t.pool.run_train()
         check("the next train runs the rest on the new main", (t.sweeps[-1], t.pool.book.train),
               ("merge-train:pr1,pr3,pr4", {}))

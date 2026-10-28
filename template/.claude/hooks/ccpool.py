@@ -4849,6 +4849,18 @@ class Pool:
             return None, str(exc)
         return r.returncode == 0, (r.stdout + r.stderr)[-6000:]
 
+    def passes_alone(self, wt: str, failing: list[str], cap: int = 12) -> bool:
+        """Whether every failing test is an acceptance guard (tests/accept/) that passes
+        when it runs by itself ([sweep] rerun, one test a run), up to cap of them."""
+        ids = [t for t in failing if "::" in t]
+        if not ids or len(ids) > cap or not all(t.startswith("tests/accept/") for t in ids) or not self.cfg.rerun_cmd:
+            return False
+        for t in ids:
+            ok, _ = self.rerun_tests(wt, [t])
+            if not ok:
+                return False
+        return True
+
     def rerun_at(self, ref: str, tests: list[str], fetch: str = "main") -> tuple[bool | None, str]:
         """rerun_tests in a fresh worktree at ref (None: not run, or git could not)."""
         if not self.cfg.rerun_cmd or not [t for t in tests if "::" in t]:
@@ -5342,6 +5354,13 @@ class Pool:
                        f"({', '.join(failing[:2])}); counted as green")
             return True, out
         again, out2 = self.rerun_tests(wt, failing)
+        if again is False and self.passes_alone(wt, failing):
+            # The failing tests are guards that pass one at a time on this very tree: they
+            # depend on each other (cohort 60: #32's 11 guards failed together and test_accept_12
+            # and 42 passed alone 3 of 3). Not the PR's.
+            self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged (they fail together and "
+                              "pass one at a time: test isolation)", failing)
+            return True, out
         if again is False:
             return False, out
         if again is None:
@@ -5410,7 +5429,25 @@ class Pool:
             lo, hi = (lo, mid) if red else (mid, hi)
         self.train_hand_back(cars[hi - 1], cars[:hi - 1], base, failing, out, on_main)
         if hi > 1:
-            self.train_land(base, cars[:hi - 1], out, checked=False)
+            # The PRs before it merge only after the full check (sweep and guard) passed on
+            # exactly their tree: the halving ran only the failing tests, and a guard runs only
+            # after a green sweep. Cohort 60: 6 of 107 trains merged unchecked, and one brought
+            # a guard that failed at its own commit (test_accept_50): main red for 15 min.
+            prefix = cars[:hi - 1]
+            ok, pout = (None, f"could not check out {prefix[-1]['commit'][:12]}")
+            if self.git("checkout", "-q", "--detach", prefix[-1]["commit"], wt=wt).returncode == 0:
+                ok, pout = self.train_check(wt)
+                if ok is False:
+                    ok, pout = self.train_second_look(wt, base, prefix, pout)
+            if ok:
+                self.train_land(base, prefix, pout, checked=True)
+            else:
+                self.log("train_prefix_held", base=base[:12], prs=[c["pr"] for c in prefix], ok=ok,
+                         failing=failing_tests(pout)[:5])
+                self.event(f"merge train: {self.train_label(prefix)}, ahead of the PR handed back, "
+                           f"{'failed' if ok is False else 'could not run'} its own full check "
+                           f"({', '.join(failing_tests(pout)[:2]) or 'see pool.jsonl'}); they wait for the next train")
+                self.train_wait()
 
     def train_hand_back(self, car: dict, ahead: list[dict], base: str, failing: list[str], out: str,
                         on_main: list[str] | tuple = ()) -> None:
@@ -6228,6 +6265,8 @@ class Pool:
             failing = failing_tests(out) if ok is False else []
             if ok is False:
                 again, _ = self.rerun_tests(wt, failing)  # the same commit: a pass makes them flaky
+                if not again and self.passes_alone(wt, failing):
+                    again = True  # they pass one at a time: they depend on each other, not a regression
                 if again:
                     self.report_flaky(f"the acceptance guard at {sha[:8]}", failing)
                     ok = True
