@@ -23,7 +23,12 @@ sweep_run.py's own output: the `git:` provenance line, the `green:` line, and
 A clean checkout whose HEAD already has a green sweep record for the same command is
 not swept again: it prints the record's `git:`, `sweep record:` and `green:` lines as
 a sweep would, and --update-pr goes on from there (SWEEP_FORCE=1 sweeps anyway). In
-cohort 52, 3.9 h went to sweeping commits that were already green.
+cohort 52, 3.9 h went to sweeping commits that were already green. It looks again once
+it has the slot, since another sweep of the same commit may have turned green while it
+waited, and then gives the slot back unused. A record counts only for the same command
+and kind (a full sweep is never satisfied by an affected record) and the same
+`[sweep] env_id` (SWEEP_ENV_ID). runs.jsonl notes each reuse, with "reuse": "before-slot"
+or "after-slot" and the wait.
 
 With `[sweep] format` (SWEEP_FORMAT, e.g. `uv run ruff format src tests`), an agent's
 sweep of a clean checkout runs the formatter first. When it changes files, the sweep
@@ -121,7 +126,8 @@ def wants_affected(args) -> bool:
 def green_record(root: str, affected: bool = False) -> tuple[str, pathlib.Path, dict] | None:
     """(HEAD, its record, the record) when the checkout is clean and HEAD has a green
     sweep record for this sweep command (a full one; for an affected sweep, a full one
-    or an affected one from the same affected command); else None."""
+    or an affected one from the same affected command), written under the same
+    SWEEP_ENV_ID; else None."""
     def git(*a):
         r = subprocess.run(["git", "-C", root, *a], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else None
@@ -133,6 +139,7 @@ def green_record(root: str, affected: bool = False) -> tuple[str, pathlib.Path, 
     accept = {("full", command)}
     if affected:
         accept.add(("affected", os.environ.get("SWEEP_AFFECTED", "").strip()))
+    env_id = os.environ.get("SWEEP_ENV_ID", "").strip()
     for d in config.record_dirs("sweep"):
         path = d / f"{head}.json"
         try:
@@ -140,7 +147,7 @@ def green_record(root: str, affected: bool = False) -> tuple[str, pathlib.Path, 
         except (OSError, ValueError):
             continue
         if (rec.get("sha") == head and (rec.get("kind") or "full", rec.get("command")) in accept
-                and isinstance(rec.get("areas"), dict)):
+                and (rec.get("env_id") or "") == env_id and isinstance(rec.get("areas"), dict)):
             return head, path, rec
     return None
 
@@ -162,11 +169,13 @@ def format_first(root: str) -> list[str]:
     return sorted(ln[3:] for ln in after.stdout.splitlines() if ln.strip())
 
 
-def reuse(head: str, path: pathlib.Path, rec: dict) -> str:
+def reuse(head: str, path: pathlib.Path, rec: dict, when: str = "before-slot", wait_s: float = 0.0,
+          lane: str = "") -> str:
     """Print what a green sweep prints, from its record, and note the run in runs.jsonl."""
     areas = rec["areas"]
     green = f"{sum(areas.values())} green: " + " · ".join(f"{k} {v}" for k, v in areas.items())
-    out = (f"{head[:12]} already has a green sweep record for this command; not swept again "
+    since = " (written while this sweep waited for a slot)" if when == "after-slot" else ""
+    out = (f"{head[:12]} already has a green sweep record for this command{since}; not swept again "
            f"(SWEEP_FORCE=1 sweeps anyway)\ngit:            {head} (clean)\nsweep record: {path}\n\n{green}\n")
     print(out, end="", flush=True)
     try:
@@ -174,10 +183,19 @@ def reuse(head: str, path: pathlib.Path, rec: dict) -> str:
         now = sweep_run.datetime.now(sweep_run.timezone.utc).isoformat()
         sweep_run.append_run({"run_id": f"reuse-{head[:8]}-{os.getpid()}", "sha": head, "clean": True,
                               "caller": sweep_run.caller(), "started_at": now, "finished_at": now, "seconds": 0,
-                              "exit": 0, "outcome": "green", "reused": str(path)})
+                              "exit": 0, "outcome": "green", "reused": str(path), "reuse": when,
+                              "kind": rec.get("kind") or "full", "lane": lane, "wait_s": round(wait_s, 1)})
     except Exception as exc:  # noqa: BLE001 - the record never changes the verdict
         print(f"note: run not recorded ({exc})", file=sys.stderr)
     return out
+
+
+def reused(args, out: str) -> int:
+    """After a reused record: done, or --update-pr from its lines."""
+    if not args.update_pr:
+        return 0
+    sha, green = GIT_LINE.search(out), GREEN_LINE.findall(out)
+    return update_pr(args.update_pr, sha.group(1), green[-1].strip())
 
 
 def main() -> int:
@@ -216,13 +234,10 @@ def main() -> int:
             print(f"note: run not recorded ({exc})", file=sys.stderr)
         return 1
     affected = wants_affected(args)
-    found = None if os.environ.get("SWEEP_FORCE") == "1" else green_record(root, affected)
+    force = os.environ.get("SWEEP_FORCE") == "1"
+    found = None if force else green_record(root, affected)
     if found:
-        out = reuse(*found)
-        if not args.update_pr:
-            return 0
-        sha, green = GIT_LINE.search(out), GREEN_LINE.findall(out)
-        return update_pr(args.update_pr, sha.group(1), green[-1].strip())
+        return reused(args, reuse(*found))
     start = time.time()
     deadline = start + DEADLINE_S
     fd = None
@@ -245,6 +260,12 @@ def main() -> int:
             time.sleep(5)
     got = time.time()
     print(f"sweep lock taken after {got - start:.0f} s", flush=True)
+    # Another sweep of this commit may have turned green while this one waited.
+    found = None if force else green_record(root, affected)
+    if found:
+        os.close(fd)
+        return reused(args, reuse(*found, when="after-slot", wait_s=got - start,
+                                  lane=args.lane or os.path.basename(name)))
     # For sweep_run.py's line in runs.jsonl.
     env = dict(os.environ, SWEEP_LANE=args.lane or os.path.basename(name), SWEEP_WAIT_S=f"{got - start:.1f}",
                SWEEP_PR=args.update_pr or os.environ.get("SWEEP_PR", ""))

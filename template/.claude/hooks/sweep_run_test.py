@@ -137,6 +137,10 @@ def test_green_two_suites_writes_record() -> None:
         sorted(p.name for p in records.iterdir()),
         [f"{sha}.json", "runs.jsonl"],
     )
+    check("no environment named: no env_id", "env_id" in record, False)
+    rc, out, records = sweep(repo, TWO_SUITES, SWEEP_ENV_ID="py3.12")
+    check("SWEEP_ENV_ID names the environment in the record",
+          json.loads((records / f"{sha}.json").read_text()).get("env_id"), "py3.12")
 
 
 def test_before_arrow() -> None:

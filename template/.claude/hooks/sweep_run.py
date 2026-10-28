@@ -29,6 +29,9 @@ the tree as it found them, it also writes the provenance record that
     {"sha": ..., "command": ..., "areas": {"unit": 21, "e2e": 23}, "total": 44,
      "started_at": ..., "finished_at": ...}
 
+plus "env_id" when `[sweep] env_id` (SWEEP_ENV_ID) is set: a non-secret name for the test
+environment (tool versions, say), which sweep_locked.py's reuse of a record must match.
+
 and prints `sweep record: <path>`. A red run prints no green line and exits 1.
 
 With --affected and `[sweep] affected = "<command with {tests}>"` (SWEEP_AFFECTED), it
@@ -294,6 +297,8 @@ def write_sweep_record(
     }
     if kind == "affected":
         record["tests"] = tests or []
+    if os.environ.get("SWEEP_ENV_ID", "").strip():
+        record["env_id"] = os.environ["SWEEP_ENV_ID"].strip()
     target = record_dir / f"{sha}.json"
     fd, tmp = tempfile.mkstemp(dir=record_dir, prefix="sweep_", suffix=".tmp")
     try:

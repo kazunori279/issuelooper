@@ -68,6 +68,7 @@ KEYS = {
     ("sweep", "fast_command"): "POOL_FAST_CHECK_CMD",
     ("sweep", "main_check"): "POOL_MAIN_CHECK",
     ("sweep", "link_files"): "SWEEP_LINK_FILES",
+    ("sweep", "env_id"): "SWEEP_ENV_ID",
     ("deploy", "command"): "POOL_DEPLOY_CMD",
     ("deploy", "timeout_s"): "POOL_DEPLOY_TIMEOUT_S",
     ("live", "enabled"): "POOL_LIVE",

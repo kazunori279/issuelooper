@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # Every temporary file this file and what it runs make goes under one directory,
 # removed at exit: the suite left hundreds of directories in /tmp, and a run's /tmp
@@ -815,6 +816,68 @@ def test_a_commit_with_a_green_record_is_not_swept_again() -> None:
     check("SWEEP_FORCE=1: swept", go(SWEEP_FORCE="1") and (tmp / "spans").exists(), True)
     (wt / "dirty.txt").write_text("x")
     check("a dirty tree: swept", go() and (tmp / "spans").exists(), True)
+
+
+def test_a_record_written_while_waiting_for_the_slot_is_reused() -> None:
+    """Issue #28: the record was looked up only before the slot was taken, so a sweep that
+    waited behind another sweep of the same commit ran the suite again after it was green."""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
+    wt = make_worktree(tmp)
+    (wt / ".gitignore").write_text(".claude/\n")
+    for cmd in (["add", ".gitignore"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]):
+        subprocess.run(["git", "-C", str(wt), *cmd], check=True, capture_output=True)
+    head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    records = tmp / "records"
+    records.mkdir()
+    lock = tmp / "lock"
+    env = dict(sweep_env(tmp, lock), SWEEP_RECORD_DIR=str(records))
+    for k in ("SWEEP_COMMAND", "SWEEP_FORCE", "SWEEP_ENV_ID", "POOL_MERGE_TRAIN", "SWEEP_CALLER"):
+        env.pop(k, None)
+
+    def record(**extra):
+        (records / f"{head}.json").write_text(json.dumps(dict(
+            {"sha": head, "command": "make verify", "areas": {"unit": 21, "e2e": 23}, "total": 44}, **extra)))
+
+    def waited(**extra):
+        """A sweep that waits for the one slot while a record is written, then gets it."""
+        (tmp / "spans").unlink(missing_ok=True)
+        (records / f"{head}.json").unlink(missing_ok=True)
+        held = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen([sys.executable, str(SWEEP)], cwd=wt, env=dict(env, **extra),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.5)
+        record()
+        os.close(held)
+        out = proc.communicate(timeout=60)[0]
+        return proc.returncode, out, (tmp / "spans").exists()
+
+    rc, out, swept = waited()
+    check("a record written during the wait: reused, not swept",
+          (rc, swept, "written while this sweep waited" in out), (0, False, True))
+    line = [json.loads(x) for x in (records / "runs.jsonl").read_text().splitlines()][-1]
+    check("runs.jsonl notes the reuse after the slot, and the wait",
+          (line["reuse"], line["reused"], line["kind"], line["wait_s"] >= 1, line["lane"]),
+          ("after-slot", str(records / f"{head}.json"), "full", True, "lock"))
+    check("and the slot is free again", subprocess.run(
+        ["flock", "-n", str(lock), "true"], capture_output=True).returncode, 0)
+    rc, out, swept = waited(SWEEP_FORCE="1")
+    check("SWEEP_FORCE=1: swept even so", (rc, swept), (0, True))
+
+    def go(**extra):
+        (tmp / "spans").unlink(missing_ok=True)
+        res = subprocess.run([sys.executable, str(SWEEP)], cwd=wt, env=dict(env, **extra), capture_output=True,
+                             text=True)
+        return res.returncode, (tmp / "spans").exists()
+    record(kind="affected", command="pytest {tests}", tests=["tests/test_a.py"])
+    check("a full sweep is not satisfied by an affected record", go(SWEEP_AFFECTED="pytest {tests}"), (0, True))
+    check("an affected one is", go(SWEEP_AFFECTED="pytest {tests}", POOL_MERGE_TRAIN="1"), (0, False))
+    check("from another affected command it is not",
+          go(SWEEP_AFFECTED="pytest -x {tests}", POOL_MERGE_TRAIN="1"), (0, True))
+    record(env_id="py3.12")
+    check("a record from another environment: swept", go(SWEEP_ENV_ID="py3.13"), (0, True))
+    check("with no environment named: swept", go(), (0, True))
+    check("from the same environment: reused", go(SWEEP_ENV_ID="py3.12"), (0, False))
 
 
 def test_an_agent_sweep_formats_first() -> None:
