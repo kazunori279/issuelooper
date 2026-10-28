@@ -750,6 +750,19 @@ def test_fetch_reads_every_page() -> None:
         except RuntimeError:
             failed = True
         check("a page that fails fails the whole read: nothing is planned from a partial queue", failed, True)
+        os.environ.pop("FAKE_PAGES_FAIL")
+        asked = []
+        real_gh = ccpool.claimlib.gh
+        ccpool.claimlib.gh = lambda *a, **k: (asked.append(a), "o/r\n")[1]
+        try:
+            unset = ccpool.Config(logdir=d / "pool", gh=str(gh), caps={r: 0 for r in ccpool.ROLES})
+            for _ in range(3):
+                ccpool.fetch(unset)
+        finally:
+            ccpool.claimlib.gh = real_gh
+        check("with no [pool] repo, the repository is asked of gh once, not on every poll (#26)",
+              (len(asked), unset.repo), (1, "o/r"))
+        os.environ["FAKE_PAGES_FAIL"] = "1"
         h = Rig(state(), gh=str(gh), repo="o/r")
         h.pool.fetcher = lambda: ccpool.fetch(h.pool.cfg)
         try:

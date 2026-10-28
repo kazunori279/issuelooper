@@ -865,11 +865,13 @@ def queue_snapshot(st: dict) -> dict:
 
 
 def fetch(cfg: Config) -> dict:
-    repo = (
-        cfg.repo
-        or claimlib.gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
-    )
-    owner, name = repo.split("/", 1)
+    if not cfg.repo:
+        # Asked once and kept: it was asked of gh on every poll (issue #26).
+        name = claimlib.gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
+        if "/" not in name:
+            raise RuntimeError(f"gh repo view named no repository ({name!r:.100})")
+        cfg.repo = name
+    owner, name = cfg.repo.split("/", 1)
     # Every page, or none: a queue planned from the first 100 issues missed work, merges
     # and blockers, and a failed page raises, so the poll counts as failed.
     first, cursors, merged = True, {"open": None, "pullRequests": None}, None
