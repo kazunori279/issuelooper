@@ -197,15 +197,20 @@ the pool busy; each is off by default (the concierge sample turns them on):
   push only that PR's branch. A merger takes over when there is no conversation to
   resume or two author sessions did not land it.
 - `[accept] author`: once the deployed build has the merge, the author's conversation
-  accepts its issue there, with the tester's verdict lines and rows. A tester checks
-  owner requests, P0 and 1 in `[accept] sample` (4) of the rest; when more than
-  `[accept] escalate_at` (0.15) of the last `[accept] window` (20) samples fail what the
-  author verified, the sample doubles and the monitor hears it (`state.json`,
-  `accept.sample`; the dashboard). After a verified verdict the author spends
+  accepts its issue there, with the tester's verdict lines and, for each row, a screenshot
+  and the text it asserted (a verified without them goes to a tester). A tester checks
+  every issue with a label in `[accept] sample_labels` (owner requests, P0, needs:live,
+  `seed`, features) and 1 in `[accept] sample` (4) of the rest, the QA way: the cited spec
+  requirements, every viewport and language, a dropped server, polish. When more than
+  `[accept] escalate_at` (0.05) of the last `[accept] window` (20) samples fail what the
+  author verified (after `[accept] min_samples`, 3), the sample doubles and the monitor
+  hears it (`state.json`, `accept.sample`; the dashboard). After a verified verdict the author spends
   `[accept] neighbourhood_min` (10) minutes around its change and files up to three issues.
 - `[explore]`: agent slots the due work leaves free go to explorers, each walking one of
-  `[explore] focuses` in turn and filing up to `[explore] issues` findings, at most
-  `[explore] max` at once and `[explore] per_hour` an hour. They replace idle-time UX runs
+  `[explore] focuses` in turn and filing up to `[explore] issues` (1) finding after a search
+  for duplicates, at most `[explore] max` at once and `[explore] per_hour` an hour, and none
+  while `[explore] queue_max` issues wait, `blocked_max` are blocked or `open_max` of their
+  filings are open. They replace idle-time UX runs
   and spec checks; the regular UX run (`[ux] gap_minutes`) stays.
 - `[areas.<name>]` (path globs, hot files, title `words`, requirement-id `ids`): an issue
   goes to its area's conversation by an `area:<name>` label, else by the area that leads
@@ -215,10 +220,22 @@ the pool busy; each is off by default (the concierge sample turns them on):
   (at most `[areas] conversations`, 3), more than `[areas] lend_at` waiting go to
   ordinary workers, and a fresh conversation with the old one's notes starts after
   `[areas] refresh_after` (6) issues. Only a hot file makes an issue wait for another
-  session; waits are logged and totalled in `state.json` (`area_waits`).
+  session, from that session's start until its PR is open and for `[areas] hot_hold_max_s`
+  at most; with pool slots free, an issue waiting for a busy conversation goes to an
+  ordinary worker. A file that conflicts in `[areas] auto_hot_at` (4) PRs becomes hot.
+  Waits are logged and totalled in `state.json` (`area_waits`).
 - `[pool] author_guard`: when the train's acceptance guards fail only because of a PR,
   its author is resumed to fix the code or update a guard its issue changes (a
   `Guard change:` line in the PR body, checked by the review gate).
+
+Acceptance chores are P2 (`[accept] chore_priority`), one per `[accept] chore_batch` (5)
+verified scripts or per hour, and new scripts are appended to an open chore nobody claimed.
+After a bisect, the PRs ahead of the one handed back merge only once the full check passed
+on their own tree, and guards that fail together but pass one at a time count as test
+isolation, not the PR's. The monitor is pointed to dependencies on unbuilt blockers while
+`[pool] edge_flag_at` (8) issues are blocked, and to blocked issues of every priority. UX
+and explorer reports carry `Findings: B blockers, M majors`, and the logged score is at
+most 85 - 8B - 5M.
 
 An issue `[pool] hub_at` (3) open issues depend on is a hub: it takes the highest priority
 among them and one level more, `[pool] hub_timeout` (1.5) times the worker timeout and
