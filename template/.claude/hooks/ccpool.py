@@ -2100,6 +2100,32 @@ def score_detail(report: pathlib.Path) -> tuple[int | None, str]:
     return None, "no `Score: N/100` line"
 
 
+FINDINGS_LINE = re.compile(r"(?i)\bfindings?\b\W*(\d+)\s*blockers?\W+(\d+)\s*majors?")
+
+
+def score_cap(report: pathlib.Path) -> tuple[int | None, int, int]:
+    """(the most the report's findings allow, blockers, majors) from its line
+    `Findings: B blockers, M majors`: 85 - 8 per blocker - 5 per major, the outside audit's
+    own fit over cohort 60's 208 reviews (83.6 - 7.8 B - 5.5 M), and at most 50 with a
+    blocker, 70 with a major. (None, 0, 0) without the line. Cohort 60: the UX tester scored
+    15.5 points above the audit, and held 60 for four hours while 11 of 12 of its reports
+    named missing seed features."""
+    try:
+        head = report.read_text(errors="replace")[:4000]
+    except OSError:
+        return None, 0, 0
+    m = FINDINGS_LINE.search(head)
+    if not m:
+        return None, 0, 0
+    b, mj = int(m.group(1)), int(m.group(2))
+    cap = 85 - 8 * b - 5 * mj
+    if b:
+        cap = min(cap, 50)
+    elif mj:
+        cap = min(cap, 70)
+    return max(0, cap), b, mj
+
+
 def ux_score(report: pathlib.Path) -> int | None:
     """N from a UX report's `Score: N/100` (asked for on its first line; looked for in the
     first ten), or None when it has none."""
@@ -2194,7 +2220,9 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             + ". Title each `Explore (<the focus in two or three words>): <what the user sees>`, so it reads apart "
             "from a UX run's. Write $LOGDIR/explore_report.md now, its first line `Score: provisional`, and update "
             "it as you go; once you have walked the focus, replace that line with `Score: N/100` for this focus "
-            "(only then: a number before that is not a score), then what you checked and each finding's "
+            "(only then: a number before that is not a score) and a line `Findings: B blockers, M majors` for it "
+            "(already-tracked ones count too; the supervisor caps the score at 85 - 8 per blocker - 5 per major), "
+            "then what you checked and each finding's "
             "disposition (`filed #N`, `already #N`, `not filed: <why>`)."
             + rules
         )
@@ -2228,7 +2256,11 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         "`Score: N/100`, N being the 0-100 score a user would give the app on the skill's scale; "
         "the supervisor reads that line. Write the report at the start with the first line `Score: provisional` "
         "and update it as you go, so a run cut short still reports what it saw; replace that line with "
-        "`Score: N/100` only after the journeys and your probes have run and you have read the screenshots. "
+        "`Score: N/100` only after the journeys and your probes have run and you have read the screenshots, "
+        "followed by a line `Findings: B blockers, M majors` counting every blocker and major you saw, filed now "
+        "or already tracked by an open issue (a feature the spec describes that the journeys reach and that is "
+        "missing or broken is a major, a blocker when a user cannot do what they came for); the supervisor caps "
+        "the score at 85 - 8 per blocker - 5 per major. "
         "The loop's logs (.issuelooper/run, other sessions' reports) are not part of your unit: never read "
         "them, and never take a score from them."
         + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: never copy it; "
@@ -4581,9 +4613,13 @@ class Pool:
         be followed. Only whole-app UX runs make the dashboard's series."""
         name = REPORTS[w.unit.kind]
         score, why = score_detail(w.dir / name)
+        cap, blockers, majors = score_cap(w.dir / name)
+        reported = score
+        if score is not None and cap is not None and score > cap:
+            score = cap  # the report's own findings allow no more
         kind = "ux_score" if w.unit.kind == "ux" else "explore_score"
         rec = {"t": round(self.clock(), 1), "sha": str(w.unit.info.get("sha", ""))[:12], "score": score}
-        if w.unit.kind == "ux":
+        if w.unit.kind == "ux":  # (after the cap: rec carries the score the findings allow)
             with self.lock:
                 self.ux_scores = (self.ux_scores + [rec])[-20:]
         extra = {"focus": w.unit.info.get("focus")} if w.unit.kind == "explore" else {}
@@ -4592,6 +4628,10 @@ class Pool:
                      outcome=outcome, **extra)
             self.event(f"{w.unit.kind} run {w.seq} at {rec['sha']} ended {outcome or 'without a score'}: {why} in {name}")
         else:
+            if cap is not None:
+                extra.update(reported=reported, cap=cap, blockers=blockers, majors=majors)
+            else:
+                extra["findings"] = "no `Findings: B blockers, M majors` line"
             self.log(kind, session=w.seq, sha=rec["sha"], score=score, outcome=outcome, **extra)
 
     def load_ux_scores(self):

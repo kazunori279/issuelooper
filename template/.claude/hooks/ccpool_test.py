@@ -2395,10 +2395,26 @@ def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
     rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
     check("... and the reason says provisional", (rec["score"], rec["missing"]),
           (None, "only a provisional score in ux_report.md"))
+    # Cohort 60: 60 for four hours while history, profiles and forget were missing (audit 43-51).
+    (w.dir / "ux_report.md").write_text("Score: 60/100\nFindings: 3 blockers, 2 majors\n")
+    check("the findings line caps the score: 85 - 8 x 3 - 5 x 2, and 50 with a blocker",
+          ccpool.score_cap(w.dir / "ux_report.md"), (50, 3, 2))
+    pool.finished(w, "ok")
+    rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
+    check("the capped score is logged, with what the report said",
+          (rec["score"], rec["reported"], rec["cap"], pool.ux_scores[-1]["score"]), (50, 60, 50, 50))
+    (w.dir / "ux_report.md").write_text("Score: 66/100\nFindings: 0 blockers, 4 majors\n")
+    check("majors only: 85 - 20", ccpool.score_cap(w.dir / "ux_report.md")[0], 65)
+    (w.dir / "ux_report.md").write_text("Score: 66/100\n")
+    pool.finished(w, "ok")
+    rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
+    check("no findings line: the score stands, and the log says the line is missing",
+          (rec["score"], "findings" in rec), (66, True))
     prompt = ccpool.tester_prompt(ccpool.Unit("tester", "ux", "ux:a", "f", None, (2,), {"sha": "a" * 40}), 8021, "60m",
                                   previous={"score": 58, "sha": "b" * 40})
     check("the prompt asks for `Score: provisional` until the journeys ran, and never the previous score",
-          ("`Score: provisional`" in prompt, "never copy it" in prompt, ".issuelooper/run" in prompt), (True, True, True))
+          ("`Score: provisional`" in prompt, "never copy it" in prompt, ".issuelooper/run" in prompt,
+           "`Findings: B blockers, M majors`" in prompt), (True, True, True, True))
 
 
 def test_explorers_fill_the_idle_slots() -> None:

@@ -250,7 +250,13 @@ Taste is not a defect. A finding says what the user sees, at which step.
 
 Score strictly: a user who meets a blocker (cannot do what they came for) would not
 rate the app above 50, and one who meets a major defect (misled, or slowed down
-badly) not above 70, however polished the rest is. A live-journey step that fails
+badly) not above 70, however polished the rest is. Beyond that, the score is at most
+85 - 8 per blocker - 5 per major (the outside audit's own fit), counting every one you
+saw, whether you file it now or an open issue already tracks it: a feature the spec
+describes that the journeys reach and that is missing or broken is a major, and a
+blocker when it stops what the user came for. Cohort 60's UX runs named the missing
+history, profile and forget features in 11 of 12 reports and still scored 60 while the
+audit gave 43-51. A live-journey step that fails
 in either run counts as a major: it could not be done, or its screenshot shows the
 wrong result (an answer that ignores what was set, such as the saved location; a
 reply under another question; a status stuck on thinking). Scripted journeys
@@ -307,7 +313,8 @@ score a user would give the app, on the scale in step 2; the supervisor reads th
 line and the owner follows it from run to run. Write the report at the start with the
 first line `Score: provisional`, and update it as you read and file: a run cut short (a
 quota wait, the time limit) still reports what it saw. Replace that line with
-`Score: N/100` only after the journeys and your probes ran and you read the screenshots;
+`Score: N/100` only after the journeys and your probes ran and you read the screenshots,
+with the line `Findings: B blockers, M majors` under it (the supervisor applies the cap);
 the supervisor logs nothing for a provisional line, and a number written before that
 (the previous run's, say) is not a score. Near the end of your budget the supervisor
 sends you a turn that asks for the report now; do that before anything else. Do not
