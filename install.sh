@@ -96,13 +96,15 @@ claim_path() {  # <template file or ""> <path in REPO>
   fi
   managed+=("$rel")
 }
+# One path per template file, also in subdirectories (pytest_plugins/): a project's own
+# files beside them are neither overwritten nor staged.
 hook_files=()
-for f in "$TPL"/.claude/hooks/*; do
-  # The tests stay in the issuelooper repository.
-  case "$(basename "$f")" in __pycache__|.ruff_cache|*_test.py) continue ;; esac
-  hook_files+=("$f")
-  claim_path "$f" ".claude/hooks/$(basename "$f")"
-done
+while IFS= read -r rel; do
+  rel="${rel#./}"
+  hook_files+=("$TPL/.claude/hooks/$rel")
+  claim_path "$TPL/.claude/hooks/$rel" ".claude/hooks/$rel"
+done < <(cd "$TPL/.claude/hooks" && find . \( -name __pycache__ -o -name .ruff_cache \) -prune -o \
+  -type f ! -name '*_test.py' ! -name '*.pyc' -print | LC_ALL=C sort)
 for d in "$TPL"/.claude/skills/issuelooper-*; do
   name="$(basename "$d")"
   while IFS= read -r f; do
@@ -135,7 +137,9 @@ fi
 # --- framework files (replaced on upgrade) -----------------------------------------
 mkdir -p "$REPO/.claude/hooks" "$REPO/.claude/skills" "$REPO/.agents/rules" "$REPO/.agents/skills" "$REPO/docs"
 for f in "${hook_files[@]}"; do
-  cp -a "$f" "$REPO/.claude/hooks/"
+  rel="${f#"$TPL/.claude/hooks/"}"
+  mkdir -p "$(dirname "$REPO/.claude/hooks/$rel")"
+  cp -a "$f" "$REPO/.claude/hooks/$rel"
 done
 for d in "$TPL"/.claude/skills/issuelooper-*; do
   rm -rf "$REPO/.claude/skills/$(basename "$d")"

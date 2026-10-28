@@ -117,6 +117,34 @@ class InstallTest(unittest.TestCase):
         self.assertIn(".claude/private-notes.txt", self.untracked(repo))
         self.assertEqual((repo / ".issuelooper/config.toml").read_text(), "# the owner's settings\n")
 
+    def test_a_projects_own_files_beside_the_hooks_stay_unstaged(self):
+        # Issue #22: the whole pytest_plugins/ directory was staged, with a project's own
+        # plugin in it.
+        repo = self.repo()
+        self.assertEqual(self.install(repo).returncode, 0)
+        self.assertIn(".claude/hooks/pytest_plugins/sweep_junit.py", git(repo, "ls-files").split())
+        plugin = repo / ".claude/hooks/pytest_plugins/sweep_junit.py"
+        plugin.write_text(plugin.read_text() + "# an old version\n")
+        git(repo, "add", ".claude/hooks/pytest_plugins/sweep_junit.py")
+        git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "old framework")
+        mine = repo / ".claude/hooks/pytest_plugins/local_only.py"
+        mine.write_text("# the project's own plugin\n")
+        result = self.install(repo, "--upgrade", "--no-commit")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.staged(repo), {".claude/hooks/pytest_plugins/sweep_junit.py"})
+        self.assertIn(".claude/hooks/pytest_plugins/local_only.py", self.untracked(repo))
+        self.assertEqual(mine.read_text(), "# the project's own plugin\n")
+        self.assertNotIn("an old version", plugin.read_text())
+        git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "upgrade")
+        plugin.write_text(plugin.read_text() + "# an old version\n")
+        git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qam", "old framework again")
+        result = self.install(repo, "--upgrade")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(git(repo, "show", "--name-only", "--format=", "HEAD").split(),
+                         [".claude/hooks/pytest_plugins/sweep_junit.py"])
+        self.assertIn(".claude/hooks/pytest_plugins/local_only.py", self.untracked(repo))
+        self.assertEqual(mine.read_text(), "# the project's own plugin\n")
+
     def test_an_upgrade_with_nothing_new_succeeds(self):
         repo = self.repo()
         self.assertEqual(self.install(repo).returncode, 0)
