@@ -95,7 +95,8 @@ browser test files, the whole suite runs instead, which costs less. tests/accept
 left out (`[sweep] affected_exclude`), since the train runs the guard. A PR that passes the review gate
 and the merge gates waits in a queue. The supervisor merges up to `[pool] train_size`
 (6), as many as are queued, P0 first, onto `main` in a worktree and runs the whole suite on that tree
-once. Green: they merge in that order, each checked to leave `main` with the tree the
+once (`[pool] train_wait_s`, off by default, has it wait that long after the first PR is queued
+for more to join, unless the queue is full or holds a P0 PR). Green: they merge in that order, each checked to leave `main` with the tree the
 train ran, and that run is `main`'s check. Red: the failing tests run again on the
 same tree (a pass makes them flaky), then on `main` alone (the same tests running and
 failing there make `main` red and blame no PR; a test `main` does not have, "not found"

@@ -118,6 +118,7 @@ KEYS = {
     ("pool", "max_sessions"): "POOL_MAX_WORKERS",
     ("pool", "merge_train"): "POOL_MERGE_TRAIN",
     ("pool", "train_size"): "POOL_TRAIN_SIZE",
+    ("pool", "train_wait_s"): "POOL_TRAIN_WAIT_S",
     ("pool", "worker_timeout"): "POOL_TIMEOUT_WORKER",
     ("pool", "merger_timeout"): "POOL_TIMEOUT_MERGER",
     ("pool", "tester_timeout"): "POOL_TIMEOUT_TESTER",

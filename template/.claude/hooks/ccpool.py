@@ -577,6 +577,12 @@ class Config:
     # PRs in one train at most; a train takes what is queued, up to this. With the guard in the
     # train's check each train costs more, and the queue fills while one runs.
     train_size: int = 6
+    # A train waits up to this long after the first PR in its queue was queued, for more to
+    # join (not extended by later arrivals); it starts at once when the queue reaches
+    # train_size or holds a P0 PR. 0 = off (a train starts as soon as the main lane is free):
+    # off until measured. Runs 10b and c55 kept the main lane busy only 17-26 % of the time
+    # and ran single-PR trains, each a full sweep.
+    train_wait_s: float = 0
     # The acceptance check: issues whose PR changed accept_paths (and needs:live issues)
     # wait at stage:accept after the merge for a tester's check (settle_accept).
     accept: bool = False
@@ -751,6 +757,7 @@ class Config:
             red_hold=env_flag("POOL_RED_HOLD", True),
             merge_train=env_flag("POOL_MERGE_TRAIN", True) and bool(e("SWEEP_COMMAND", "").strip()),
             train_size=env_int("POOL_TRAIN_SIZE", 6),
+            train_wait_s=float(e("POOL_TRAIN_WAIT_S", "") or 0),
             accept=env_flag("POOL_ACCEPT", True) and bool(config.accept_paths()),
             accept_paths=config.accept_paths(),
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
@@ -4287,6 +4294,7 @@ class Pool:
         self.train_running = False  # the merge train runs (it shares main_check_running: one main lane)
         self.train_landing = False  # it is merging its batch now (deploy_check waits)
         self.train_until = 0.0  # no train before this after one that was held
+        self.train_wake_at = 0.0  # when the poll loop is woken for a train that waits for more PRs
         self.train_red_main: tuple = ()  # (main, heads) of a train that failed only where main fails
         self.guard_sha = ""  # the last build the acceptance guard ran on (guard_due)
         self.guard_checked: set[str] = set()  # mains the train checked with the guard (no second run)
@@ -5479,9 +5487,38 @@ class Pool:
             if (not self.cfg.merge_train or not self.book.train or self.main_check_running or self.stopping
                     or self.clock() < self.train_until):
                 return
+            why, first = self.train_ready(st)
+            if not why:
+                due = first + self.cfg.train_wait_s
+                if due != self.train_wake_at:  # the poll loop may sleep past it otherwise
+                    self.train_wake_at = due
+                    timer = threading.Timer(max(0.0, due - self.clock()) + 0.5, self.wake.set)
+                    timer.daemon = True
+                    timer.start()
+                return
             self.main_check_running = self.train_running = True
+            size = len(self.book.train)
+        if self.cfg.train_wait_s > 0:
+            self.log("train_start", why=why, queue=size, waited_s=round(self.clock() - first, 1))
         self.main_check_thread = threading.Thread(target=self.run_train, daemon=True)
         self.main_check_thread.start()
+
+    def train_ready(self, st: dict) -> tuple[str, float]:
+        """(why the train may start now, or '' to wait for more PRs; when the first PR in
+        the queue was queued). Waits only with POOL_TRAIN_WAIT_S, up to that long after the
+        first PR was queued; a full queue (POOL_TRAIN_SIZE) or a P0 PR starts it at once.
+        Called under self.lock."""
+        first = min(e["queued"] for e in self.book.train.values())
+        if self.cfg.train_wait_s <= 0:
+            return "now", first
+        if len(self.book.train) >= max(1, self.cfg.train_size):
+            return "full", first
+        prio = {i["number"]: priority(i["labels"]) for i in st.get("open", [])}
+        if any(prio.get(e["issue"], 9) == 0 for e in self.book.train.values()):
+            return "P0", first
+        if self.clock() >= first + self.cfg.train_wait_s:
+            return "waited", first
+        return "", first
 
     def run_train(self) -> None:
         try:

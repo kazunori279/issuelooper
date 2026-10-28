@@ -5471,6 +5471,53 @@ def test_the_merge_train_queues_a_pr_that_passed_the_gates() -> None:
     check("so does a PR whose issue was put on hold", h.pool.book.train, {})
 
 
+def test_a_train_can_wait_for_more_prs() -> None:
+    """Issue #25 (POOL_TRAIN_WAIT_S, off by default): single-PR trains each cost a full
+    sweep while the main lane stood idle most of the time."""
+    def rig(**cfg):
+        h = Rig(state([iss(n, ["stage:pr"] + (["P0"] if n == 9 else [])) for n in range(1, 10)]),
+                merge_train=True, train_size=3, **cfg)
+        h.started = []
+
+        def fake_run():
+            h.started.append(sorted(h.pool.book.train))
+            with h.pool.lock:
+                h.pool.main_check_running = h.pool.train_running = False
+        h.pool.run_train = fake_run
+
+        def queue(n):
+            h.pool.book.train[10 + n] = {"pr": 10 + n, "issue": n, "head": "b" * 40, "branch": "", "needs_live": False,
+                                         "queued": h.now}
+
+        def due():
+            h.pool.train_due(h.st)
+            if h.pool.main_check_thread:
+                h.pool.main_check_thread.join(5)
+            return h.started[-1] if h.started else None
+        return h, queue, due
+    h, queue, due = rig()
+    queue(1)
+    check("off (the default): a train starts with one PR as soon as the lane is free", due(), [11])
+    h, queue, due = rig(train_wait_s=120)
+    queue(1)
+    check("on: one PR waits for more", due(), None)
+    h.now += 100
+    queue(2)
+    h.now += 19
+    check("a later PR does not extend the wait", due(), None)
+    h.now += 1
+    check("the wait ends 120 s after the first PR was queued", due(), [11, 12])
+    logged = [json.loads(x) for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines() if '"train_start"' in x]
+    check("and the start says why and how long it waited", (logged[-1]["why"], logged[-1]["waited_s"]), ("waited", 120.0))
+    h, queue, due = rig(train_wait_s=120)
+    for n in (1, 2, 3):
+        queue(n)
+    check("a full queue (POOL_TRAIN_SIZE) starts at once", due(), [11, 12, 13])
+    h, queue, due = rig(train_wait_s=120)
+    queue(9)
+    check("a P0 PR starts at once", due(), [19])
+
+
 def test_a_green_train_merges_its_batch_and_checks_main() -> None:
     t = TrainRig({1: "pr1=a", 2: "pr2=b", 3: "pr3=c"}, labels={3: "P0"})
     try:

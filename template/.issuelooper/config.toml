@@ -216,6 +216,9 @@ merge_train = true           # POOL_MERGE_TRAIN: PRs that pass the gates wait in
                              # suite on main with a batch of them merged decides the batch and is main's check.
                              # Off (or no [sweep] command): each PR merges on its own after the quick check
 train_size = 6               # POOL_TRAIN_SIZE: PRs in one train at most (it takes what is queued, up to this)
+train_wait_s = 0             # POOL_TRAIN_WAIT_S: wait up to this long after the first PR is queued for more to
+                             # join (not extended by later ones); a full queue or a P0 PR starts it at once.
+                             # 0 = a train starts as soon as the main lane is free
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
 author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after the supervisor's rebase (or whose rebase
