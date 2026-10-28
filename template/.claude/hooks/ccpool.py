@@ -466,7 +466,14 @@ class Config:
     explore_focuses: list = dataclasses.field(default_factory=list)
     explore_max: int = 2
     explore_per_hour: int = 4
-    explore_issues: int = 3
+    explore_issues: int = 1  # findings one explorer files at most (a P0/P1 finding may go over it)
+    # No explorers while work is waiting: this many unblocked claimable issues, this many
+    # blocked ones, or this many open explorer filings (`Explore (` titles) not yet merged.
+    # Cohort 60: 111 explorer issues, 17 % merged, 37 % duplicates, 86 of them filed while
+    # hub #32 sat unclaimed (0 = no such limit).
+    explore_queue_max: int = 8
+    explore_blocked_max: int = 10
+    explore_open_max: int = 12
     areas: list = dataclasses.field(default_factory=list)  # [areas] (config.areas): {"name", "paths", "hot"}
     # Area ownership ([areas]): an issue routed to an area is worked in that area's
     # conversation, resumed issue after issue, at most area_conversations of them at once (a
@@ -661,7 +668,10 @@ class Config:
             explore_focuses=config.explore_focuses(),
             explore_max=env_int("POOL_EXPLORE_MAX", 2),
             explore_per_hour=env_int("POOL_EXPLORE_PER_HOUR", 4),
-            explore_issues=env_int("POOL_EXPLORE_ISSUES", 3),
+            explore_issues=env_int("POOL_EXPLORE_ISSUES", 1),
+            explore_queue_max=env_int("POOL_EXPLORE_QUEUE_MAX", 8),
+            explore_blocked_max=env_int("POOL_EXPLORE_BLOCKED_MAX", 10),
+            explore_open_max=env_int("POOL_EXPLORE_OPEN_MAX", 12),
             areas=config.areas(),
             area_refresh=env_int("POOL_AREA_REFRESH", 6),
             area_refresh_tokens=env_int("POOL_AREA_REFRESH_TOKENS", 0),
@@ -1520,7 +1530,7 @@ def plan(
             units.append(Unit("tester", "spec", f"spec:{ux_sha[:12]}:{book.extra_runs}", "tst:spec", None,
                               (2, 0, 1), {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd), "spare": True}))
 
-    if cfg.explore and cfg.explore_focuses and ux_sha and not accept_long:
+    if cfg.explore and cfg.explore_focuses and ux_sha and not accept_long and not explore_held(st, cfg, claimable, done):
         units += plan_explorers(book, cfg, now, ux_sha, units)
 
     units.sort(key=lambda u: u.rank)
@@ -1604,6 +1614,23 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
         return {"lent": area, "files": sorted(files), "hot": sorted(hot)}
     book.waits_now[n] = {"why": "area", "area": area, "files": []}
     return None
+
+
+def explore_held(st: dict, cfg: Config, claimable: list[dict], done: set) -> str:
+    """Why no explorer starts now ('' when one may): work is waiting (POOL_EXPLORE_QUEUE_MAX
+    claimable issues or POOL_EXPLORE_BLOCKED_MAX blocked ones), or POOL_EXPLORE_OPEN_MAX of
+    the explorers' own filings are still open and not merged."""
+    numbers = {i["number"] for i in st["open"]}
+    blocked_n = sum(1 for i in st["open"] if set(i["labels"]) & CLAIMABLE and blocked(i, numbers, done))
+    filed = sum(1 for i in st["open"] if str(i.get("title", "")).startswith("Explore (")
+                and not set(i["labels"]) & set(ACCEPTING))
+    if cfg.explore_queue_max and len(claimable) >= cfg.explore_queue_max:
+        return f"{len(claimable)} claimable issues wait"
+    if cfg.explore_blocked_max and blocked_n >= cfg.explore_blocked_max:
+        return f"{blocked_n} issues are blocked"
+    if cfg.explore_open_max and filed >= cfg.explore_open_max:
+        return f"{filed} explorer filings are open"
+    return ""
 
 
 def plan_explorers(book: Book, cfg: Config, now: float, sha: str, units: list[Unit]) -> list[Unit]:
@@ -2157,8 +2184,12 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             f"app at that commit on your port as {PROJECT} says (live mode only when the focus is the live journey) "
             "and use it as a person would, through that focus only: at the checklist's viewports and languages "
             "where they apply, and across a reload. Judge what you see by the skill's UX scale (UX run, step 2). "
-            f"File at most {u.info.get('issues', 3)} new findings, each checked for a duplicate as in UX run step 3, "
-            "signed `<!-- tester -->`"
+            f"File at most {u.info.get('issues', 1)} new finding(s) (one more only for a blocker or a major: P0/P1), "
+            "signed `<!-- tester -->` with a second line `<!-- explore focus=<focus> -->`. Before each, search open "
+            "and recently closed issues by its key terms (`gh issue list --state all --search \"<terms>\" --limit 30`, "
+            "and the open `UX`/`Explore` titles once): when one covers what the user sees, add your step or "
+            "screenshot to it as a comment instead of filing. Never file that a feature is missing while an open "
+            "issue asks for it (a seed issue, say): mention that issue in your report"
             + (f", labelled `area:<name>` when it lies in one of these areas: {', '.join(areas)}" if areas else "")
             + ". Title each `Explore (<the focus in two or three words>): <what the user sees>`, so it reads apart "
             "from a UX run's. Write $LOGDIR/explore_report.md now, its first line `Score: provisional`, and update "

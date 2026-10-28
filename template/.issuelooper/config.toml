@@ -155,7 +155,10 @@ focuses = []                 # POOL_EXPLORE_FOCUSES: taken in turn, e.g. ["phone
                              # "reload mid-task and after", "the settings", "one spec section: ..."]
 max = 2                      # POOL_EXPLORE_MAX: explorers at once
 per_hour = 4                 # POOL_EXPLORE_PER_HOUR: explorers started per hour at most (the model quota is shared)
-issues = 3                   # POOL_EXPLORE_ISSUES: findings one explorer files at most
+issues = 1                   # POOL_EXPLORE_ISSUES: findings one explorer files at most (one more for a blocker or major)
+queue_max = 8                # POOL_EXPLORE_QUEUE_MAX: no explorers while this many claimable issues wait,
+blocked_max = 10             # POOL_EXPLORE_BLOCKED_MAX: this many are blocked,
+open_max = 12                # POOL_EXPLORE_OPEN_MAX: or this many explorer filings are open and unmerged (0 = no limit)
 
 # Area ownership: named areas of the app, each with path globs (`*` crosses /) and its hot files
 # (`hot = true`: all of its paths). An issue goes to the area its `area:<name>` label names, else

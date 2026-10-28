@@ -84,9 +84,13 @@ language, the live journey, reload and restore, the settings, one card type, one
 section). Run the commit in your prompt (the rig), and use the app through that focus
 only, as a person would: at the viewports and languages that apply, across a reload,
 with screenshots after each step, read through contact sheets. Judge them on the UX
-run's scale (step 2). File at most the number your prompt gives, each checked for a
-duplicate as in UX run step 3, labelled `area:<name>` when it lies in one of the areas
-your prompt lists, titled `Explore (<focus in two or three words>): <what the user
+run's scale (step 2), with its caps. File at most the number your prompt gives (one,
+unless a finding is a blocker or a major), each searched for first in open and recently
+closed issues by its key terms; when one covers what the user sees, comment on it
+instead. Never file that a feature is missing while an open issue asks for it (a seed
+issue): name that issue in your report. Each filing carries
+`<!-- explore focus=<focus> -->` under the marker and is labelled `area:<name>` when it
+lies in one of the areas your prompt lists, titled `Explore (<focus in two or three words>): <what the user
 sees>`. Write `$LOGDIR/explore_report.md` as you go: its first line `Score: provisional`
 until you have walked the focus, then `Score: N/100` for this focus, then what you
 checked and each finding's disposition.

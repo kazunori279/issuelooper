@@ -2430,13 +2430,21 @@ def test_explorers_fill_the_idle_slots() -> None:
     busy = Rig(state([iss(n, ["stage:triage", "P1"]) for n in range(1, 5)]), global_cap=4, explore=True,
                explore_focuses=focuses)
     check("no free slot: no explorer", sorted(u.kind for u in busy.step()), ["implement"] * 4)
+    # Cohort 60: 111 explorer filings, 86 of them while the hub sat unclaimed and work waited.
+    for label, st in (("8 claimable issues wait", state([iss(n, ["stage:triage", "P2"]) for n in range(1, 9)])),
+                      ("10 issues are blocked", state([iss(1, ["stage:triage", "P2"])] + [
+                          iss(n, ["stage:triage", "P2"], body="Blocked by: #1") for n in range(2, 12)])),
+                      ("12 explorer filings are open", state([iss(n, ["stage:owner", "P2"], title=f"Explore (phone): x{n}")
+                                                              for n in range(1, 13)]))):
+        held = Rig(st, global_cap=40, explore=True, explore_focuses=focuses)
+        check(f"no explorer while {label}", [u.kind for u in held.step() if u.kind == "explore"], [])
     nocap = Rig(state([iss(1, ["stage:triage", "P1"])]), explore=True, explore_focuses=focuses)
     check("with no global cap, explorers only while no worker is due", sorted(u.kind for u in nocap.step()), ["implement"])
     u = ccpool.Unit("tester", "explore", "exp:a:0", "tst:exp0", None, (5, 0),
                     {"sha": "a" * 40, "deployed": True, "focus": "phone 320 px", "issues": 3, "areas": ["live", "cards"]})
     prompt = ccpool.tester_prompt(u, 8121, "60m")
     check("its prompt: the focus, the skill section, the limit, areas to label, a provisional score",
-          all(x in prompt for x in ("section Explore", "Your focus: phone 320 px", "at most 3 new findings",
+          all(x in prompt for x in ("section Explore", "Your focus: phone 320 px", "at most 3 new finding", "explore focus=", "--state all",
                                     "`area:<name>`", "live, cards", "explore_report.md", "provisional")), True)
 
 

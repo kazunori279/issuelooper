@@ -133,8 +133,9 @@ focuses = [                  # POOL_EXPLORE_FOCUSES: taken in turn
   "spec/ACCEPTANCE.md cases A-15 to A-27 on the deployed build",
 ]
 max = 3                      # POOL_EXPLORE_MAX: explorers at once, of 16 sessions
-per_hour = 6                 # POOL_EXPLORE_PER_HOUR: the model quota is shared with every other session
-issues = 3                   # POOL_EXPLORE_ISSUES
+per_hour = 4                 # POOL_EXPLORE_PER_HOUR: the model quota is shared with every other session
+issues = 1                   # POOL_EXPLORE_ISSUES: c60's explorers filed 111 issues, 17 % merged, 37 % duplicates
+open_max = 12                # POOL_EXPLORE_OPEN_MAX: no explorers while 12 of their filings are open
 
 # Areas of the app (src/concierge): each issue goes to its area's conversation. main.py holds the
 # live session and every tool's wiring, so it is the live area's hot file; app.js, index.html and
