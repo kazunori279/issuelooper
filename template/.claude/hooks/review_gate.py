@@ -309,6 +309,14 @@ SOURCE_HINT = re.compile(r"""["'/](?:src|static)/|\bsrc_dir\b|\b(?:SRC|SOURCE)\w
 FORMATTER = re.compile(r"""ruff[\"',\s]+(?:format|check)|ruff (?:format|check)|black --check|prettier --check|\beslint\b""")
 
 
+# Test code that hides a feature instead of testing it: navigation patched to reset state,
+# and an API call that wipes server state from a test. Cohort 60: #32's final conftest
+# patched page.goto and page.reload to call DELETE /api/history (an endpoint only tests
+# used) before every navigation, so the old guards passed and their reload rows tested nothing.
+PATCHED_NAV = re.compile(r"""monkeypatch\.setattr\(\s*page\s*,\s*["'](?:goto|reload)["']|\bpage\.(?:goto|reload)\s*=[^=]""")
+RESET_CALL = re.compile(r"""method\s*=\s*["']DELETE["']|\brequests\.delete\(|\.delete\(\s*f?["'][^"']*/api/""")
+
+
 def structure_tests(files: list[tuple[str, str]]) -> list[dict]:
     """Findings for added Python test code that counts a source file's lines or runs a
     formatter or linter: the review prompt bans both, and they are plain to see. A test
@@ -330,6 +338,11 @@ def structure_tests(files: list[tuple[str, str]]) -> list[dict]:
             if FORMATTER.search(ln) and ("subprocess" in text or "run(" in ln):
                 found.append({"kind": "test", "file": path, "what": "runs a formatter or linter as a test (the sweep "
                               f"lints already): `{ln.strip()[:120]}`"})
+                break
+            if PATCHED_NAV.search(ln) or RESET_CALL.search(ln):
+                found.append({"kind": "test", "file": path, "what": "resets server state from test code (patched "
+                              "navigation, or an API call that wipes data) instead of giving the test a fresh state "
+                              f"of its own: `{ln.strip()[:120]}`"})
                 break
     return found
 

@@ -11,7 +11,7 @@ Build the app described in `spec/REQUIREMENTS.md`. `spec/ACCEPTANCE.md` says whe
 ## Rules
 
 - Python dependencies are managed with uv. Use `uv add`, never pip.
-- Browser tests use pytest-playwright and run the server in scripted mode (`tests/e2e/conftest.py`). Use the `data-testid` hooks from REQUIREMENTS §12.
+- Browser tests use pytest-playwright and run the server in scripted mode (`tests/conftest.py`: `server_url` shared, `fresh_server_url` per test). Use the `data-testid` hooks from REQUIREMENTS §12.
 - Do not hard-code values from `spec/fixtures/script.json`. The UX runs use a different script (`ux/ux_script.json`).
 - `spec/` is the product decision and `ux/` is how the app is checked: change neither to make a change pass.
 - Before writing or changing code that uses Google ADK or the Gemini Live API, check the current API documentation. Your training data may be out of date.

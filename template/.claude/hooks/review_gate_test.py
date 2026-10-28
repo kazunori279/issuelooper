@@ -267,6 +267,19 @@ try:
     check("no guard: said so", "(this diff changes no acceptance guard)" in rg.build_prompt(7, "t", [], [], [], "d", False),
           True)
 
+    # --- a test that resets server state to pass (cohort 60, #32's conftest) ------------
+    hiding = rg.split_files(diff_for([("tests/conftest.py", [
+        'monkeypatch.setattr(page, "goto", _goto)',
+        'req = urllib.request.Request(f"{url}/api/history", method="DELETE")'])]))
+    check("patched navigation, or an API call that wipes data, from test code is rejected without the model",
+          [f["kind"] for f in rg.structure_tests(hiding)], ["test"])
+    fresh = rg.split_files(diff_for([("tests/accept/test_accept_32.py", [
+        "def test_history(fresh_server_url, page):", "    page.goto(fresh_server_url)", "    page.reload()"])]))
+    check("a guard on a fresh app of its own is fine", rg.structure_tests(fresh), [])
+    p = rg.build_prompt(7, "t", [], [], [], "d", False)
+    check("the prompt names both, and an endpoint only tests call",
+          ("navigation patched" in p, "only tests call" in p), (True, True))
+
     # --- pre-scan -------------------------------------------------------------------
     files = rg.split_files(
         diff_for(

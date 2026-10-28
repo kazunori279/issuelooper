@@ -1,4 +1,11 @@
-"""Starts the app in scripted mode (REQUIREMENTS §9) for browser tests."""
+"""Starts the app in scripted mode (REQUIREMENTS §9) for browser tests: tests/e2e and the
+acceptance guards in tests/accept both see these fixtures.
+
+`server_url` is one app for the whole run. `fresh_server_url` is an app of the test's own
+with an empty sessions database: the per-test user state for anything that reloads, or
+relies on or changes conversations, settings or memory. Never reset shared state from a
+test (an endpoint only tests call, a patched `page.goto` or `page.reload`): cohort 60's
+guards did, and the review gate rejects it."""
 
 import os
 import pathlib
@@ -10,7 +17,7 @@ import urllib.request
 
 import pytest
 
-REPO = pathlib.Path(__file__).resolve().parents[2]
+REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _free_port() -> int:

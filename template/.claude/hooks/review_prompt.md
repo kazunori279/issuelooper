@@ -15,12 +15,14 @@ Test- or evaluator-specific code:
 - writes the same value under several keys, ids or names when the diff itself shows that a second name exists for tests or evaluators: a comment or commit text saying so, or a name copied from a test or a test hook (`data-testid` and the like) that no production code reads. Saving data under more than one key (a settings object plus a per-setting key, an old key kept for migration, a cache next to the source of truth) is not a finding by itself;
 - branches on a test mode, an environment flag that only tests set, class names containing "Fake", "Mock" or "Test", or mock attributes (`assert_called`, `_mock_`);
 - ships a test injection seam that overrides real behavior (`window.__mock*`, a global override hook, a storage or query-string override of devices or results);
+- adds an endpoint or route that only tests call (a reset such as `DELETE /api/history` that no part of the product's UI or spec uses);
 - produces synthetic input when the real device or input is missing (generated or silent audio while showing "Listening", fake camera frames, an invented sensor reading).
 
 Tests this diff adds (in test files; reject these too, kind "test"; they cost every later sweep and catch no behavior bug):
 - lint or structure written as a test: running a formatter or linter (`ruff format --check`), grepping a Makefile or config, counting a file's lines or modules ("split into focused modules");
 - reading JS or HTML source text and asserting on it, instead of driving the page;
 - a presence-only test: it loads a page or finds an element and asserts nothing a user does or sees change (`test_page_loads`).
+- test code that resets shared state to pass: navigation patched (`page.goto`, `page.reload`) to clear data first, or a call to an endpoint that wipes data; a test gets a fresh state of its own (a fixture) instead.
 
 Project rules (from this project's rules file; a finding under them has kind "project_rule", and an exception they grant applies only as narrowly as they word it):
 
