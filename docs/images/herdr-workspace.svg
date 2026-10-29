@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 390" width="100%" height="auto" role="img" aria-labelledby="ws-title ws-desc">
+  <title id="ws-title">Your workspace when issuelooper runs</title>
+  <desc id="ws-desc">On the left, the herdr terminal tab with three panes: the monitor pane for steering priorities, the status pane running issuelooper watch, and the aide pane for research and filing issues. On the right, the local web dashboard at 127.0.0.1:8780.</desc>
+  <defs>
+    <style>
+      .font { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .win-title { font-size: 12.5px; font-weight: 700; fill: #0f172a; }
+      .pane-title { font-size: 12.5px; font-weight: 700; fill: #0f172a; }
+      .body { font-size: 11.5px; fill: #334155; }
+      .prompt { font-size: 11px; fill: #1d4ed8; font-weight: 600; }
+      .cmd { font-size: 11px; fill: #0f766e; }
+      .tag { font-size: 10px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <!-- Outer card -->
+  <rect x="1" y="1" width="918" height="388" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <!-- Left window: herdr terminal workspace -->
+  <rect x="20" y="20" width="560" height="350" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <!-- Window header -->
+  <rect x="20" y="20" width="560" height="34" rx="10" fill="#f1f5f9"/>
+  <rect x="20" y="44" width="560" height="10" fill="#f1f5f9"/>
+  <line x1="20" y1="54" x2="580" y2="54" stroke="#cbd5e1" stroke-width="1"/>
+  <circle cx="38" cy="37" r="5" fill="#94a3b8"/>
+  <circle cx="54" cy="37" r="5" fill="#94a3b8"/>
+  <circle cx="70" cy="37" r="5" fill="#94a3b8"/>
+  <text x="90" y="41" class="mono win-title">herdr tab: "issuelooper" (.claude/hooks/issuelooper start)</text>
+
+  <!-- Top-left pane: Monitor -->
+  <rect x="32" y="66" width="264" height="174" rx="8" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.2"/>
+  <rect x="44" y="76" width="84" height="18" rx="4" fill="#ede9fe"/>
+  <text x="86" y="89" text-anchor="middle" class="mono tag" fill="#6d28d9">&lt;repo&gt;-monitor</text>
+  <text x="44" y="110" class="font pane-title">Monitor (Backlog Moderator)</text>
+  <text x="44" y="128" class="font body">Triages issues, sets P0–P2 &amp; dependencies.</text>
+  <text x="44" y="144" class="font body">Receives automatic Pool update messages.</text>
+  <rect x="44" y="156" width="240" height="72" rx="5" fill="#ffffff" stroke="#ddd6fe" stroke-width="1"/>
+  <text x="52" y="173" class="font tag" fill="#6d28d9">TYPE HERE TO STEER THE QUEUE:</text>
+  <text x="52" y="190" class="mono prompt">&gt; "Make #12 P0 and hold #15"</text>
+  <text x="52" y="206" class="mono prompt">&gt; "What merged today &amp; what's stuck?"</text>
+  <text x="52" y="221" class="mono body" fill="#64748b">Or outside herdr: issuelooper say "..."</text>
+
+  <!-- Bottom-left pane: Status watch -->
+  <rect x="32" y="250" width="264" height="108" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+  <rect x="44" y="260" width="112" height="18" rx="4" fill="#e2e8f0"/>
+  <text x="100" y="273" text-anchor="middle" class="mono tag" fill="#334155">issuelooper watch</text>
+  <text x="44" y="294" class="font pane-title">Terminal Status View</text>
+  <text x="44" y="312" class="font body">Live terminal summary of running</text>
+  <text x="44" y="328" class="font body">workers, queue stages, and health.</text>
+  <text x="44" y="346" class="mono cmd">Supervisor log: .issuelooper/run/pool.out</text>
+
+  <!-- Right pane (top): Aide 1 -->
+  <rect x="306" y="66" width="262" height="196" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.2"/>
+  <rect x="318" y="76" width="76" height="18" rx="4" fill="#dbeafe"/>
+  <text x="356" y="89" text-anchor="middle" class="mono tag" fill="#1d4ed8">&lt;repo&gt;-aide1</text>
+  <text x="318" y="110" class="font pane-title">Aide (Your Research Partner)</text>
+  <text x="318" y="128" class="font body">Ad-hoc agent session (CC_ROLE=aide).</text>
+  <text x="318" y="144" class="font body">Explores code, debugs, and files issues</text>
+  <text x="318" y="160" class="font body">without blocking the Monitor's updates.</text>
+  <rect x="318" y="172" width="238" height="78" rx="5" fill="#ffffff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="326" y="189" class="font tag" fill="#1d4ed8">TYPE HERE FOR RESEARCH &amp; FILING:</text>
+  <text x="326" y="206" class="mono prompt">&gt; "Why does cli.py fail on BOM?"</text>
+  <text x="326" y="222" class="mono prompt">&gt; "Draft &amp; file an issue for --json"</text>
+  <text x="326" y="239" class="mono body" fill="#64748b">Signed &lt;!-- aide --&gt; at stage:triage</text>
+
+  <!-- Right pane (bottom): Aide 2 -->
+  <rect x="306" y="272" width="262" height="86" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="4,3"/>
+  <text x="318" y="295" class="font pane-title">Need another aide?</text>
+  <text x="318" y="314" class="mono cmd">issuelooper aide</text>
+  <text x="318" y="332" class="font body">Opens aide2, aide3... Run as many</text>
+  <text x="318" y="348" class="font body">side-by-side sessions as you need.</text>
+
+  <!-- Right window: Browser Dashboard -->
+  <rect x="600" y="20" width="300" height="350" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="600" y="20" width="300" height="34" rx="10" fill="#f1f5f9"/>
+  <rect x="600" y="44" width="300" height="10" fill="#f1f5f9"/>
+  <line x1="600" y1="54" x2="900" y2="54" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="616" y="41" class="mono win-title">Browser: http://127.0.0.1:8780/</text>
+
+  <!-- Dashboard cards -->
+  <rect x="614" y="66" width="272" height="44" rx="6" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+  <text x="626" y="84" class="font pane-title" fill="#065f46">Health &amp; Needs You</text>
+  <text x="626" y="100" class="font body">main green • deployed sha • stage:owner alerts</text>
+
+  <rect x="614" y="120" width="272" height="62" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="626" y="138" class="font pane-title">Running Agents</text>
+  <text x="626" y="155" class="font body">Every active worker/merger/tester, issue #,</text>
+  <text x="626" y="171" class="font body">elapsed time, current command &amp; log link</text>
+
+  <rect x="614" y="192" width="272" height="62" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="626" y="210" class="font pane-title">Queue &amp; Merge Train</text>
+  <text x="626" y="227" class="font body">Issues by stage (triage / doing / pr / owner),</text>
+  <text x="626" y="243" class="font body">holds, and PRs waiting in the train</text>
+
+  <rect x="614" y="264" width="272" height="94" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="626" y="282" class="font pane-title">Progress &amp; Post-Merge Acceptance</text>
+  <text x="626" y="299" class="font body">Merges/hr, cycle time, UX scores, token usage,</text>
+  <text x="626" y="315" class="font body">accept:verified / accept:failed rate, and</text>
+  <text x="626" y="331" class="font body">the last 30 supervisor events in plain words.</text>
+  <text x="626" y="349" class="mono cmd">Refreshes every 15s from local files only</text>
+</svg>

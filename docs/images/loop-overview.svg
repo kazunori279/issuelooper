@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 510" width="100%" height="auto" role="img" aria-labelledby="loop-title loop-desc">
+  <title id="loop-title">issuelooper architecture and feedback loop</title>
+  <desc id="loop-desc">Owner files issues on GitHub; Monitor triages them; Supervisor (ccpool.py) dispatches parallel Workers in isolated git worktrees, checks PRs through Reviewer and 8 deterministic gates, lands batches via the Merge Train, deploys, and runs Testers and Explorers whose findings feed back into GitHub Issues.</desc>
+  <defs>
+    <style>
+      .font { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .title { font-size: 16px; font-weight: 700; fill: #0f172a; }
+      .subtitle { font-size: 12px; font-weight: 500; fill: #475569; }
+      .box-title { font-size: 13px; font-weight: 700; fill: #0f172a; }
+      .box-sub { font-size: 11px; font-weight: 400; fill: #334155; }
+      .badge { font-size: 10.5px; font-weight: 600; }
+      .edge-label { font-size: 10.5px; font-weight: 600; fill: #475569; }
+    </style>
+    <marker id="arrow-slate" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#0d9488"/>
+    </marker>
+  </defs>
+
+  <!-- Outer card -->
+  <rect x="1" y="1" width="958" height="508" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <!-- Header -->
+  <text x="28" y="30" class="font title">How issuelooper turns GitHub issues into deployed code</text>
+  <text x="28" y="47" class="font subtitle">GitHub holds all state. A deterministic program (ccpool.py) runs the loop, gates, and merges; fresh agents do the coding and testing.</text>
+
+  <!-- 1. Owner box (left top) -->
+  <rect x="28" y="66" width="186" height="128" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+  <rect x="40" y="76" width="64" height="18" rx="4" fill="#dbeafe"/>
+  <text x="72" y="89" text-anchor="middle" class="font badge" fill="#1d4ed8">HUMAN</text>
+  <text x="40" y="111" class="font box-title">Owner (You)</text>
+  <text x="40" y="129" class="font box-sub">• File goals &amp; bugs as issues</text>
+  <text x="40" y="145" class="font box-sub">• Answer stage:owner questions</text>
+  <text x="40" y="161" class="font box-sub">• Steer priorities via Monitor</text>
+  <text x="40" y="177" class="font box-sub">• Check dashboard (:8780)</text>
+
+  <!-- 2. Monitor & Aides box (left bottom) -->
+  <rect x="28" y="232" width="186" height="148" rx="10" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.5"/>
+  <rect x="40" y="242" width="118" height="18" rx="4" fill="#ede9fe"/>
+  <text x="99" y="255" text-anchor="middle" class="font badge" fill="#6d28d9">INTERACTIVE AGENTS</text>
+  <text x="40" y="277" class="font box-title">Monitor &amp; Aides</text>
+  <text x="40" y="295" class="font box-sub">• Monitor triages queue, sets</text>
+  <text x="48" y="310" class="font box-sub">P0–P2, dependencies &amp; holds</text>
+  <text x="40" y="327" class="font box-sub">• Escalates product decisions</text>
+  <text x="48" y="342" class="font box-sub">to stage:owner</text>
+  <text x="40" y="359" class="font box-sub">• Aides: your ad-hoc research</text>
+
+  <!-- Arrow: Owner <-> Monitor -->
+  <line x1="121" y1="194" x2="121" y2="230" stroke="#475569" stroke-width="1.5" marker-start="url(#arrow-slate)" marker-end="url(#arrow-slate)"/>
+  <text x="129" y="216" class="font edge-label">herdr panes</text>
+
+  <!-- 3. GitHub Repository box (top right/center) -->
+  <rect x="256" y="66" width="676" height="96" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="274" y="90" class="font box-title">GitHub Repository (Single Source of Truth)</text>
+  <rect x="664" y="74" width="252" height="20" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="790" y="88" text-anchor="middle" class="mono badge" fill="#334155">role_guard.py checks every write</text>
+
+  <!-- Three pills inside GitHub box -->
+  <rect x="274" y="102" width="204" height="46" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="286" y="121" class="font box-title">Issues (Work Queue)</text>
+  <text x="286" y="137" class="font box-sub">Goals, bugs, specs &amp; blockers</text>
+
+  <rect x="492" y="102" width="204" height="46" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="504" y="121" class="font box-title">Labels (State Machine)</text>
+  <text x="504" y="137" class="mono box-sub">stage:triage|doing|pr|owner</text>
+
+  <rect x="710" y="102" width="206" height="46" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="722" y="121" class="font box-title">PRs &amp; Signed Comments</text>
+  <text x="722" y="137" class="mono box-sub">&lt;!-- worker --&gt; &lt;!-- monitor --&gt;</text>
+
+  <!-- Arrow: Owner -> GitHub -->
+  <line x1="214" y1="114" x2="254" y2="114" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- Arrow: Monitor <-> GitHub -->
+  <path d="M 214 265 L 236 265 L 236 140 L 254 140" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+
+  <!-- 4. Supervisor bar (center) -->
+  <rect x="256" y="190" width="676" height="72" rx="10" fill="#ecfeff" stroke="#67e8f9" stroke-width="1.5"/>
+  <rect x="274" y="202" width="164" height="18" rx="4" fill="#cffafe"/>
+  <text x="356" y="215" text-anchor="middle" class="font badge" fill="#0f766e">DETERMINISTIC PROGRAM</text>
+  <text x="448" y="215" class="mono box-title">Supervisor (ccpool.py)</text>
+  <text x="274" y="236" class="font box-sub">Polls GitHub every 15 s (GraphQL) • claims issues • spawns each agent in an isolated git worktree</text>
+  <text x="274" y="251" class="font box-sub">Enforces timeouts &amp; quota pauses • runs review &amp; merge gates • drives the merge train &amp; deploy</text>
+
+  <!-- Arrow: GitHub <-> Supervisor -->
+  <line x1="594" y1="162" x2="594" y2="188" stroke="#0d9488" stroke-width="1.5" marker-start="url(#arrow-green)" marker-end="url(#arrow-green)"/>
+  <text x="602" y="179" class="font edge-label">polls &amp; updates state</text>
+
+  <!-- Arrow: Supervisor -> Monitor (Pool update) -->
+  <line x1="256" y1="244" x2="216" y2="288" stroke="#0d9488" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- 5. Execution pipeline boxes (bottom row) -->
+  <!-- 5a. Workers & Mergers -->
+  <rect x="256" y="294" width="162" height="142" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="268" y="304" width="90" height="18" rx="4" fill="#f1f5f9"/>
+  <text x="313" y="317" text-anchor="middle" class="font badge" fill="#334155">1. CODE &amp; SWEEP</text>
+  <text x="268" y="338" class="font box-title">Workers (Parallel)</text>
+  <text x="268" y="355" class="font box-sub">• 1 issue per worktree</text>
+  <text x="268" y="371" class="font box-sub">• Write failing test first</text>
+  <text x="268" y="387" class="font box-sub">• Fix, sweep &amp; devcheck</text>
+  <text x="268" y="403" class="font box-sub">• Open PR (stage:pr)</text>
+  <text x="268" y="421" class="font box-sub" fill="#64748b">Merger resolves conflicts</text>
+
+  <!-- 5b. Reviewer & 8 Gates -->
+  <rect x="436" y="294" width="162" height="142" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="448" y="304" width="96" height="18" rx="4" fill="#fef3c7"/>
+  <text x="496" y="317" text-anchor="middle" class="font badge" fill="#b45309">2. VERIFY DIFF</text>
+  <text x="448" y="338" class="font box-title">Reviewer &amp; 8 Gates</text>
+  <text x="448" y="355" class="font box-sub">• Gate 2: green sweep</text>
+  <text x="448" y="371" class="font box-sub">• Gate 3: fail-before test</text>
+  <text x="448" y="387" class="font box-sub">• Gate 5: LLM reviewer</text>
+  <text x="448" y="403" class="font box-sub">• Gate 6: baseline guard</text>
+  <text x="448" y="421" class="font box-sub">• Gate 7: live devcheck</text>
+
+  <!-- 5c. Merge Train & Deploy -->
+  <rect x="616" y="294" width="152" height="142" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="628" y="304" width="96" height="18" rx="4" fill="#dcfce7"/>
+  <text x="676" y="317" text-anchor="middle" class="font badge" fill="#15803d">3. LAND &amp; SHIP</text>
+  <text x="628" y="338" class="font box-title">Merge Train</text>
+  <text x="628" y="355" class="font box-sub">• Batches up to 6 PRs</text>
+  <text x="628" y="371" class="font box-sub">• Full suite + accept</text>
+  <text x="636" y="386" class="font box-sub">guards on merged main</text>
+  <text x="628" y="403" class="font box-sub">• Bisects any break</text>
+  <text x="628" y="421" class="font box-sub">• Squash-merges &amp; deploys</text>
+
+  <!-- 5d. Testers & Explorers -->
+  <rect x="786" y="294" width="146" height="142" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="798" y="304" width="108" height="18" rx="4" fill="#e0e7ff"/>
+  <text x="852" y="317" text-anchor="middle" class="font badge" fill="#4338ca">4. ACCEPT &amp; PROBE</text>
+  <text x="798" y="338" class="font box-title">Testers &amp; Explorers</text>
+  <text x="798" y="355" class="font box-sub">• Independent check of</text>
+  <text x="806" y="370" class="font box-sub">deployed changes</text>
+  <text x="798" y="387" class="font box-sub">• Whole-app UX runs</text>
+  <text x="798" y="403" class="font box-sub">• Focused explorers &amp;</text>
+  <text x="806" y="418" class="font box-sub">spec requirement checks</text>
+
+  <!-- Supervisor dispatch arrows down to row -->
+  <line x1="337" y1="262" x2="337" y2="292" stroke="#0d9488" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <line x1="517" y1="262" x2="517" y2="292" stroke="#0d9488" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <line x1="692" y1="262" x2="692" y2="292" stroke="#0d9488" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <line x1="859" y1="262" x2="859" y2="292" stroke="#0d9488" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Pipeline horizontal arrows -->
+  <line x1="418" y1="365" x2="434" y2="365" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+  <line x1="598" y1="365" x2="614" y2="365" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+  <line x1="768" y1="365" x2="784" y2="365" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+
+  <!-- Feedback loop arrow from Testers back to GitHub Issues -->
+  <path d="M 859 436 L 859 478 L 121 478 L 121 404 L 236 404 L 236 125 L 272 125" fill="none" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrow-blue)"/>
+  <rect x="330" y="465" width="490" height="22" rx="4" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="575" y="480" text-anchor="middle" class="font edge-label" fill="#1d4ed8">Feedback loop: reopens failed acceptance • files new UX, spec, explorer &amp; regression issues</text>
+</svg>

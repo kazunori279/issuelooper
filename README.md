@@ -1,585 +1,212 @@
 # issuelooper
 
-A swarm development framework: your personal software factory. You file issues,
-answer the occasional question and review what ships; a team of AI coding agents
-does the rest.
+`issuelooper` runs a team of AI coding agents (`claude` or `agy`) against a GitHub
+repository so you can work at the level of issues and product decisions instead of
+nursing one prompt at a time. You file goals and bugs as GitHub issues, answer the
+questions only a human owner can answer, and let a deterministic supervisor program run
+the workers, test gates, merges, deployments, and post-merge checks.
 
-issuelooper develops a repository with many AI coding-agent sessions at once,
-coordinated only through GitHub. Issues are the work queue, labels are the
-state, pull requests are the output, and signed comments are the conversation. A
-deterministic supervisor (a program, not an agent) watches the repository, starts
-a fresh agent session for each unit of work, and merges pull requests that pass
-its gates.
+## From one chat to a loop
 
-It supports the Antigravity CLI (`agy`) and Claude Code (`claude`) as the agent
-runtime, per role.
+If you have used Claude Code, Cursor, or Antigravity in a single terminal, you already
+know how one agent works. `issuelooper` changes the workflow around the agent:
 
-## How it works
-
-```
-             owner files issues
-                     │
-                     ▼
-   ┌──────────── monitor (one long-lived session) ────────────┐
-   │  triage · priorities · holds · dependencies · decisions  │
-   └──────────────────────────────────────────────────────────┘
-                     │ stage:triage
-                     ▼
- supervisor (ccpool.py, polls GitHub every 15 s, GraphQL, every page)
-   ├─ worker   one per claimable issue: failing test → fix → sweep → PR
-   ├─ merge    no agent: review gate + merge gates → squash-merge → deploy
-   ├─ merger   one per conflicting PR the supervisor could not rebase
-   └─ tester   live checks after merges; UX runs and spec checks of the app
-```
-
-| Role | Kind | Does |
+| Dimension | One interactive agent session | `issuelooper` |
 |---|---|---|
-| **Supervisor** | Program (`ccpool.py`) | Turns GitHub state into units of work, starts them, merges, deploys. |
-| **Worker** | Agent session, one per issue | One issue: a failing test, the fix, a green sweep, a pull request. |
-| **Merger** | Agent session, one per conflicting PR | Rebases, resolves so both sides survive, sweeps again, and rebases once more if `main` moved meanwhile; the supervisor then merges it. |
-| **Tester** | Agent session (optional) | Acceptance checks of merged product changes, a batch per deploy (or live checks of `needs:live` issues without them); UX runs that walk the deployed app and file what gets in a user's way; spec checks of the app against the spec, one requirement at a time. |
-| **Reviewer** | One model call, no tools | Reads the PR's diff and rejects invented data shown as real, code that special-cases tests, and anything your project's rules forbid. |
-| **Monitor** | One long-lived agent session | Triage, priorities, holds, dependencies, and the questions only the owner can answer (`stage:owner`). |
+| **Unit of work** | A chat prompt you watch turn by turn | A GitHub issue with acceptance criteria and a priority (`P0`–`P2`) |
+| **Parallelism** | One task at a time in your checkout | Up to `max_sessions` agents in parallel, each in an isolated `git worktree` |
+| **Coordination** | You copy context between chats | GitHub is the state machine: issues are the queue, labels are the stage, PRs are the output, signed comments (`<!-- worker -->`) are the log |
+| **Who merges code** | You review the diff and run tests by hand | A deterministic Python program (`ccpool.py`) enforces 8 merge gates, an LLM diff reviewer, and a batch merge train before anything lands on `main` |
+| **Permissions** | The agent can run any `git` or `gh` command | A shell hook (`role_guard.py`) restricts each role's GitHub writes and protects the shared checkout and `main` |
+| **After merge** | You test the app yourself | Optional deploys, independent acceptance testers, whole-app UX journeys, and focused explorers file regressions or new issues back into the queue |
 
-Every agent session gets its role from the environment (`CC_ROLE`, set by
-`ccrole.sh`), and a hook on every shell command (`role_guard.py`) enforces what
-that role may do on GitHub: which labels it may set, who may merge or close, and
-that every write carries the role's marker. It also refuses `git stash` (one stash
-stack is shared by every worktree), and git commands and `rm`, `mv`, `cp`, `ln` or
-redirections that would change the shared checkout the supervisor merges and
-deploys from (it holds what only the owner has, such as `.env`); a relative path
-after a `cd` that is not checked (`cd X && ...`, `cd X || exit 1`) counts as the
-shared checkout's. It refuses a push that would empty an issue branch, which makes
-GitHub close its pull request: a push after a `git rebase` (or merge,
-pull) in the same command unless `&&` joins them, a push from a worktree in the
-middle of a rebase, and a head with no commits beyond origin/main (`.githooks/pre-push`
-checks the last two at push time too). A pull request merges only when:
+![issuelooper architecture and feedback loop](docs/images/loop-overview.svg)
 
-| Gate | Requires |
-|---|---|
-| 0 | The shared checkout is clean. |
-| 1 | Every changed `.py` file parses and has no conflict markers. |
-| 2 | The PR names the head it swept, and a green sweep record exists for it. |
-| 3 | A test that failed before the fix passes after it (`Fail-before: <file> N -> M`), or a stated waiver. |
-| 4 | The PR's closing keyword follows `[accept] mode`: in `"gate"` a product change, or a `needs:live` issue with live checks on, says `Refs #N` and is not closed by the merge; in `"after"` a product change says `Fixes #N`. |
-| 5 | The reviewer passed this head, or the owner let this head through (`review-override: <sha> <why>` in a comment of theirs on the PR). A review that keeps failing (`REVIEW_MAX_ERRORS`, 3), or a PR rejected again after `[review] max_rejects` hand-backs, waits for the owner at `stage:owner`; neither merges. |
-| 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty), and no baseline test function disappears (the test files at the commit that installed issuelooper, or `[guard] baseline_tests`; a test moved to another file keeps its name; an `owner-request` issue may change them). |
-| 7 | With `[devcheck]` on, a change a user can see was used in the real environment before its PR: a passing `devcheck.py` record for its change, or a stated waiver. |
+## The lifecycle of one issue
 
-The sweep runs the test suite, usually against test doubles (a scripted model, a
-fake service), so a change can be green and still not work when the app runs for
-real. With `[devcheck]` on, a worker does what a developer does before asking for
-review: after the commit, `devcheck.py` starts the app from the branch in the real
-environment on a port of its own, runs the project's smoke (`[devcheck] command`)
-and the worker's replay of the issue against it, and records the result. Gate 7
-asks for that record on every PR for an issue labelled as `[devcheck] labels` lists
-and every PR that changes `[devcheck] paths`. A rebase that only moved the branch
-keeps the check; when resolving a conflict changed what the branch does (the
-change key moved), the supervisor replays the recorded check on the new head
-itself (`devcheck.py --rerun`) and hands the PR back only when the replay fails.
-Checks share `[devcheck] slots` and use the real services, so they cost what the
-app costs to run; workers get 60 minutes instead of 45.
+Every issue moves through explicit GitHub labels. You can inspect or override the queue
+at any time from the GitHub UI or the `gh` CLI.
 
-A gate that cannot be checked counts as refused: when the guard fails, gives no
-answer, or cannot read the PR or a changed file from GitHub, the supervisor does
-not merge and tries again on a later poll.
-
-By default the supervisor merges through a merge train. Each PR's own sweep (the
-worker's, a merger's, the supervisor's re-sweep) then runs only the tests its change
-touches, when the project sets `[sweep] affected = "<command with {tests}>"`
-(`[sweep] affected_map` adds tests for paths; a change it cannot map, or one to an
-`[sweep] affected_full` path, runs the whole suite). A change to a UI file (JS, HTML,
-CSS) selects every browser test, since a page test reaches the change through the page
-rather than by the file's name (run 10b #104). Over `[sweep] affected_browser_cap` (10)
-browser test files, the whole suite runs instead, which costs less. tests/accept is
-left out (`[sweep] affected_exclude`), since the train runs the guard. A PR that passes the review gate
-and the merge gates waits in a queue. The supervisor merges up to `[pool] train_size`
-(6), as many as are queued, P0 first, onto `main` in a worktree and runs the whole suite on that tree
-once (`[pool] train_wait_s`, off by default, has it wait that long after the first PR is queued
-for more to join, unless the queue is full or holds a P0 PR). Green: they merge in that order, each checked to leave `main` with the tree the
-train ran, and that run is `main`'s check. Red: the failing tests run again on the
-same tree (two passes in up to three runs make them flaky), then on `main` alone (the same tests running and
-failing there make `main` red and blame no PR; a test `main` does not have, "not found"
-or a collection error, is the PR's), then on the trees in between, halving, to find the first
-PR that fails them. That PR is handed back with the failing tests, the PRs before it
-merge, and the rest wait for the next train. `[pool] merge_train = false` merges each
-PR on its own, as the next paragraphs describe; so does a project without a
-`[sweep] command`.
-
-Without the train, each gate checks the PR's head, and a head swept on an older `main` says nothing
-about the merged result: two PRs that do not conflict can still break `main`
-together (one moves an import the other still uses). With `[sweep] fast_command`
-set, the supervisor merges a PR whose head is behind `main` with the current
-`main` in a worktree before the gates and runs that quick check there (the app
-imports, the unit tests pass). A failure hands the PR back, unless `main` alone
-fails the check too, in which case nobody is blamed and the gates decide.
-
-What the quick check leaves out can still break `main`. After `main` moves, the
-supervisor runs the whole suite (`[sweep] command`) on the newest `main` in the
-background (with the train, only on a `main` the train did not check whole), one run
-at a time, for `POOL_MAIN_CHECK_S` (1200) at most. A check that fails
-on the machine (no space left on the device, say) counts as not run, and a PR whose check
-fails that way is held, not handed back; the monitor hears when the scratch file system
-is nearly full. A failure only in tests that have an open `Flaky test:`
-issue counts as green (the issue gets a comment) once those tests pass two of three reruns
-(with `[sweep] rerun`), and any other failure runs again up to three times: two passes
-then count as green and the tests are filed as flaky. One pass is not enough: a test that
-passed one rerun and kept failing afterwards let merges through. A red `main`
-tells the monitor and files an issue titled `main is red: <failing tests>` (P0) with
-the failing tests, the commits since
-the last green `main` and the end of the output; the next green `main` closes it.
-Until it is green, only a PR built on that red `main` merges (rebased onto it, so
-its own green sweep shows the result is not red; the fix itself is such a PR);
-others wait, without a hand-back (`POOL_RED_HOLD=0` lets them through). A PR whose
-re-sweep fails only where that red `main` fails is held for a later try rather than
-handed back; a held PR is not swept again until its head or `main` moves, and one that
-still fails only where an earlier red `main` failed, once `main` has moved on, is
-rebased by the supervisor instead of handed back. The merged-tree check and
-re-sweeps run once more before acting on a failure (only the failing tests, with
-`[sweep] rerun = "<command with {tests}>"`) (a PR that fails twice the same
-way is handed back with the failing tests; twice differently, it is held as flaky),
-and a test that fails and then passes two of three reruns at the same commit (main, a
-PR's head or a merged tree) is flaky: the supervisor files a `Flaky test:` issue for it (or comments
-on the open one). A later green commit proves nothing: that rule once labeled a main
-break as flaky. A flaky test still flaky after `POOL_FLAKY_MERGES` (10) merges gets one
-comment on its issue asking to fix or delete it, and the issue goes to P1. `[sweep] main_check = false`
-turns it off.
-
-`[accept] mode` picks how merged work is accepted:
-
-- `"gate"` (the default): the issue stays open after the merge until a tester accepts it,
-  as described next.
-- `"after"`: the merge closes the issue (`Fixes #N`), and an independent check follows
-  without holding the close or the issues that depend on it. The supervisor tracks issues
-  closed by a merged PR (once each close, kept across restarts) and, once the deployed
-  build has the merge, tester units check every issue with an `[accept] sample_labels`
-  label (owner requests, P0, needs:live, seeds, features) or P1, and 1 in `[accept]
-  sample` of the rest, with the same checklist and evidence rules. A pass labels it
-  `accept:verified`. A failure is checked once more by a fresh session, then reopens the
-  issue at `stage:triage` (raised to P1, `accept:failed`, the report attached), and its
-  author's conversation is resumed for the fix when it can be; a second counted failure
-  after a refix goes to the owner. When checks fail over `[accept] escalate_at` of the last
-  `[accept] window`, the rest are sampled more often. `state.json` (`accept.after`) and the
-  dashboard show the failure rate, an estimate of the defects that got past the merge. No
-  author acceptance runs: checks by the author of a change caught few of the defects an
-  independent tester caught, and closing at the merge keeps the loop fast and cheaper.
-- `"off"`: the merge closes the issue and nothing checks it afterwards.
-
-With `[accept] paths` set (the product code, such as `src/`) and mode `"gate"`, every issue whose pull
-request changes it gets an acceptance check after the merge, and the post-merge live
-check becomes part of it. Such a PR says `Refs #N`, not `Fixes`; the merge gate (and
-`gh pr create`) refuse one that would close its issue. The merge moves the issue to
-`stage:accept`. Once the build the tester checks contains it (the deployed sha, or
-`main` when nothing deploys), tester units accept such issues on that build: up to
-`[accept] units` (2) side by side, each with up to `[accept] batch` (6). A second unit
-starts beside a running one only once a full batch waits, and an issue belongs to one
-unit from its start until its verdict is settled. Issues that other open issues depend
-on go first, then by priority, raised one level for each hour waited at
-`stage:accept`, so a long wait wins in the end. While more than two batches wait, the
-testers skip idle-time UX runs and spec checks. The tester did not write any of them, and uses live mode for
-`needs:live` issues and changes to the checklist's live paths. Per issue, its signed comment
-ends in `accept-verified: <what ran>` (the supervisor closes the issue) or
-`accept-blocked: <what is missing>` (the owner). Anything else is a failure. A fresh
-session checks a failure once more before it counts; a counted failure goes back to
-`stage:triage` with the report, and a second one to the owner. An issue at `stage:live`
-from before is accepted the same way. Docs, tests and chores close on merge as before,
-and with `paths` empty only `needs:live` issues get a live check, as before.
-
-The acceptance checklist (`[accept]` viewports, languages, always and live rows, and
-`[accept.triggers]` from path globs to row groups) is shared by the worker and the
-tester. Both see it in their prompts. A worker's live-check script declares the rows
-it covers (`# accept-rows: viewport:320x640 lang:ja`) or skips one that cannot apply,
-with a reason (`# accept-skip: <id> <why>`). devcheck.py records them, and gate 7
-refuses a record that misses a row the PR's paths trigger. Most reopened issues were
-partial implementations in these rows: 320 px, Escape, the second language, voice
-barge-in, live versus scripted.
-
-With `[accept] guard` set (such as `uv run pytest -q tests/accept`), the scripts of
-the issues a tester verified become one chore issue. A worker turns them into
-`tests/accept/test_accept_<N>.py` through the usual gates. On each new build, the
-supervisor runs that command in the main lane, with no model. A failing test runs once
-more alone, up to three times (two passes make it flaky), then files `Regression of #N: <test>` (P1), once
-while that issue is open. With the merge train, its full check runs the guard too,
-after the sweep and on the same merged tree, and a guard failure is bisected and
-handed back like a sweep failure. The sweep keeps `POOL_MAIN_CHECK_S` and the guard
-gets `[accept] guard_timeout_s` (1200). A deploy of a main the train checked this way
-is not guarded again. Only the chore's PR may add files under `tests/accept/` (the
-guard checks its issue for the chore's marker); workers keep their own tests in
-tests/e2e or tests/unit. When workers put their own tests there, the guard grew to
-most of the suite and slowed every deploy. The chore asks for one compact test per issue: scripted
-mode, the suite's shared app server, one page, no fixed sleeps, no source-text checks.
-Split issues get no guard test.
-
-Four switches let the worker own its issue end to end, in one conversation, and keep
-the pool busy; each is off by default (the concierge sample turns them on):
-
-- `[pool] author_resolve`: the supervisor records each worker's conversation per issue
-  (`run/pool/owners.json`). A PR that conflicts after its rebase, or whose rebase went
-  red, is resolved by its author's conversation, resumed (agy `--conversation`, Claude
-  Code `--resume`) with main's new commits and the conflicting files. The guard lets it
-  push only that PR's branch. A merger takes over when there is no conversation to
-  resume or two author sessions did not land it.
-- `[accept] author` (mode `"gate"` only): once the deployed build has the merge, the author's conversation
-  accepts its issue there, with the tester's verdict lines and, for each row, a screenshot
-  and the text it asserted (a verified without them goes to a tester). A tester checks
-  every issue with a label in `[accept] sample_labels` (owner requests, P0, needs:live,
-  `seed`, features) and 1 in `[accept] sample` (4) of the rest, the way an independent
-  tester would: the cited spec
-  requirements, every viewport and language, a dropped server, polish. When more than
-  `[accept] escalate_at` (0.05) of the last `[accept] window` (20) samples fail what the
-  author verified (after `[accept] min_samples`, 3), the sample doubles and the monitor
-  hears it (`state.json`, `accept.sample`; the dashboard). After a verified verdict the author spends
-  `[accept] neighbourhood_min` (10) minutes around its change and files up to three issues.
-- `[explore]`: agent slots the due work leaves free go to explorers, each walking one of
-  `[explore] focuses` in turn and filing up to `[explore] issues` (1) finding after a search
-  for duplicates, at most `[explore] max` at once and `[explore] per_hour` an hour, and none
-  while `[explore] queue_max` issues wait, `blocked_max` are blocked or `open_max` of their
-  filings are open. They replace idle-time UX runs
-  and spec checks; the regular UX run (`[ux] gap_minutes`) stays.
-- `[areas.<name>]` (path globs, hot files, title `words`, requirement-id `ids`): an issue
-  goes to its area's conversation by an `area:<name>` label, else by the area that leads
-  on title words, ids, its last branch's files and the files its names occur in
-  (`[areas] shared` files, which name everything, do not count). For the hot-file lock an
-  issue holds only the files its text names by path and those its last branch changed, and a
-  test-only chore (acceptance tests, consolidation, a flaky test) holds none. The conversation is
-  resumed issue after issue; conversation k opens while k times `[areas] second_at` wait
-  (at most `[areas] conversations`, 3), more than `[areas] lend_at` waiting go to
-  ordinary workers, and a fresh conversation with the old one's notes starts after
-  `[areas] refresh_after` (6) issues. Only a hot file makes an issue wait for another
-  session, from that session's start until its PR is open and for `[areas] hot_hold_max_s`
-  at most; with pool slots free, an issue waiting for a busy conversation goes to an
-  ordinary worker. A file that conflicts in `[areas] auto_hot_at` (4) PRs becomes hot, and
-  so do new source files a merge moves code into out of a hot file; that hot file stops
-  being hot when the move shrank it to 60 % or less (its later conflicts make it hot again).
-  A file the run made hot stops being hot after `[areas] auto_hot_expire` (30) merges with
-  no conflict on it. Issues waiting for a hot file do not count as work that holds back
-  explorers.
-  Waits are logged and totalled in `state.json` (`area_waits`).
-- `[pool] author_guard`: when the train's acceptance guards fail only because of a PR,
-  its author is resumed to fix the code or update a guard its issue changes (a
-  `Guard change:` line in the PR body, checked by the review gate).
-
-Acceptance chores are P2 (`[accept] chore_priority`), one per `[accept] chore_batch` (5)
-verified scripts or per hour, and new scripts are appended to an open chore nobody claimed.
-After a bisect, the PRs ahead of the one handed back merge only once the full check passed
-on their own tree, and guards that fail together but pass one at a time count as test
-isolation, not the PR's. The monitor is pointed to dependencies on unbuilt blockers while
-`[pool] edge_flag_at` (8) issues are blocked, and to blocked issues of every priority. UX
-and explorer reports carry `Findings: B blockers, M majors`, counting defects in what
-exists (a feature whose issue is still open is missing scope, not a major). The logged
-score is at most 85 - 8B - 2M for a whole-app UX run (60 with a blocker, 75 with a major;
-fitted to independent audits) and 85 - 8B - 5M for an explorer.
-
-An issue `[pool] hub_at` (3) open issues depend on is a hub: it takes the highest priority
-among them and one level more, `[pool] hub_timeout` (1.5) times the worker timeout and
-its last worker's conversation, and its failures never park it at stage:owner.
-
-The supervisor also handles what goes wrong in long unattended runs: workers that
-run long get a wrap-up turn, timed-out work is saved to a branch for the next
-worker, model quota errors are waited out with backoff, silent sessions are
-resumed (sooner for models that step quickly; a reply that stops mid-stream counts
-too, and so does an agy session whose turn ended while it waits on a background task, once that task
-(a sweep, a live check) has stopped working;
-an agy session whose stream stopped behind a step while its conversation went on and
-finished is ended `POOL_UNSEEN_IDLE_S` after the last step, once nothing it started
-in its scratch paths is still working), and a session's clocks stand still while the agent CLI retries a failed model
-call (agy), up to a hard ceiling of 1.5 times its timeout (`POOL_TIMEOUT_CEILING`); quota
-errors agy retries inside a turn (read from its conversation record) pause new sessions
-of that quota group, and while a group is paused for quota its running sessions' clocks stand
-still too (its ceiling moves by up to `POOL_QUOTA_EXTEND_MAX_S`). A role's quota group is its
-CLI and model, or a group named in `[agents.quota_groups]`; a role with no model set shares
-one pool-wide pause with every group, as all roles do when no model is set. A session that times out
-mostly in quota waits is no failed attempt. A turn agy ends on an error it calls retryable is
-resumed, not counted as a failure, and an acceptance unit's posted verdicts settle however
-its session ended. A UX report's first line stays `Score: provisional`, which is not logged,
-until the journeys ran; sessions may not read the loop's own logs. A UX run, spec check or explorer gets a turn to write its report before
-its time runs out. Conflicting PRs that only add lines are rebased without an agent (once
-per head; a head whose rebase failed goes to a merger), a PR that conflicts again
-after three merger sessions (main kept moving) goes back to a worker, a P0/P1 PR whose
-rebase went to a merger twice on the same files makes other PRs' merges that touch those
-files wait until it lands (`POOL_STARVE_AFTER`, at most `POOL_STARVE_HOLD_S`, 60 min),
-a file that keeps
-conflicting gets an issue to split it (the review gate summarizes the blocks such a
-split moves verbatim, so its diff fits), `POOL_CONSOLIDATE_AT` (40) per-issue test files
-under one of `POOL_CONSOLIDATE_GLOB` (`tests/e2e/test_issue_*.py`, `tests/accept/test_accept_*.py`)
-on `main`, or one of their directories taking `POOL_CONSOLIDATE_MIN` (5) minutes to run (from
-the latest full sweep's junit, and for tests/accept the guard's last run), get one chore to
-merge or parametrize them by flow (not while one is open), and a deploy that lost a race with another
-`git fetch` is tried again. Servers and test runs a session left running in its
-scratch paths are killed when it ends. Issues blocked by an open issue (a `Blocked by:` line
-or a GitHub dependency) wait. A worker's prompt carries its issue and a map of the
-files that name the issue's backticked names and requirement ids (`[spec]
-id_pattern`), so it reads less to find its way. When workers run out of issues,
-testers make the next work: extra UX runs (never two at once) and, if enabled,
-spec checks. A spec check also starts while half of `[pool] max_sessions` would stay
-idle, at most one per `[spec] gap_minutes`. A UX run walks the journeys script the
-project names in `[ux] journeys`, or else journeys the tester writes and keeps per
-repository, and starts its report with `Score: N/100`, which the supervisor logs.
-
-## Requirements
-
-- A GitHub repository and the [GitHub CLI](https://cli.github.com/) (`gh`), signed in.
-- Python 3.11 or later.
-- `agy` or `claude` on the PATH, signed in.
-- [herdr](https://herdr.dev), the terminal workspace manager the monitor and the
-  aides run in (or set `[monitor] host = "broker"` for a headless monitor).
-- A check suite that one command runs (`make verify`, say). The merge gates
-  expect pytest for the per-issue tests.
-- Linux or macOS. Worktrees and scratch files go under one directory per repository,
-  `/tmp/issuelooper-<repository directory>-<hash of its path>/` (`ISSUELOOPER_TMP`;
-  `python3 .claude/hooks/config.py tmp` prints it).
-  See [macOS validation](docs/macos-verification.md) for the tested environment
-  and remaining limits. Server examples also use `lsof`.
-
-## Try a sample
-
-[`examples/`](examples/) has two samples that one command turns into a repository of
-your own, with issuelooper installed and a seed backlog filed:
-
-- [`hello-world`](examples/hello-world/): a small Python CLI and six issues; see the
-  loop work in 15-30 minutes.
-- [`live-ai-concierge`](examples/live-ai-concierge/): the voice and text concierge
-  the framework was developed on, from a first slice to the full spec
-  in about six hours, with UX checks for the testers.
-
-```bash
-git clone https://github.com/kazunori279/issuelooper
-issuelooper/examples/create.sh hello-world <you>/textstats-demo
+```mermaid
+flowchart LR
+    File["Owner or Tester<br/>files issue"] --> Triage["stage:triage<br/>Monitor sets P0–P2 &amp; deps"]
+    Triage --> Doing["stage:doing<br/>Worker in isolated worktree:<br/>failing test → fix → sweep → PR"]
+    Doing --> PR["stage:pr<br/>Reviewer + 8 gates (0–7)<br/>+ Merge Train on main"]
+    PR -->|hand-back on failure| Doing
+    PR -->|squash-merge &amp; deploy| Mode{"[accept] mode"}
+    Mode -->|"after (closes on merge)"| After["Tester checks deployed build<br/>pass → accept:verified<br/>fail (2x) → reopen P1"]
+    Mode -->|"gate (stays at stage:accept)"| Gate["Tester verifies on deployed build<br/>pass → closes issue<br/>fail (2x) → stage:triage"]
+    Doing -.->|product ambiguity or 3x fail| Owner["stage:owner<br/>Waits for your comment"]
+    Owner -.->|you reply on GitHub| Triage
 ```
 
-## Quick start
+Before any pull request merges, the supervisor verifies 8 gates: clean shared checkout
+(**Gate 0**), valid Python syntax with no conflict markers (**Gate 1**), a green sweep
+record for the PR's head SHA (**Gate 2**), a test that failed before the fix and passes
+after it (**Gate 3**), the closing keyword required by `[accept] mode` (**Gate 4**),
+approval from the tool-free LLM diff reviewer (**Gate 5**), intact protected paths and
+baseline tests (**Gate 6**), and an optional pre-PR live run via `devcheck.py`
+(**Gate 7**). See [How It Works](docs/how-it-works.md) for the full gate and merge-train
+rules.
+
+## The roles
+
+One role is a deterministic program; the others are agent sessions launched with
+`CC_ROLE=<role>` via `ccrole.sh` and policed by `role_guard.py`.
+
+| Role | Kind | What it does |
+|---|---|---|
+| **Supervisor** | Program (`ccpool.py`) | Polls GitHub every 15 s via GraphQL, claims issues, spawns agents in worktrees, enforces gates, runs the merge train, and deploys `main`. |
+| **Monitor** | 1 long-lived agent | Triages incoming issues, sets priorities (`P0`–`P2`) and dependencies, manages holds, and flags product questions for you at `stage:owner`. |
+| **Aide** | Interactive agent(s) | Your on-demand partner in a terminal pane for code research, debugging, and drafting or filing new issues (`<!-- aide -->`). |
+| **Worker** | 1 agent per issue | Reproduces the issue with a failing pytest test, implements the fix, runs the test sweep (and optional live `devcheck`), and opens a PR. |
+| **Reviewer** | 1 model call, no tools | Reads the PR diff (`review_gate.py`) and rejects fabricated data shown as real, test-gaming logic, and violations of `.issuelooper/review_rules.md`. |
+| **Merger** | 1 agent per conflict | Rebases a conflicting PR onto `main` so both changes survive, re-runs the sweep, and hands the clean branch back to the supervisor. |
+| **Tester / Explorer** | Agent session(s) | Runs post-merge acceptance checks on the deployed build, walks user journeys (`[ux]`), checks spec requirements (`[spec]`), and probes focused areas (`[explore]`). |
+
+## Try it in 20 minutes
+
+### Requirements
+
+- **GitHub CLI (`gh`)** installed and signed in (`gh auth status`).
+- **Python 3.11+** and **[uv](https://docs.astral.sh/uv/)** (used by the samples).
+- **An agent CLI** on `PATH` and signed in: Antigravity (`agy`) or Claude Code (`claude`).
+- **[herdr](https://herdr.dev)** for the interactive terminal workspace (or set
+  `[monitor] host = "broker"` in `.issuelooper/config.toml` to run headless).
+- **Linux or macOS** with a single command that runs your test suite (for example
+  `make verify`, using pytest for per-issue tests). See
+  [macOS validation](docs/macos-verification.md) for platform notes.
+
+### Run the `hello-world` sample
+
+`examples/create.sh` creates a private GitHub repository under your account, installs
+`issuelooper`, pushes a small Python CLI (`textstats`) with a deliberate bug, and files
+6 seed issues:
 
 ```bash
 git clone https://github.com/kazunori279/issuelooper
-./issuelooper/install.sh path/to/your-repo     # copies the framework, creates labels, commits
+issuelooper/examples/create.sh hello-world <your-github-user>/textstats-demo
+```
+
+Start the workspace and the loop:
+
+```bash
+cd textstats-demo
+herdr --session textstats-demo
+# Inside the herdr pane that opens:
+.claude/hooks/issuelooper start
+```
+
+Over the next 15–30 minutes, four workers claim the issues in priority order, write
+failing tests, open PRs, pass the LLM reviewer and merge gates, resolve conflicts on
+`cli.py`, and close the queue. Follow the step-by-step guide in
+[`examples/hello-world/`](examples/hello-world/), or try the larger 54-issue voice-and-text
+sample in [`examples/live-ai-concierge/`](examples/live-ai-concierge/).
+
+## Use it on your own repository
+
+Install the hooks, skills, and starter configuration into an existing Git checkout:
+
+```bash
+./issuelooper/install.sh path/to/your-repo
 cd path/to/your-repo
 $EDITOR .issuelooper/config.toml .issuelooper/project.md .issuelooper/review_rules.md
 ISSUELOOPER_CONFIG_OK=1 git commit -am "Configure issuelooper" && git push
-gh issue create --title "..." --body "..."      # the backlog
-herdr --session your-repo                       # then, in a herdr pane:
-.claude/hooks/issuelooper start                 # the monitor, an aide and the supervisor
+gh issue create --title "..." --body "..."
+herdr --session your-repo
+# Inside the herdr pane:
+.claude/hooks/issuelooper start
 ```
 
-`install.sh` writes the framework's files and stages exactly those: other files
-under `.claude/`, `.agents/`, `.githooks/` and `.issuelooper/`, tracked or not, are
-left alone, and an untracked `CLAUDE.md` or `.gitignore` it appends to is left
-unstaged. A file at one of its paths that is not an earlier install's (on an
-upgrade, an untracked one) is listed and nothing is written; `--force` overwrites.
-It points `core.hooksPath` at `.githooks`. If the repository already runs git hooks
-(another `core.hooksPath`, such as Husky's, or hooks in `.git/hooks`), it stops and
-names them: `--chain-hooks` makes `.githooks` run them after its own checks (the
-directory is recorded in this clone's `git config issuelooper.chainedHooksPath`;
-other clones run the same command or set it themselves), and `--keep-hooks` leaves
-`core.hooksPath` alone, for you to call `.githooks/pre-commit` and
-`.githooks/pre-push` from your own hooks.
+Everything project-specific lives in four files under `.issuelooper/`:
 
-`start` opens a herdr tab named `issuelooper` and the loop runs from there. The
-next section is the guide to working with it.
+- **`config.toml`**: agent CLI and model per role, sweep and deploy commands, merge
+  train, acceptance mode (`"gate"`, `"after"`, or `"off"`), and pool concurrency.
+  Validate anytime with `python3 .claude/hooks/config.py check`.
+- **`project.md`**: concise commands and paths agents cannot guess (worktree setup, how
+  to run one test file, how to start the app on a port, where credentials live).
+- **`review_rules.md`**: project-specific rules enforced by the diff reviewer on top of
+  its built-in anti-fabrication and anti-test-gaming checks.
+- **`monitor_kickoff.md`** *(optional)*: the first instructions sent to the monitor when
+  `issuelooper start` launches.
 
-## Working with the loop
+If your repository already uses git hooks (such as Husky or `.git/hooks`), pass
+`--chain-hooks` or `--keep-hooks` to `install.sh`. See
+[Configuration & CLI Reference](docs/configuration.md) for all installer flags and settings.
 
-You work with the loop the way the agents do: through GitHub, plus two kinds of
-agent session you talk to directly in herdr panes.
+## Your day-to-day as the owner
 
-```
-┌─ herdr tab "issuelooper" ───────────────┬──────────────────────────────┐
-│ monitor (<repo>-monitor)                │ aide (<repo>-aide1)          │
-│ the backlog's moderator; queue updates  │ your own session: research,  │
-│ from the supervisor arrive here         │ questions, filing issues     │
-├─────────────────────────────────────────┤                              │
-│ status: `issuelooper watch`             ├──────────────────────────────┤
-│ the dashboard, in the terminal          │ aide2: `issuelooper aide`    │
-└─────────────────────────────────────────┴──────────────────────────────┘
-```
+`issuelooper start` opens a `herdr` tab named `issuelooper` alongside a local web
+dashboard at `http://127.0.0.1:8780/` (run `issuelooper dashboard` to print the URL, or
+`ssh -L 8780:127.0.0.1:8780` when working on a remote machine).
 
-The supervisor itself runs in the background; its log is
-`.issuelooper/run/pool.out`.
+![Your workspace when issuelooper runs](docs/images/herdr-workspace.svg)
 
-### Talk to the monitor
+While the loop runs, you interact with it in four ways:
 
-Type into the monitor's pane as you would into any agent session. The monitor
-triages new issues, sets priorities, holds or closes work, keeps dependencies,
-splits issues too big for one session, screens UX proposals before you read them,
-and gathers the questions only you can answer. Use it
-for decisions about the backlog:
+1. **File issues on GitHub.** Any issue you open enters the queue for the monitor to
+   triage:
 
-- "Make #12 P0 and hold #15 until it lands."
-- "What merged today, and what is stuck?"
-- "Close #20 as not planned; #18 replaces it."
+   | You want | Do this |
+   |---|---|
+   | Something built | File an issue. Add `owner-request` to keep it at least `P1`; the monitor will not lower the priority you give it. |
+   | It done first | Label it `P0` (broken now, or required for the minimum viable product). |
+   | Work paused | Label it `on hold`. Only you remove `on hold`. |
+   | A redo | Reopen the issue and comment what is still wrong. The next worker reads the newest comments first. |
 
-The supervisor sends the monitor a message (starting `Pool update:`) whenever the
-queue changes and the monitor is idle. It waits while the pane is changing, so an
-update does not land in the middle of what you are typing; a message you send
-first is answered first. Keep long research out of the monitor: while it works on
-your request it cannot act on queue updates. Use an aide for that.
+2. **Steer the queue in the Monitor pane.** Type directly into the monitor pane (or run
+   `.claude/hooks/issuelooper say "Make #12 P0 and hold #15"` from another terminal).
+   The supervisor sends `Pool update:` messages to the monitor when the queue changes
+   and waits while you are typing. Keep deep code research out of the monitor so it
+   stays free for queue updates.
+3. **Research and draft issues in an Aide pane.** Aides (`CC_ROLE=aide`) explore code,
+   debug, and file new issues (`stage:triage`, signed `<!-- aide -->`), without touching
+   stage labels or merges. Run `.claude/hooks/issuelooper aide` to open more aides.
+4. **Answer `stage:owner` questions.** When a worker hits a product ambiguity, fails 3
+   times, fails acceptance twice, or lacks a live dependency, the monitor parks the
+   issue at `stage:owner` with a concrete question. Check waiting items with
+   `gh issue list --label stage:owner` (or the dashboard's **Needs you** section) and
+   reply with a normal GitHub comment; your comment resets attempts and wakes the monitor.
 
-From a terminal outside herdr: `issuelooper say "..."` (add `--wait` to wait and
-print the answer), or `issuelooper attach` to open the herdr session.
+### Checking status and stopping
 
-### Use an aide for research and filing
-
-An aide is your ad-hoc session (`CC_ROLE=aide`). Ask it anything about the code,
-let it investigate a bug, or have it draft and file issues. `issuelooper aide`
-opens another one; run as many as you like.
-
-What an aide may do on GitHub is limited by the guard: it files issues (with
-`stage:triage` and a priority) and comments, every write signed `<!-- aide -->`.
-It never moves an issue's stage, merges or closes; the monitor triages what it
-files and the workers pick it up.
-
-### Open issues yourself
-
-Anything you file on GitHub enters the queue; the monitor triages it.
-
-| You want | Do this |
+| To see or do | Command / location |
 |---|---|
-| Something built | File an issue. Add `owner-request` to keep it at least P1; the monitor does not change the priority you give it. |
-| It done first | Give it `P0` (broken now, or the minimum viable product needs it). |
-| Work paused | Add `on hold`. Only you remove it. |
-| A redo | Reopen the issue and say in a comment what is still wrong. The next worker reads the newest comments first. |
+| Live health, running agents, queue, UX scores, events | `http://127.0.0.1:8780/`, `issuelooper watch`, or `issuelooper status` |
+| What the supervisor would start next | `.claude/hooks/issuelooper plan` |
+| One session's prompt and transcript | `.issuelooper/run/pool/<seq>-<role>-<unit>/` (`prompt.txt`, `session.log`) |
+| Pause the loop (keeps aides open, saves WIP branches) | `.claude/hooks/issuelooper stop` |
+| Stop everything and prune 2-day-stale scratch dirs | `.claude/hooks/issuelooper stop --all` |
 
-### Answer the monitor's questions
+## Where to go next
 
-When a decision is yours (what the product should do, a test that contradicts
-the spec), the monitor moves the issue to `stage:owner` and ends its reply with
-the question. Answer with a comment on the issue: the supervisor tells the
-monitor, which acts on it. The monitor does not answer these questions itself
-(it may add context or a recommendation), so they wait for you. An issue the workers failed three times also waits at
-`stage:owner`; any comment from you resets its attempts. So does an issue whose live check
-could not be run (the tester says what is missing; the monitor may not close it
-from other evidence), and one that failed its live check twice: the monitor lists what each fix changed and what each
-check saw, and asks whether the acceptance holds as written.
+- **[How It Works (`docs/how-it-works.md`)](docs/how-it-works.md)**: deep dive into the
+  deterministic supervisor, `role_guard.py`, the 8 merge gates, the merge train and
+  bisection, `"after"` vs `"gate"` acceptance, area conversations, hot-file locks, and
+  unattended recovery.
+- **[Configuration & CLI Reference (`docs/configuration.md`)](docs/configuration.md)**:
+  how to author `.issuelooper/` files, every `config.toml` section and environment
+  variable, all `issuelooper` CLI subcommands, headless (`broker`) mode, and repo layout.
+- **[Samples (`examples/`)](examples/)**: the 20-minute [`hello-world`](examples/hello-world/)
+  walkthrough and the 6-hour [`live-ai-concierge`](examples/live-ai-concierge/) sample.
+- **[macOS & Claude Code Validation (`docs/macos-verification.md`)](docs/macos-verification.md)**:
+  validation results and platform notes for macOS and `claude`.
 
-To see what waits for you: `gh issue list --label stage:owner`.
+## Safety and limits
 
-### Check what is going on
-
-`issuelooper start` also serves a dashboard on `http://127.0.0.1:8780/` (the next
-free port if that one is taken; `issuelooper dashboard` prints the URL). It
-refreshes every 15 seconds and shows, from the top:
-
-- **Health**: the supervisor, when it last read GitHub, the monitor's state, any
-  quota pause, `main`, its last full check (green or red) and the deployed commit.
-- **Needs you**: a red `main`, a file the live checks need missing from the shared
-  checkout (`.env`), decisions waiting at `stage:owner`, stuck work, an issue whose
-  sessions failed twice in a row, a failed deploy, a monitor at a prompt or gone,
-  GitHub read errors, updates piling up for the monitor. Each line says what to do.
-- **Agents**: every running session with its issue or PR, time against its
-  timeout, seconds since its last output, the command it is running, and a link to
-  its log; then the monitor and the aides.
-- **Queue**: open issues per stage, holds, the owner's decisions, open PRs.
-- **Progress**: the recent UX scores, then for the last hour and day: merges,
-  hand-backs and why, issue cycle time, how sessions ended, tokens per role, and
-  cost where the agent CLI reports one (Claude Code does; agy reports tokens only).
-- **Over time**: agents at work by role, and open issues against merges per hour.
-- **Recent**: the supervisor's last 30 events in plain words.
-
-The status pane in herdr (`issuelooper watch`) shows the same in the terminal. The
-dashboard reads only `.issuelooper/run/` and never calls GitHub; it listens on
-127.0.0.1 only, so reach it from another machine with `ssh -L 8780:127.0.0.1:8780`.
-Turn it off with `[dashboard] enabled = false`.
-
-| To see | Look at |
-|---|---|
-| Sessions running, waiting, stuck | the dashboard, the status pane, or `issuelooper status` |
-| What the supervisor would start next | `issuelooper plan` |
-| The queue | GitHub labels: `gh issue list --label stage:doing` (in progress), `stage:pr` (PR open), `stage:owner` (your decision) |
-| What one session did | `.issuelooper/run/pool/<seq>-<role>-<unit>/`: `prompt.txt`, `session.log` (readable), `session.jsonl` (raw) |
-| The supervisor's decisions | `.issuelooper/run/pool/pool.jsonl` and `state.json` |
-| Every sweep, green, red or killed | `$ISSUELOOPER_TMP/sweep/runs.jsonl`: one line per run (sha, caller, wait, steps, outcome, failing tests with their first `E` line, changed files; junit XML beside it with `[sweep] junit`) |
-
-### Stop and restart
-
-`issuelooper stop` stops the supervisor (and the worker, merger and tester
-sessions it runs, and its own main checks, re-sweeps and quick checks) and the dashboard, and closes the monitor's pane; aides stay open with their
-conversations. `issuelooper stop --all` closes the aides too, and removes what earlier runs left in scratch once it is two days stale (worktrees, rescued diffs, live-check and UX output, and other repositories' scratch roots; a stale worktree with unsaved work leaves a `<worktree>-rescued.diff` first, and the gates' records stay), as the supervisor also does when it starts. A stopped worker's
-unfinished work is pushed to its issue's branch and the issue goes back to the queue,
-without counting a failed attempt. `issuelooper start` starts everything again; the
-backlog lives on GitHub, so nothing is lost.
-
-### Without herdr
-
-`[monitor] host = "broker"` runs the monitor as a headless session (for a server
-or CI). Talk to it with `issuelooper say`, and open an aide in any terminal with
-`.claude/hooks/ccrole.sh aide`.
-
-## Configuration
-
-Everything project-specific lives in `.issuelooper/` in your repository:
-
-| File | What it holds |
-|---|---|
-| `config.toml` | Agent CLI and model per role, where the monitor runs (herdr or headless), the sweep command and the quick merged-tree check, the deploy command, live checks, the pre-PR live check (`[devcheck]`), UX runs and spec checks on or off, review settings, pool limits, the owner's protected paths. Each key maps to an environment variable, and an exported variable wins. `python3 .claude/hooks/config.py check` shows the result. |
-| `project.md` | What agents cannot guess: how to set up a worktree, where a new test goes, how to run the app on a given port, where the spec is, live mode, secrets. Every session reads it. |
-| `review_rules.md` | Project rules the reviewer enforces on top of its two built-in checks. |
-| `monitor_kickoff.md` | Optional: the monitor's first message, for example the priorities of a seed backlog. |
-
-The samples' `issuelooper/` directories ([`hello-world`](examples/hello-world/issuelooper/),
-[`live-ai-concierge`](examples/live-ai-concierge/issuelooper/)) are filled-in examples of these files.
-
-## Agent CLIs
-
-`[agents] cli` picks the CLI for every role, and `[agents.<role>]` overrides one
-role (`worker`, `merger`, `tester`, `monitor`, `reviewer`, `aide`). The framework
-was developed and run at length on `agy`. Claude Code 2.1.286 has been validated
-on macOS with a headless monitor, workers, sweeps, the review gate and automatic
-merges. Session resume and the Bash role guard were also checked with the real CLI.
-See [the validation record](docs/macos-verification.md) for evidence and the
-remaining limits, including mixed-CLI runs and live stall/quota recovery.
-
-Most of the cost is workers. A stronger model for the judgment roles (monitor,
-tester, reviewer) costs a small fraction of running everything on it.
-
-## Who the loop listens to
-
-Every session, the supervisor and `claim.py` post as one GitHub account, the one
-`gh` is signed in as (`gh api user`; set `ISSUELOOPER_LOGIN` to name it). The loop
-changes state on a comment only when it comes from the right person:
-
-- Claim and release markers (`<!-- claim ... -->`, `<!-- release ... -->`) count
-  only in comments by the loop's account.
-- The owner's word, which restarts an issue's attempt count and answers a
-  `stage:owner` question, is a comment with no role marker from someone with write
-  access (GitHub's author association OWNER, MEMBER or COLLABORATOR).
-  `<!-- reset-attempts -->` counts from the loop's account or such a person, and so
-  does a `live-verified:` line.
-- Anyone else's comment, markers and all, changes nothing.
-
-In a public repository anyone can open issues and comment, and workers read issue
-bodies and comments as their task. The loop does not act on a stranger's markers,
-but a stranger's text still reaches the agents' prompts: limit who may interact
-(GitHub's interaction limits) or keep the repository private while the loop runs.
-
-## Limits
-
-- `role_guard.py` is not a security boundary. Every session uses the same GitHub
-  login, and a session could set its own `CC_ROLE`; the guard stops sessions that
-  never considered the question, not adversarial ones. Run agents with the
-  permissions you would give an unattended script.
-- Agent sessions run with their CLI's permission prompts off
-  (`--dangerously-skip-permissions`), because the guard is the gate. Run the loop
-  on a machine or VM dedicated to it.
-- One loop per GitHub repository. Loops for different repositories can share a
-  machine: each keeps its worktrees, scratch files and sweep and review records
-  under its own `ISSUELOOPER_TMP`, and picks its own tester ports unless
-  `[pool] tester_port_base` says otherwise. They share the machine's sweep slots
-  (`[sweep] slots` counts sweeps across all of them) and its cores, and the
-  project's own run and deploy commands must not use the same ports.
-
-## Layout
-
-```
-install.sh                     install or upgrade into a repository
-template/                      what install.sh copies
-  .claude/hooks/               supervisor, guard, claims, sweep, live check, review gate, herdr link, headless monitor host, dashboard, launcher (+ tests)
-  .claude/skills/issuelooper-* what each role's agent reads
-  .agents/                     the same hooks, skills and rules for agy
-  .githooks/                   keep sessions out of .claude/ and off main
-  .issuelooper/                config and project templates
-examples/                      samples: an app, its configuration and a seed backlog each; create.sh
-```
-
-Tests: `for t in template/.claude/hooks/*_test.py; do python3 "$t"; done`.
+- **Run on a dedicated machine or VM.** Agent sessions run with CLI permission prompts
+  disabled (`--dangerously-skip-permissions`) and rely on `role_guard.py` for workflow
+  rules. `role_guard.py` prevents accidental mistakes by well-meaning agents, not
+  adversarial escapes, since all sessions share one OS account and GitHub login.
+- **Keep repositories private or restrict interactions while running.** Anyone who can
+  open issues or comment on a public repository can put text into agent prompts.
+  Although the loop ignores state markers (`<!-- claim ... -->`) from untrusted accounts,
+  untrusted issue text still reaches worker prompts; enable GitHub interaction limits if
+  running on a public repo.
+- **One loop per repository; multiple repositories can share a machine.** Each
+  repository isolates its worktrees and records under
+  `/tmp/issuelooper-<repo>-<hash>/` (`$ISSUELOOPER_TMP`) and selects distinct tester
+  ports, while sharing machine-wide `[sweep] slots`.
 
 ## License
 

@@ -1,67 +1,42 @@
 # Sample: Live AI Concierge
 
-The app issuelooper was developed on, from its first slice to the
-full spec, in about six hours. A person talks to an AI concierge by voice or by
-typing; it answers out loud, and when it uses a tool (weather, web search, places,
-routes, place details, images, videos) the result appears as a card next to the
-conversation. Python with Google ADK and the Gemini Live API, plain JavaScript in
-the page.
+The voice-and-text web application `issuelooper` was developed on, built from an initial vertical slice to the full specification in about six hours. Users talk to the concierge by voice or text; it replies out loud, and whenever it calls a tool (weather, web search, places, routes, place details, images, videos) it renders an interactive card beside the conversation. Built with Python, Google ADK, the Gemini Live API, and plain JavaScript.
 
-You start from a working first slice (the layout, scripted mode, the weather card)
-and 54 seed issues. The loop builds the rest: live mode on the real model, the other
-cards, settings, history, profiles and memory. Its testers check live issues against
-the real model, walk the app as users would, one run after another, and check it against
-the spec when the workers run out of issues, and what they file becomes the next
-work.
+You start from a working first slice (layout, scripted mode, and the weather card) plus 54 seed issues. The loop builds the rest: live voice and text mode on the real Gemini Live model, the remaining tool cards, settings, conversation history, user profiles, and memory.
+
+```mermaid
+flowchart LR
+    Seeds["54 Seed Issues<br/>• P0 #1–#14 (MVP &amp; live audio/text)<br/>• P1 #15–#31 (cards &amp; settings)<br/>• P2 #32–#54 (profiles, memory, i18n)"] --> Pool["16 Agent Sessions<br/>• Area conversations &amp; hot locks<br/>• Live devcheck (Gate 7)<br/>• Merge train &amp; deploy (:8000 / :8001)"]
+    Pool --> Accept["Post-Merge &amp; Continuous QA<br/>• [accept] mode = 'after' checks<br/>• 8-journey Playwright UX runs<br/>• Focused explorers &amp; spec checks"]
+    Accept -->|"Reopens failed acceptance<br/>&amp; files UX / explorer issues"| Seeds
+```
 
 ## What is in the sample
 
-| Path | What it is |
+| Path | Contents |
 |---|---|
-| `app/` | The starting app. `spec/` holds the requirements, acceptance criteria, screenshots of the target look and a sample script; `ux/` holds the UX checks (below). |
-| `backlog.md` | The 54 seed issues: P0 #1-#14 (the minimum viable product), P1 #15-#31, P2 #32-#54, with their dependencies. 11 are `needs:live`. |
-| `issuelooper/` | `config.toml` (every role on `gemini-4-argon-high`, 16 sessions, live checks, UX runs and spec checks on), `project.md`, `review_rules.md`, `monitor_kickoff.md`, and `deploy.sh`, which serves `main` for you to try. |
-| `after_create.sh` | Installs the environment and the browser, runs `make verify`, writes `.env`. |
+| `app/` | Starting application. `spec/` holds requirements, acceptance criteria, target screenshots, and a fixture script; `ux/` holds the Playwright UX journeys and grading rubric. |
+| `backlog.md` | 54 seed issues with dependencies: `P0` `#1`–`#14` (minimum viable product), `P1` `#15`–`#31`, and `P2` `#32`–`#54`. Eleven issues carry `needs:live`. |
+| `issuelooper/` | `config.toml` (`gemini-4-argon-high`, `max_sessions = 16`, `[devcheck]`, `[accept] mode = "after"`, `[ux]`, `[spec]`, `[explore]`, `[areas]`), `project.md`, `review_rules.md`, `monitor_kickoff.md`, and `deploy.sh` (serves `main` on ports `8000` and `8001`). |
+| `after_create.sh` | Installs Python dependencies and Playwright Chromium, runs `make verify`, and creates a starter `.env`. |
 
-### The UX checks
+### The UX checks (`app/ux/`)
 
-The loop's own tester walks the app in its UX runs: scripted user journeys, a few
-actions of its own, and a harsh review of every screenshot. Its material is in the app
-repository:
+During the run, tester sessions walk the deployed app using the material in `app/ux/`:
 
-- `ux/journeys.py`: the journeys as a Playwright script. Eight scripted journeys (a
-  first-time visitor on a desktop, a phone user, a heavy user, settings and memory,
-  a Japanese speaker, a saved location on a phone, two profiles, a server restart)
-  and, with `--live`, a live session on the real model with a barge-in. It starts
-  the app itself, takes a screenshot after every step and records the status pill,
-  page errors and any control it could not use. About 4 minutes.
-- `ux/ux_script.json`: the script the journeys run on, with other places, numbers and
-  languages than `spec/fixtures/script.json`, so code that hard-codes the sample
-  script shows up as wrong.
-- `ux/rubric.md`: what counts as friction, how severe it is (blocker P0, major P1,
-  minor P2), and what does not count.
+- **`ux/journeys.py`**: an 8-journey Playwright script (desktop first visit, mobile phone user, heavy multi-card user, settings and memory, Japanese UI and turns, saved location on mobile, multi-profile switching, and server restart recovery) plus `--live` on the real model with voice barge-in. It starts its own app instance, captures a screenshot after every step, and logs status pills, console/page errors, and unusable controls (~4 minutes per run).
+- **`ux/ux_script.json`**: fixture data with different locations, numbers, and languages from `spec/fixtures/script.json`, catching code that hard-codes the spec fixtures.
+- **`ux/rubric.md`**: defines blocker (`P0`), major (`P1`), and minor (`P2`) friction and what counts as missing scope while seed issues are still open.
 
-`.issuelooper/project.md` tells the tester to run the journeys, then probe up to six
-things of its own, and to judge by the rubric. Findings go straight into the queue
-as `UX: ...` issues; no one has to accept them first.
+Findings are filed directly into the queue as `UX: ...` issues.
 
 ## Before you start
 
-- The [requirements](../../README.md#requirements): `gh` signed in, Python 3.11+,
-  `agy` signed in with access to `gemini-4-argon-high`, herdr, and
-  [uv](https://docs.astral.sh/uv/). Linux or macOS.
-- A Google Cloud project with the Vertex AI API enabled, and Application Default
-  Credentials on this machine (`gcloud auth application-default login`). Live mode
-  uses `gemini-3.8-live` in `us-central1` (`LIVE_MODEL` in `.env`).
-- Optional: a Google Maps JavaScript API key whose website restriction allows
-  `http://localhost:*/*` (any port: the testers run the app on ports of their own),
-  for the maps in the places, route and place cards. Without one the cards show lists.
-- Ports 8000 and 8001 free: `deploy.sh` serves the app there for you.
-- Cost: 16 agent sessions for six hours use a lot of model tokens; check your model's
-  prices and quota before a long run.
-- Model quota: 16 sessions on one model reach its tokens-per-minute quota now and
-  then (52 times in our six-hour run); the supervisor waits each one out, but a
-  higher quota makes the run faster.
+- **Base [requirements](../../README.md#requirements):** `gh` signed in, Python 3.11+, `agy` signed in with access to `gemini-4-argon-high`, `herdr`, and [uv](https://docs.astral.sh/uv/) on Linux or macOS.
+- **Google Cloud & Vertex AI:** a Google Cloud project with the Vertex AI API enabled and Application Default Credentials configured (`gcloud auth application-default login`). Live mode uses `gemini-3.8-live` in `us-central1` (`LIVE_MODEL` in `.env`).
+- **Google Maps JavaScript API key *(optional)*:** restricted to `http://localhost:*/*` (testers and `devcheck` start the app on dynamic ports). Without a key, location and route cards fall back to list views.
+- **Free ports `8000` and `8001`:** used by `deploy.sh` to serve `main` in scripted mode (`:8000`) and live mode (`:8001`).
+- **Model quota and cost:** running up to 16 concurrent sessions for six hours consumes substantial token quota. In our six-hour run on a single model, sessions hit the per-minute rate limit 52 times; the supervisor automatically pauses the quota group and stops session timeout clocks during each wait, though higher quota finishes faster.
 
 ## 1. Create the repository (10 minutes)
 
@@ -70,64 +45,38 @@ git clone https://github.com/kazunori279/issuelooper
 issuelooper/examples/create.sh live-ai-concierge <you>/concierge
 ```
 
-Then fill in `concierge/.env` (never committed): `GOOGLE_CLOUD_PROJECT`, and
-`GOOGLE_MAPS_API_KEY` if you have one. The testers and live-mode workers link it
-into their trees; without it, the `needs:live` issues cannot be verified.
+Edit `concierge/.env` (git-ignored) and set `GOOGLE_CLOUD_PROJECT` (plus `GOOGLE_MAPS_API_KEY` if you have one). Workers and testers symlink `.env` from the shared checkout into their worktrees; without it, `needs:live` issues cannot pass live verification.
 
 ## 2. Start the loop
 
 ```bash
 cd concierge
-herdr --session concierge     # the session name create.sh printed last (your repository's name)
-```
-
-In the herdr pane:
-
-```bash
+herdr --session concierge
+# Inside the herdr pane:
 .claude/hooks/issuelooper start
 ```
 
-The monitor, an aide and the status view open in a tab named `issuelooper`; the
-dashboard is at <http://127.0.0.1:8780/>. The supervisor starts workers on the P0
-issues at once.
+The monitor, an aide, and the status view open in the `issuelooper` tab, and the web dashboard starts at <http://127.0.0.1:8780/>.
 
-## 3. What happens
+## 3. What happens during the run
 
-Times and scores depend on the model and on the settings. In run 14 of this sample (six
-hours, every role on `gemini-3.8-flash-high`, acceptance in `"gate"` mode with author
-acceptance, an owner who only answered questions), most seed issues closed, and closes
-trailed merges by about an hour, because each product change closed only after its
-acceptance check.
+Times and UX scores vary with the model and settings. In a test run of the sample (run 14, six hours on `gemini-3.8-flash-high` with `"gate"` acceptance and an owner who only answered `stage:owner` questions), most seed issues closed, with closes trailing merges by about an hour while waiting for post-merge acceptance.
 
-This config runs `[accept] mode = "after"`: each pull request says `Fixes #N` and its merge
-closes the issue, and a tester who did not write the change then checks
-the seeds, owner requests, P0/P1, `needs:live` issues and a sample of the rest on the
-deployed build, reopening a failure. The dashboard shows that failure rate.
+The current sample configuration uses `[accept] mode = "after"` (see [Post-merge acceptance](../../docs/how-it-works.md#4-post-merge-acceptance-accept-mode)):
+- **Immediate close on merge:** each PR uses `Fixes #N`, so merging closes the issue and unblocks dependent issues right away.
+- **Independent post-merge verification:** once deployed, independent tester units verify every seed issue, `owner-request`, `P0`, `P1`, and `needs:live` issue plus 1 in 4 of the rest against the shared acceptance checklist (`1280x800`, `390x844`, `320x640`, English and Japanese, keyboard navigation, reload persistence, and live voice/text turns). Confirmed failures reopen at `stage:triage` (`P1`, `accept:failed`) and resume the author's conversation.
+- **First hour:** up to 16 workers build the `P0` issues. Live mode lands in stages (`#1` text through ADK first, which unblocks voice output, microphone capture, voice input, and live tool cards).
+- **Continuous UX, explorer, and spec runs:** periodic UX runs grade what is built so far, and free slots run focused explorers and spec checks that file the next work.
 
-- **The first hour:** 16 workers take the issues by priority. Live mode is built in stages
-  (typed text through ADK in #1, then the model's voice, the microphone, voice input, and
-  the live tools for the cards), and the other live issues wait for #1.
-- **UX runs from the start:** each run walks the deployed app and files at most five
-  findings. Features whose seed issues are still open count as missing scope, not as
-  defects, so the early scores rate what is built.
-- **When the workers run out of issues:** explorers, extra UX runs and spec checks, one
-  requirement at a time, make the next work.
+Every merge deploys automatically: try scripted mode at <http://localhost:8000/> and live mode at <http://localhost:8001/>.
 
-Every merge is deployed: <http://localhost:8000/> runs `main` in scripted mode (try
-the starter chips), and <http://localhost:8001/> in live mode when `.env` is set.
+## 4. Your role during the run
 
-## 4. Your part
+The loop runs unattended, and your input steers it further:
 
-You are the owner. You do not have to watch, but the loop goes further with you:
-
-- Answer what waits at `stage:owner` (`gh issue list --label stage:owner`, or the
-  dashboard's **Needs you**) with a comment on the issue.
-- Try the app on :8000 and :8001 now and then, and file what bothers you as issues
-  (or ask the aide to). Add `owner-request` to keep one at P1 or above.
-- Ask the monitor what shipped and what is stuck, and re-rank work in its pane.
-
-The loop goes further when the owner checks in often and files what they want as
-requests.
+- **Answer `stage:owner` questions:** check `gh issue list --label stage:owner` or the dashboard's **Needs you** banner and reply on the issue.
+- **Try the deployed app on `:8000` and `:8001`:** file anything you want changed (or ask the aide pane to file it) with the `owner-request` label so it stays at `P1` or above.
+- **Reprioritize in the monitor pane:** ask the monitor what shipped, what is blocked, or which issues to move to `P0`.
 
 ## 5. Stop
 
@@ -135,6 +84,8 @@ requests.
 .claude/hooks/issuelooper stop --all
 ```
 
-This stops the supervisor, its sessions, the dashboard and the panes; the servers
-`deploy.sh` started keep running (`lsof -tiTCP:8000 -tiTCP:8001 -sTCP:LISTEN | xargs kill` stops them). `start`
-picks up where it left off.
+This stops the supervisor, running agent sessions, dashboard, and panes. To stop the deployed background servers on `:8000` and `:8001` as well, run:
+
+```bash
+lsof -tiTCP:8000 -tiTCP:8001 -sTCP:LISTEN | xargs kill
+```
