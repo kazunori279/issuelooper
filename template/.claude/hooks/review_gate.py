@@ -301,8 +301,8 @@ def split_files(diff: str) -> list[tuple[str, str]]:
     return out
 
 
-# Structure written as a test, found without the model. In cohort 55 six tests that count a
-# source file's lines merged: they came in test-only PRs, which the review skipped.
+# Structure written as a test, found without the model. Tests that count a source file's
+# lines merged this way: they came in test-only PRs, which the review skipped.
 LINE_COUNT = re.compile(r"len\(\s*(.*?)\.(?:splitlines\(\)|readlines\(\))\s*\)")
 SOURCE_READ = re.compile(r"^\s*(\w+)\s*=\s*.*\b(?:read_text|read|getsource)\(")
 SOURCE_HINT = re.compile(r"""["'/](?:src|static)/|\bsrc_dir\b|\b(?:SRC|SOURCE)\w*\b|\.(?:js|py|html|css)["']|getsource\(""")
@@ -310,9 +310,9 @@ FORMATTER = re.compile(r"""ruff[\"',\s]+(?:format|check)|ruff (?:format|check)|b
 
 
 # Test code that hides a feature instead of testing it: navigation patched to reset state,
-# and an API call that wipes server state from a test. Cohort 60: #32's final conftest
-# patched page.goto and page.reload to call DELETE /api/history (an endpoint only tests
-# used) before every navigation, so the old guards passed and their reload rows tested nothing.
+# and an API call that wipes server state from a test. One conftest patched page.goto and
+# page.reload to call DELETE /api/history (an endpoint only tests used) before every
+# navigation, so the old guards passed and their reload rows tested nothing.
 PATCHED_NAV = re.compile(r"""monkeypatch\.setattr\(\s*page\s*,\s*["'](?:goto|reload)["']|\bpage\.(?:goto|reload)\s*=[^=]""")
 RESET_CALL = re.compile(r"""method\s*=\s*["']DELETE["']|\brequests\.delete\(|\.delete\(\s*f?["'][^"']*/api/""")
 
@@ -395,7 +395,7 @@ def cap_diff(diff: str, limit: int, prod_limit: int = 0) -> tuple[str, bool]:
     """Production files get their own budget (prod_limit, at least limit) before any
     test, fixture or doc file, which get what is left of limit; context far from a
     change is dropped. A production file cut leaves a branch unread: the judge rejects
-    such a diff, and three ordinary PRs in one run were rejected that way at 30000
+    such a diff, and three ordinary PRs in a test run of the sample were rejected that way at 30000
     characters, two of them with a third of the budget unused because each production
     file got an equal share."""
     prod_limit = max(limit, prod_limit)

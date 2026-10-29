@@ -119,7 +119,7 @@ polish) is still rejected if any added line does one of the listed things.
 - reject: `minutes = route.get("minutes") or 10`.
 - reject: a `DELETE /api/history` (or any reset route) the product never calls, added so
   tests can wipe conversations, and a conftest that patches `page.goto`/`page.reload` to
-  call it: a guard uses `fresh_server_url`, an app of its own (cohort 60, #32).
+  call it: a guard uses `fresh_server_url`, an app of its own.
 - reject: `requests.get("https://places.googleapis.com/v1/places:searchText", headers={"X-Goog-Api-Key": os.environ["GOOGLE_MAPS_API_KEY"]})` in `src/`.
 - reject: `polyline = encode_polyline([(s["lat"], s["lng"]) for s in model_json["waypoints"]])`
   drawn as the route.

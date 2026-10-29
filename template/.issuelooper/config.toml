@@ -70,7 +70,12 @@ main_check = true            # POOL_MAIN_CHECK: after main moves, run the whole 
 
 [accept]
 enabled = true               # POOL_ACCEPT: with paths set, every product change gets an acceptance check
-paths = []                   # ACCEPT_PATHS: product code, e.g. ["src/"]. A PR that changes it says `Refs #N`;
+mode = "gate"                # POOL_ACCEPT_MODE: "gate": a product change says `Refs #N` and its issue closes after a
+                             # tester's acceptance check (below). "after": the PR says `Fixes #N` and the merge closes
+                             # the issue; once deployed, tester units check sample_labels issues, P1, and 1 in `sample` of
+                             # the rest, and a failure (checked twice) reopens it (no author acceptance). "off": the merge
+                             # closes it, no check. Checks by a change's author caught few defects an independent tester did
+paths = []                   # ACCEPT_PATHS: product code, e.g. ["src/"]. In "gate" mode a PR that changes it says `Refs #N`;
                              # the merge moves its issue to stage:accept, and once the deployed build (or main,
                              # when nothing deploys) has it, tester units accept batches of such issues on it,
                              # needs:live ones in live mode. Empty = off: only needs:live issues get a live check
@@ -83,18 +88,18 @@ guard = ""                   # ACCEPT_GUARD: runs tests/accept/ (e.g. "uv run py
                              # too, after the sweep, and a deploy of a main it checked is not guarded again. Empty = off
 author = false               # POOL_AUTHOR_ACCEPT: the author's conversation, resumed, accepts its own merged issue on
                              # the deployed build (same verdict lines); off: tester units accept every issue
-sample = 4                   # POOL_ACCEPT_SAMPLE: with author on, a tester who did not write it also checks owner
-                             # requests, P0, and 1 in this many of the rest (0: only those two kinds)
+sample = 4                   # POOL_ACCEPT_SAMPLE: with author on (or mode "after"), a tester who did not write it checks
+                             # sample_labels issues (and P1 in "after") and 1 in this many of the rest (0: only those)
 sample_labels = ["owner-request", "P0", "needs:live", "seed", "type:feature-request"]
                              # POOL_ACCEPT_SAMPLE_LABELS: issues with any of these (or a type:feature* label) are always
                              # checked independently; the 1 in `sample` is for the rest (bugs, chores)
-escalate_at = 0.05           # POOL_ACCEPT_ESCALATE_AT: when more of the last `window` samples than this failed what
-window = 20                  # POOL_ACCEPT_WINDOW: their author verified, the sample rate doubles (N halves, to 1)
+escalate_at = 0.05           # POOL_ACCEPT_ESCALATE_AT: when more of the last `window` samples than this failed (what the
+window = 20                  # POOL_ACCEPT_WINDOW: author verified; in "after", the check), the sample rate doubles
 min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES: samples in the window before it can escalate
 neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: after a verified verdict the author looks around its change
                              # this long and files at most 3 issues (0 = off)
 chore_priority = "P2"        # POOL_ACCEPT_CHORE_PRIORITY: the priority of the chore (type:chore) that turns verified
-                             # scripts into tests/accept/ (c60: P1 chores were 95 of 211 merges)
+                             # scripts into tests/accept/ (at P1 they crowded out product work)
 chore_batch = 5              # POOL_ACCEPT_CHORE_BATCH: verified scripts per chore, or the oldest waits chore_every_s
 chore_every_s = 3600         # POOL_ACCEPT_CHORE_EVERY_S
 chore_append = true          # POOL_ACCEPT_CHORE_APPEND: append to an open chore nobody claimed instead of filing another
@@ -187,7 +192,10 @@ hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works a
                              # start until its PR is open
 hot_hold_max_s = 1800        # POOL_AREA_HOT_HOLD_MAX_S: and for this long at most
 auto_hot_at = 4              # POOL_AREA_AUTO_HOT_AT: a file of an area that conflicts in this many PRs (within
-                             # POOL_SPLIT_WINDOW_S) becomes its hot file for the rest of the run (0 = off)
+                             # POOL_SPLIT_WINDOW_S) becomes its hot file (0 = off); so do new source files a merge
+                             # moves code into out of a hot file, and a hot file the move shrank to 60 % stops being hot
+auto_hot_expire = 30         # POOL_AREA_AUTO_HOT_EXPIRE: a file the run made hot stops being hot after this many merges
+                             # with no conflict on it (0 = never)
 lend_free = true             # POOL_AREA_LEND_FREE: with pool slots free, an issue waiting only for a busy area conversation
                              # goes to an ordinary worker
 # shared = []                # POOL_AREA_SHARED: files many areas touch (a strings table, the stylesheet); routing
@@ -243,6 +251,9 @@ prune_other_roots = false    # POOL_PRUNE_OTHER_ROOTS: at start, also remove oth
 
 [guard]
 secret_urls = []             # GUARD_SECRET_URLS: URL paths whose response holds a secret; fetching them unfiltered is refused
+# baseline_tests = []         # GUARD_BASELINE_TESTS: the owner's tests no PR may delete or fold away (paths or globs;
+                             # "off" for none). Unset = the test files at the commit that installed issuelooper.
+                             # A PR whose issue carries owner-request may change them
 protected_paths = []         # GUARD_PROTECTED_PATHS: the owner's files (such as ["spec/"]; a trailing / covers a
                              # directory); merge gate 6 refuses a pull request that changes any of them
 background_check = true      # GUARD_BACKGROUND: refuse `cmd &` (or nohup, setsid -f) that does not redirect stdout,

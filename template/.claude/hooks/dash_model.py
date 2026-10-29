@@ -251,6 +251,7 @@ def load(
     ]
     # The worker-owns-its-issue switches: the acceptance sample, explorers, areas (absent: off).
     model["ownership"] = {"sample": (state.get("accept") or {}).get("sample"),
+                          "after": (state.get("accept") or {}).get("after"),
                           "explore": state.get("explore"), "areas": state.get("areas"),
                           "area_waits": state.get("area_waits")}
     model["attention"] = attention(model, state, log, now)
@@ -643,6 +644,12 @@ def ownership_lines(o: dict) -> list[str]:
         rate = f"{s['rate']:.0%}" if s.get("rate") is not None else "—"
         out.append(f"Acceptance sample: 1 in {s.get('every')} · {s.get('disagree', 0)} of the last "
                    f"{s.get('window', 0)} disagree with the author ({rate}) · {s.get('samples', 0)} sampled in all")
+    a = o.get("after") or {}
+    if a:
+        rate = f"{a['fail_rate']:.0%}" if a.get("fail_rate") is not None else "—"
+        out.append(f"Post-merge check: {a.get('failed', 0)} of {a.get('checked', 0)} checked failed "
+                   f"({rate}) · the rest sampled 1 in {a.get('every')} · {a.get('pending', 0)} waiting, "
+                   f"{a.get('skipped', 0)} not sampled")
     e = o.get("explore") or {}
     if e:
         out.append(f"Explorers: {len(e.get('running') or [])} running ({'; '.join(e.get('running') or []) or 'none'}) · "

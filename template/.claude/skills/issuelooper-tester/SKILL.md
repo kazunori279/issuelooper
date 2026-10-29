@@ -103,7 +103,10 @@ build, or `origin/main` when nothing deploys. Someone else wrote each change; yo
 are the first person to use it. With `[accept] author` on, the author accepted most
 issues itself and you get a sample (an `accept-sample` comment says its author
 verified it): check it as if you had not seen that verdict. Where you see something
-else, say so plainly: those disagreements decide how many issues you check. Start the app at that commit (the rig), in scripted
+else, say so plainly: those disagreements decide how many issues you check. With
+`[accept] mode = "after"` the issues are closed already (the merge closed them): check
+them the same way and comment on the closed issue; never reopen, relabel or close it, the
+supervisor acts on your verdict. Start the app at that commit (the rig), in scripted
 mode, or live mode for an issue marked live (as in **Live check** below). For each
 issue:
 
@@ -117,8 +120,8 @@ issue:
    implementations are what this check exists for: the narrow phone, Escape
    closing too much, a half-translated second language, voice but not typed (or
    the reverse), scripted but not live.
-   Check it the way the independent QA does (cohort 60's QA failed a quarter of what
-   authors and testers had verified): read every spec requirement the issue cites
+   Check it the way an independent tester does (independent checks failed a good share
+   of what authors had verified): read every spec requirement the issue cites
    and the spec's strings for each language, and check what they say, not only the
    issue's words; try to break it (390 and 320 px, the other language, a reload
    mid-turn, the server dropped for 20 s and back, an empty or odd input, every entry
@@ -249,23 +252,25 @@ language, readable on a phone? Look for:
 Taste is not a defect. A finding says what the user sees, at which step.
 
 Score strictly: a user who meets a blocker (cannot do what they came for) would not
-rate the app above 50, and one who meets a major defect (misled, or slowed down
-badly) not above 70, however polished the rest is. Beyond that, the score is at most
-85 - 8 per blocker - 5 per major (the outside audit's own fit), counting every one you
-saw, whether you file it now or an open issue already tracks it: a feature the spec
-describes that the journeys reach and that is missing or broken is a major, and a
-blocker when it stops what the user came for. Cohort 60's UX runs named the missing
-history, profile and forget features in 11 of 12 reports and still scored 60 while the
-audit gave 43-51. A live-journey step that fails
+rate the app above 60, and one who meets a major defect (misled, or slowed down
+badly) not above 75, however polished the rest is. Beyond that, the score is at most
+85 - 8 per blocker - 2 per major (fitted to independent audits), counting every defect you
+saw in what exists, whether you file it now or an open issue already tracks it: a
+feature that is there and broken is a major, and a blocker when it stops what the user
+came for. A feature that is not built yet while its issue is open (a seed issue, say) is
+missing scope, not a defect: list it under `Missing scope:` in the report, and leave it
+out of the count. Counting the open seed backlog as majors made early scores a measure
+of the backlog (in a test run of the sample, 11 of 11 counted findings were open issues), and put the UX runs
+far under an independent audit. A live-journey step that fails
 in either run counts as a major: it could not be done, or its screenshot shows the
 wrong result (an answer that ignores what was set, such as the saved location; a
 reply under another question; a status stuck on thinking). Scripted journeys
-cannot show these: in one cohort the tester scored 91-95 while an outside audit of
-the same deploys found 7-19 live majors. In the scripted journeys, each of these is a
+cannot show these: a tester once scored the app in the 90s while an independent review of
+the same deploys found many live majors. In the scripted journeys, each of these is a
 major too: a step the journeys record as "could not do it"; a card or map that is
 gone after a reload (the journeys check it); a status still on Thinking or Listening
-after the turn is over. One cohort's UX runs scored 12-15 points above the outside
-audit and never caught "maps vanish after reload", a major in every late audit. A run
+after the turn is over. UX runs once scored well above an independent review and never
+caught "maps vanish after reload", a major in every late review. A run
 that files nothing new still reports every defect it saw, with the issue that already
 tracks it.
 
@@ -314,7 +319,8 @@ line and the owner follows it from run to run. Write the report at the start wit
 first line `Score: provisional`, and update it as you read and file: a run cut short (a
 quota wait, the time limit) still reports what it saw. Replace that line with
 `Score: N/100` only after the journeys and your probes ran and you read the screenshots,
-with the line `Findings: B blockers, M majors` under it (the supervisor applies the cap);
+with the line `Findings: B blockers, M majors` under it (defects in what exists; the supervisor
+applies the cap), and a `Missing scope:` line naming the open issues for what is not built yet;
 the supervisor logs nothing for a provisional line, and a number written before that
 (the previous run's, say) is not a score. Near the end of your budget the supervisor
 sends you a turn that asks for the report now; do that before anything else. Do not
@@ -327,6 +333,6 @@ Your prompt names the previous run's score. A score 10 or more above it, on the 
 journeys, needs a reason the owner can check: list what improved since that run, each
 with the screenshot that shows it and the issue whose fix explains it. What you
 cannot list that way, take off the score. Scores drift up from run to run when nothing
-holds them; the outside audit does not.
+holds them; an independent review does not.
 
 Then stop the server and remove `$T`.

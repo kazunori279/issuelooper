@@ -203,8 +203,8 @@ RED_PYTEST = (
 
 
 def test_every_run_is_recorded() -> None:
-    """Cohort 52: a red run left nothing, a green one only an overwritable <sha>.json, and
-    the main lane's output was lost; about 40 killed sweeps per cohort could not be found."""
+    """A red run left nothing, a green one only an overwritable <sha>.json, and the main
+    lane's output was lost; killed sweeps could not be found at all."""
     repo = make_repo()
     sha = git(repo, "rev-parse", "HEAD")
     rc, _, records = sweep(repo, TWO_SUITES, SWEEP_CALLER="resweep", CC_ROLE="merger", POOL_WORKER="7",
@@ -268,8 +268,8 @@ def test_junit_per_pytest_run() -> None:
 
 
 def test_affected_selection() -> None:
-    """Cohort 52: workers' and mergers' full sweeps were 26.5 of 43.6 h; the merged PRs
-    touched 2-3 % of the e2e files."""
+    """Workers' and mergers' full sweeps were most of the sweep time, while a merged PR
+    touched only a few of the e2e files."""
     tracked = ["src/concierge/live.py", "src/concierge/__init__.py", "src/concierge/static/js/feed.js",
                "tests/unit/test_live.py", "tests/unit/test_other.py", "tests/e2e/test_issue_7.py",
                "tests/e2e/test_feed_scroll.py", "tests/e2e/test_settings.py", "tests/e2e/conftest.py", "README.md"]

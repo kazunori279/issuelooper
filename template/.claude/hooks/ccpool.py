@@ -145,7 +145,12 @@ prompt and POOL_WORKER_WRAP_BUDGET_S. A session whose model went silent after a
 finished step for POOL_STALL_S (POOL_STALL_FAST_S for a model whose name contains
 one of POOL_STALL_FAST_MODELS) is resumed (twice at most), and so is one whose CLI says
 the model's turn is over while it waits for a background task (agy), after
-POOL_BACKGROUND_IDLE_S (120); still idle after two nudges, it is ended early. An agy session
+POOL_BACKGROUND_IDLE_S (120), but not while the task still works (a sweep or live check
+in its scratch paths, even one asleep waiting for a slot); still idle after two nudges, it
+is ended early. A worker whose CLI exits while its sweep still runs is resumed once the
+sweep ends. A worker that ends with no pull request and no release of its own is "ended
+without a pull request", or BG_CUT (no failed attempt, due again at once) when its sweep
+was still running. An agy session
 whose stream stopped behind a step while its conversation went on and finished (agy's
 own record of it) is ended POOL_UNSEEN_IDLE_S (180) after the last step, unless a process in
 its scratch paths still uses CPU (a sweep it started): then it waits for that. A session that ends on a
@@ -280,6 +285,9 @@ ACCEPT_RETRY = "<!-- accept-retry -->"
 AUTHOR_ACCEPT = "<!-- author-accept -->"
 ACCEPT_SAMPLE = "<!-- accept-sample -->"
 ACCEPT_HANDBACK = "<!-- accept-handback -->"
+# [accept] mode "after": what the post-merge check found on a closed issue (Pool.settle_after).
+AFTER_VERIFIED = "accept:verified"
+AFTER_FAILED = "accept:failed"
 def bare_login(login: str) -> str:
     """A login as both GitHub APIs agree on it: REST names a GitHub App's bot
     `<slug>[bot]` and GraphQL (`gh issue view --json`) plain `<slug>`. Comparing them
@@ -437,9 +445,9 @@ class Config:
     # A hub: an issue at least hub_at open issues depend on (0 = off). It takes the highest
     # priority among its dependents and one level more in the claim order, gets hub_timeout
     # times the worker timeout, resumes its last worker's conversation, and claim.py's
-    # attempt cap never parks it (CLAIM_HUB): the monitor is told instead. Cohort 60: hub #32
-    # (P2, #33, #34, #36, #37 waiting) sat 3 h at stage:triage behind P1 work after its
-    # second failure, until the monitor raised it.
+    # attempt cap never parks it (CLAIM_HUB): the monitor is told instead. A P2 hub with four
+    # issues waiting on it sat for hours at stage:triage behind P1 work after its second
+    # failure, until the monitor raised it.
     hub_at: int = 3
     hub_timeout: float = 1.5
     decompose_after: int = 2  # failed tries on one issue (Book.failed_tries) before the monitor is asked to split it
@@ -504,7 +512,7 @@ class Config:
     # each walk one focus of the deployed app (rotating through explore_focuses) and file
     # what they find; they replace the idle-time UX runs and spec checks. At most
     # explore_max at once and explore_per_hour started an hour (the model quota is shared).
-    # c55 at 3 h 45 min: 11 agents for 4 claimable issues; D's testers filed ~5 issues an hour.
+    # Late in a run, most agent slots stood idle with only a few claimable issues left.
     explore: bool = False
     explore_focuses: list = dataclasses.field(default_factory=list)
     explore_max: int = 2
@@ -512,8 +520,8 @@ class Config:
     explore_issues: int = 1  # findings one explorer files at most (a P0/P1 finding may go over it)
     # No explorers while work is waiting: this many unblocked claimable issues, this many
     # blocked ones, or this many open explorer filings (`Explore (` titles) not yet merged.
-    # Cohort 60: 111 explorer issues, 17 % merged, 37 % duplicates, 86 of them filed while
-    # hub #32 sat unclaimed (0 = no such limit).
+    # Unlimited explorers filed many duplicates and little that merged, most of it while a
+    # hub sat unclaimed (0 = no such limit).
     explore_queue_max: int = 8
     explore_blocked_max: int = 10
     explore_open_max: int = 12
@@ -523,7 +531,7 @@ class Config:
     # second only when area_second_at issues wait there and its files do not overlap the
     # first's); a fresh conversation, seeded with the old one's notes, after area_refresh
     # issues or area_refresh_tokens of context. With area_hot_lock, one session at a time
-    # works an issue that names an area's hot file. c52 PR #143 waited 5 h 40 min on live.py.
+    # works an issue that names an area's hot file. A PR once waited hours on live.py.
     area_refresh: int = 6
     area_refresh_tokens: int = 0
     area_conversations: int = 3
@@ -533,16 +541,20 @@ class Config:
     # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
     area_lend_free: bool = True
     # A session holds the hot files its issue names from its start until its pull request is open
-    # (not past it) and for area_hot_hold_max_s at most. Cohort 60: hot-file waits had a median
-    # of 34 min and a p90 of 5 h, and some hot file was locked 11.7 of the 12 h.
+    # (not past it) and for area_hot_hold_max_s at most. Without a cap, hot-file waits ran to
+    # hours, and some hot file was locked almost all the time.
     area_hot_hold_max_s: float = 1800
     # A file of an area that conflicts in this many pull requests within POOL_SPLIT_WINDOW_S
-    # becomes one of its hot files for the rest of the run (0 = off). Cohort 60: settings.js,
-    # in no hot list, conflicted 25 times (14 of them train skips).
+    # becomes one of its hot files for the rest of the run (0 = off). A file in no hot list
+    # (settings.js) conflicted more than any other, many times as train skips.
     area_auto_hot_at: int = 4
+    # A file made hot by the run (its conflicts, or split off a hot file) stops being hot after
+    # this many merges with no conflict on it (0 = never). Hot files stayed locked most of a
+    # run, and the files split from a hot file were not hot at all.
+    area_auto_hot_expire: int = 30
     # A new dependency edge on a blocker not yet at stage:pr, while this many claimable issues are
-    # blocked already, is pointed out to the monitor (0 = never). Cohort 60: the monitor added
-    # 236 edges and blocked up to 40 issues (337 issue-hours) while 6-9 of 50 workers ran.
+    # blocked already, is pointed out to the monitor (0 = never). A monitor that added edges
+    # freely blocked most of the queue while most worker slots stood idle.
     edge_flag_at: int = 8
     unknown_s: float = 300
     split_after: int = 4
@@ -580,15 +592,19 @@ class Config:
     # A train waits up to this long after the first PR in its queue was queued, for more to
     # join (not extended by later arrivals); it starts at once when the queue reaches
     # train_size or holds a P0 PR. 0 = off (a train starts as soon as the main lane is free):
-    # off until measured. Runs 10b and c55 kept the main lane busy only 17-26 % of the time
-    # and ran single-PR trains, each a full sweep.
+    # off until measured. The main lane was often idle while single-PR trains ran, each a
+    # full sweep.
     train_wait_s: float = 0
     # The acceptance check: issues whose PR changed accept_paths (and needs:live issues)
     # wait at stage:accept after the merge for a tester's check (settle_accept).
     accept: bool = False
+    # [accept] mode (config.accept_mode): "gate" (accept, above: the issue waits at stage:accept),
+    # "after" (the merge closes it; Pool.track_after samples closed issues for a tester's check
+    # on the deployed build, and a counted failure reopens it) or "off".
+    accept_mode: str = "gate"
     accept_paths: list = dataclasses.field(default_factory=list)
     accept_batch: int = 6  # issues one acceptance unit checks at most
-    accept_units: int = 2  # acceptance units side by side at most (c55: one at a time fell an hour behind)
+    accept_units: int = 2  # acceptance units side by side at most (one at a time fell an hour behind)
     accept_guard_s: float = 1200  # [accept] guard's time limit, in the train's check and after a deploy
     accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
     # The priority acceptance chores are filed at. Run 11: four chores sat unclaimed at P2
@@ -601,13 +617,13 @@ class Config:
     # (POOL_AUTHOR_ACCEPT); a tester who did not write it checks a sample: owner requests,
     # P0, and 1 in accept_sample of the rest. When the sample disagrees with the author
     # (verified, then not) on more than accept_escalate_at of the last accept_window samples,
-    # the sample rate doubles (N halves, down to 1). c58: acceptance units were 13.5 of 67
-    # agent hours in 4 h, a median 13 min for one issue.
+    # the sample rate doubles (N halves, down to 1). Acceptance units for every issue took a
+    # large share of agent time, mostly re-reading.
     author_accept: bool = False
     accept_sample: int = 4
     # Issues every author verdict of is checked independently: by label (and any type:feature*).
-    # Cohort 60: authors verified 68 of 68, the 1-in-4 sample disagreed 2 of 34 times, and
-    # report-only QA failed 25 % of author-verified issues, most of them seed features.
+    # Authors verified nearly everything, and an independent check later failed a good share
+    # of what they had verified, most of it seed features.
     accept_sample_labels: list = dataclasses.field(default_factory=lambda: [
         "owner-request", "P0", "needs:live", "seed", "type:feature-request"])
     accept_escalate_at: float = 0.05
@@ -732,6 +748,7 @@ class Config:
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
             area_auto_hot_at=env_int("POOL_AREA_AUTO_HOT_AT", 4),
+            area_auto_hot_expire=env_int("POOL_AREA_AUTO_HOT_EXPIRE", 30),
             edge_flag_at=env_int("POOL_EDGE_FLAG_AT", 8),
             unknown_s=float(e("POOL_UNKNOWN_S", "300")),
             split_after=env_int("POOL_SPLIT_AFTER", 4),
@@ -758,7 +775,8 @@ class Config:
             merge_train=env_flag("POOL_MERGE_TRAIN", True) and bool(e("SWEEP_COMMAND", "").strip()),
             train_size=env_int("POOL_TRAIN_SIZE", 6),
             train_wait_s=float(e("POOL_TRAIN_WAIT_S", "") or 0),
-            accept=env_flag("POOL_ACCEPT", True) and bool(config.accept_paths()),
+            accept=config.accept_mode() == "gate" and bool(config.accept_paths()),
+            accept_mode=config.accept_mode(),
             accept_paths=config.accept_paths(),
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
             accept_units=env_int("POOL_ACCEPT_UNITS", 2),
@@ -768,7 +786,7 @@ class Config:
             accept_chore_batch=env_int("POOL_ACCEPT_CHORE_BATCH", 5),
             accept_chore_every_s=float(e("POOL_ACCEPT_CHORE_EVERY_S", "") or 3600),
             accept_chore_append=env_flag("POOL_ACCEPT_CHORE_APPEND", True),
-            author_accept=env_flag("POOL_AUTHOR_ACCEPT"),
+            author_accept=env_flag("POOL_AUTHOR_ACCEPT") and config.accept_mode() == "gate",
             accept_sample=env_int("POOL_ACCEPT_SAMPLE", 4),
             accept_sample_labels=[x.strip() for x in (e("POOL_ACCEPT_SAMPLE_LABELS", "")
                                                       or "owner-request,P0,needs:live,seed,type:feature-request").split(",")
@@ -1000,9 +1018,9 @@ def same_failure(first: str, second: str) -> bool:
 
 def accepted(st: dict) -> set[int]:
     """Open issues whose change is merged and on main, waiting only for their acceptance
-    check (stage:accept, or stage:live): done, for the issues they block. In cohort 55
-    three merged hub issues waited over an hour at stage:accept with 19 in that queue,
-    and the issues they blocked waited with them until the monitor cut the dependencies."""
+    check (stage:accept, or stage:live): done, for the issues they block. Merged hub issues
+    waited over an hour at stage:accept behind a long queue, and the issues they blocked
+    waited with them until the monitor cut the dependencies."""
     return {i["number"] for i in st["open"] if set(i["labels"]) & set(ACCEPTING)}
 
 
@@ -1058,9 +1076,8 @@ def accept_order(st: dict, issues: list[int], entry: dict[int, str], now: float)
     """The order acceptance takes issues in: first those another open issue depends on (a
     GitHub dependency or a `Blocked by:` line; their dependents may start already, but
     the close is what the owner sees), then by priority, raised one level for each hour
-    waited at stage:accept so a long wait wins in the end, then the longest wait. In c55
-    the queue went strictly by priority: all 17 issues accepted were P1, and 49 of the 50
-    left waiting were P2."""
+    waited at stage:accept so a long wait wins in the end, then the longest wait. A queue
+    taken strictly by priority accepted only P1 issues, and the P2 ones waited for good."""
     depended: set[int] = set()
     for i in st["open"]:
         depended.update(i.get("blockers") or [])
@@ -1152,8 +1169,9 @@ class Book:
         self.accept_ready: list[int] = []
         self.accept_target = ""
         # issue -> the acceptance unit that holds it, from its start until its verdicts are
-        # settled; the units being settled. In run 10b the next unit started while the last
-        # one settled, and 12 of 16 units checked issues another had or was settling.
+        # settled; the units being settled. In a test run of the sample the next unit started
+        # while the last one settled, and 12 of 16 units checked issues another had or was
+        # settling.
         self.accept_held: dict[int, str] = {}
         self.accept_settling: set[str] = set()
         self.merger_runs: collections.Counter = collections.Counter()  # PR -> merger sessions since its last merge or hand-back
@@ -1176,6 +1194,16 @@ class Book:
         self.sample_count = 0
         self.accept_ready_since: dict[int, float] = {}  # issue -> first seen ready for acceptance
         self.chore_pending: list[dict] = []  # verified scripts waiting for a chore: {"n", "path", "t"}
+        # [accept] mode "after" (Pool.track_after): issue -> its latest close and its check,
+        # {"closed", "title", "labels", "state", "pr", "sha", "files", "live", "refix", "t"}, state one
+        # of new (merge unread), n/a (nothing to check), skip (not sampled), wait (not in the build
+        # yet), ready, verified, failed (counted, reopened), blocked, gone (reopened by someone);
+        # when tracking started (closes before it are not checked); issue -> counted failures; and
+        # merges after_merge saw (issue -> {"pr", "sha", "files", "t"}), until the close is read.
+        self.after: dict[int, dict] = {}
+        self.after_since = ""
+        self.after_fails: collections.Counter = collections.Counter()
+        self.after_merged: dict[int, dict] = {}
         # Areas (Pool.track_areas): issue -> its area ('' none) and the files it names (for the
         # hot-file lock); issue -> (updatedAt, area, files) last worked out; area -> its
         # conversations by slot: {"conv", "cli", "issues", "notes", "tokens", "t"}.
@@ -1219,6 +1247,11 @@ class Book:
         self.split_times: list[float] = []  # when each split issue was filed
         self.large: dict[str, int] = {}  # source file on main -> lines, when over the limit
         self.auto_hot: dict[str, str] = {}  # file -> its area: hot from the run's own conflicts
+        # file -> the merge count when it was made hot or last conflicted (expiry); file -> the
+        # area whose hot list it left after a split shrank it; merges the supervisor saw.
+        self.auto_hot_mark: dict[str, int] = {}
+        self.cooled: dict[str, list] = {}  # file -> [area, when]
+        self.merges = 0
 
     def role_counts(self) -> collections.Counter:
         return collections.Counter(u.role for u in self.running.values())
@@ -1259,6 +1292,7 @@ def plan(
     """(units to start, in admission order; units that are due but exhausted).
     ux_sha is the commit a UX run would test (Pool.ux_target)."""
     units: list[Unit] = []
+    after = cfg.accept_mode == "after"
     claimable: list[dict] = []  # worker units are made after the loop, in priority order (areas)
     open_numbers = {i["number"] for i in st["open"]}
     done = accepted(st)
@@ -1343,6 +1377,11 @@ def plan(
         info = {"title": i["title"], **where}
         if n in pr_of:
             info["pr_at_start"] = True  # a hand-back: its PR existed before this session
+        if after and book.after_fails[n] and not info.get("resume") and not info.get("area"):
+            # Reopened by the post-merge check: its author knows the change it made.
+            conv = conv_resumable(book.convs.get(n))
+            if conv and conv not in busy_convs(holding(book, cfg, now, units)):
+                info["resume"] = conv
         if cfg.hub_at and deps[n] >= cfg.hub_at:
             info["hub"] = deps[n]
             info["timeout"] = f"{int(seconds(cfg.timeouts.get('worker') or '45m') * cfg.hub_timeout)}s"
@@ -1354,16 +1393,26 @@ def plan(
 
     open_by = {i["number"]: i for i in st["open"]}
     accept_long = False  # the acceptance queue is over two batches: it goes before idle-time runs
-    if cfg.accept and book.accept_ready and book.accept_target:
+    after = cfg.accept_mode == "after"
+    if (cfg.accept or after) and book.accept_ready and book.accept_target:
         # Tester units accept batches of merged issues on the build that has them, up to
-        # POOL_ACCEPT_UNITS side by side (one at a time fell behind 10-15 merges an hour in
-        # c55). An issue is in one unit at a time, from its start until its verdicts are
+        # POOL_ACCEPT_UNITS side by side (one at a time fell behind the merges). An issue is
+        # in one unit at a time, from its start until its verdicts are
         # settled (book.accept_held); a held issue whose unit is gone is free again.
         alive = {u.key for u in book.running.values()} | book.accept_settling
         for n in [n for n, k in book.accept_held.items() if k not in alive]:
             del book.accept_held[n]
         live_of, ready = {}, []
-        for n in book.accept_ready:
+        for n in book.accept_ready if after else []:
+            e = book.after.get(n) or {}
+            if n in book.accept_held or e.get("state") != "ready":
+                continue
+            live = cfg.live and bool(e.get("live"))
+            if live and book.missing:
+                continue
+            live_of[n] = live
+            ready.append(n)
+        for n in book.accept_ready if not after else []:
             i = open_by.get(n)
             if (not i or n in book.accept_held or set(i["labels"]) & (HOLDS | IGNORED)
                     or not set(i["labels"]) & set(ACCEPTING)):
@@ -1381,17 +1430,22 @@ def plan(
         running = any(u.kind == "accept" for u in book.running.values())
         # A unit beside a running one only for a full batch; the issues split evenly.
         k = min(len(families), len(ready) // size if running else -(-len(ready) // size))
-        take = accept_order(st, ready, book.live_entry, now)[: k * size]
+        if after:  # closed issues: by priority, then the oldest close
+            take = sorted(ready, key=lambda n: (priority(book.after[n]["labels"]), book.after[n]["closed"], n))[: k * size]
+        else:
+            take = accept_order(st, ready, book.live_entry, now)[: k * size]
         per = -(-len(take) // k) if k else 0
         for j in range(k):
             chunk = take[j * per:(j + 1) * per]
             if not chunk:
                 break
-            issues = [accept_item(book, open_by, n, live_of[n]) for n in chunk]
+            issues = [after_item(book, n, live_of[n]) if after else accept_item(book, open_by, n, live_of[n])
+                      for n in chunk]
             sha = book.accept_target
             key = f"accept:{sha[:12]}:" + ",".join(f"{x['n']}@{x['since']}#{book.accept_rounds[x['n']]}" for x in issues)
             units.append(Unit("tester", "accept", key, families[j], None, (2, 0, -1) if accept_long else (2, 1, 0),
-                              {"sha": sha, "deployed": bool(cfg.deploy_cmd), "issues": issues}))
+                              {"sha": sha, "deployed": bool(cfg.deploy_cmd), "issues": issues,
+                               **({"after": True} if after else {})}))
     seen_prs = set()
     for pr in sorted(st["prs"], key=lambda p: p["number"]):
         seen_prs.add(pr["number"])
@@ -1522,8 +1576,8 @@ def plan(
                        ((book.convs.get(n) or {}).get("area"), (book.convs.get(n) or {}).get("slot"))}
               & busy_convs(holding(book, cfg, now, units))):
             # The author knows the change: its conversation is resumed with the conflict
-            # (proposal: the worker owns its issue end to end). A merger re-read the issue,
-            # the PR and main from scratch: c58, 32 sessions, median 14.5 min.
+            # (the worker owns its issue end to end). A merger re-reads the issue, the PR and
+            # main from scratch.
             rec = book.convs[n]
             hard = book.hard_conflicts.get(pr["number"]) or []
             units.append(
@@ -1605,7 +1659,10 @@ def plan(
             units.append(Unit("tester", "spec", f"spec:{ux_sha[:12]}:{book.extra_runs}", "tst:spec", None,
                               (2, 0, 1), {"sha": ux_sha, "deployed": bool(cfg.deploy_cmd), "spare": True}))
 
-    if cfg.explore and cfg.explore_focuses and ux_sha and not accept_long and not explore_held(st, cfg, claimable, done):
+    # An issue waiting for a hot file cannot start now: it is not work that should hold the
+    # explorers back: such issues once held explorers off for hours.
+    startable = [i for i in claimable if (book.waits_now.get(i["number"]) or {}).get("why") != "hot"]
+    if cfg.explore and cfg.explore_focuses and ux_sha and not accept_long and not explore_held(st, cfg, startable, done):
         units += plan_explorers(book, cfg, now, ux_sha, units)
 
     units.sort(key=lambda u: u.rank)
@@ -1691,6 +1748,24 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
     return None
 
 
+def baseline_text(baseline: list[str]) -> str:
+    """The consolidation chore's rule for the owner's baseline tests (config.baseline_tests)."""
+    if not baseline:
+        return ""
+    names = ", ".join(f"`{b}`" for b in baseline[:15]) + (f" and {len(baseline) - 15} more" if len(baseline) > 15 else "")
+    return ("Leave the owner's baseline tests as they are: " + names + ". Merge per-issue tests into them or "
+            "add cases to them, but never delete, rename or fold one of their test functions away (the merge gate "
+            "refuses it). ")
+
+
+def test_only_chore(issue: dict) -> bool:
+    """A chore that only adds or changes tests: an acceptance chore (its marker), a
+    consolidation of per-issue tests, or a flaky test to fix."""
+    title = str(issue.get("title", ""))
+    return (ACCEPT_CHORE in (issue.get("body") or "")
+            or title.startswith(("Consolidate per-issue tests", "Acceptance tests for", "Flaky test:")))
+
+
 def explore_held(st: dict, cfg: Config, claimable: list[dict], done: set) -> str:
     """Why no explorer starts now ('' when one may): work is waiting (POOL_EXPLORE_QUEUE_MAX
     claimable issues or POOL_EXPLORE_BLOCKED_MAX blocked ones), or POOL_EXPLORE_OPEN_MAX of
@@ -1736,6 +1811,13 @@ def accept_item(book: Book, open_by: dict, n: int, live: bool) -> dict:
     return {"n": n, "title": open_by[n]["title"], "live": live, "since": book.live_entry.get(n, ""), "pr": m.get("pr"),
             # the checklist rows its merged change needs, as gate 7 counts them
             "rows": [r[0] for r in config.required_rows(m.get("files") or [])]}
+
+
+def after_item(book: Book, n: int, live: bool) -> dict:
+    """A closed issue as an [accept] mode "after" unit's prompt lists it."""
+    e = book.after[n]
+    return {"n": n, "title": e.get("title", ""), "live": live, "since": e.get("closed", ""), "pr": e.get("pr"),
+            "rows": [r[0] for r in config.required_rows(e.get("files") or [])]}
 
 
 def plan_author_accept(st: dict, book: Book, cfg: Config, now: float, ready: list[int], live_of: dict,
@@ -1879,13 +1961,25 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
 
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
                   wrap_min: int = 35, issue: str = "", files: str = "", devcheck: bool = False,
-                  accept: str = "", checklist: str = "", guard: bool = False) -> str:
+                  accept: str = "", checklist: str = "", guard: bool = False, mode: str = "gate") -> str:
     n, token = c["issue"], c["token"]
-    live_text = ", labelled needs:live: write Refs #%s, not Fixes" % n if live and c.get("needs_live") else ""
-    accept_text = (
-        f"\nA pull request that changes {accept} writes `Refs #{n}`, not `Fixes`: after the merge #{n}\n"
-        "waits at stage:accept until a tester who did not write it checks it on the deployed build.\n"
-        if accept else "")
+    # Refs for needs:live only in "gate" mode with live checks on; with "after" or "off" the merge
+    # closes it (Refs there left needs:live issues waiting at stage:owner).
+    live_text = (", labelled needs:live: write Refs #%s, not Fixes" % n
+                 if live and c.get("needs_live") and mode == "gate" else "")
+    if accept:
+        accept_text = (
+            f"\nA pull request that changes {accept} writes `Refs #{n}`, not `Fixes`: after the merge #{n}\n"
+            "waits at stage:accept until a tester who did not write it checks it on the deployed build.\n")
+    elif mode == "after":
+        accept_text = (
+            f"\nWrite `Fixes #{n}` in the pull request, also when #{n} is labelled needs:live: the merge closes it.\n"
+            "After it is deployed, a tester who did not write it may check it, and a failure reopens it with\n"
+            "what they saw.\n")
+    elif mode == "off":
+        accept_text = f"\nWrite `Fixes #{n}` in the pull request, also when #{n} is labelled needs:live: the merge closes it.\n"
+    else:
+        accept_text = ""
     if guard:
         accept_text += (
             "Never add a file under tests/accept/: it holds only the scripts a tester verified, which come in\n"
@@ -1894,6 +1988,8 @@ def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live:
     if devcheck and checklist:
         accept_text += (
             "\nYour live check (devcheck.py) covers the acceptance checklist rows your change triggers.\n"
+            "It also exercises the neighbouring behavior on the same screen and flow (the controls next to the\n"
+            "change, the other language, a reload): most defects found after a merge sat next to a correct fix.\n"
             "Declare them in the script, `# accept-rows: <ids>`, and a row that cannot apply as\n"
             "`# accept-skip: <id> <why>`; merge gate 7 refuses a check that misses one. A row that needs a\n"
             f"device (a microphone) is no reason to skip: {PROJECT}, *Live check*, says how to fake it.\n"
@@ -2178,13 +2274,17 @@ def score_detail(report: pathlib.Path) -> tuple[int | None, str]:
 FINDINGS_LINE = re.compile(r"(?i)\bfindings?\b\W*(\d+)\s*blockers?\W+(\d+)\s*majors?")
 
 
-def score_cap(report: pathlib.Path) -> tuple[int | None, int, int]:
+def score_cap(report: pathlib.Path, kind: str = "ux") -> tuple[int | None, int, int]:
     """(the most the report's findings allow, blockers, majors) from its line
-    `Findings: B blockers, M majors`: 85 - 8 per blocker - 5 per major, the outside audit's
-    own fit over cohort 60's 208 reviews (83.6 - 7.8 B - 5.5 M), and at most 50 with a
-    blocker, 70 with a major. (None, 0, 0) without the line. Cohort 60: the UX tester scored
-    15.5 points above the audit, and held 60 for four hours while 11 of 12 of its reports
-    named missing seed features."""
+    `Findings: B blockers, M majors`. (None, 0, 0) without the line.
+
+    A whole-app UX run (kind "ux"): 85 - 8 per blocker - 2 per major, at most 60 with a
+    blocker and 75 with a major, fitted to independent audits of the same builds. A
+    per-review fit (85 - 8 B - 5 M, at most 50 / 70) over-penalized a run that lists every
+    major in the app, far more than one review does, and put the UX score well under the
+    audits (with no cap at all, it had been well over them).
+    An explorer (one focus, few findings) keeps 85 - 8 B - 5 M, at most 50 / 70: its scores
+    stayed close to the audits."""
     try:
         head = report.read_text(errors="replace")[:4000]
     except OSError:
@@ -2193,11 +2293,12 @@ def score_cap(report: pathlib.Path) -> tuple[int | None, int, int]:
     if not m:
         return None, 0, 0
     b, mj = int(m.group(1)), int(m.group(2))
-    cap = 85 - 8 * b - 5 * mj
+    per_major, with_blocker, with_major = (2, 60, 75) if kind == "ux" else (5, 50, 70)
+    cap = 85 - 8 * b - per_major * mj
     if b:
-        cap = min(cap, 50)
+        cap = min(cap, with_blocker)
     elif mj:
-        cap = min(cap, 70)
+        cap = min(cap, with_major)
     return max(0, cap), b, mj
 
 
@@ -2249,18 +2350,25 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             + (f"; rows: {' '.join(x['rows'])}" if x.get("rows") else "")
             for x in u.info["issues"])
         cl = config.checklist_text()
+        closed = bool(u.info.get("after"))
         return (
             "Use the issuelooper-tester skill (section Acceptance check) and do exactly one unit of work, "
             "then stop.\n\n"
-            f"Your unit: these merged issues, accepted at commit {sha[:12]} ("
+            + (f"Your unit: these issues, closed when their pull requests merged, checked at commit {sha[:12]} ("
+               if closed else f"Your unit: these merged issues, accepted at commit {sha[:12]} (")
             + ("the deployed build" if u.info.get("deployed") else "origin/main; this repository does not deploy")
             + f"), started from that commit on your port as {PROJECT} says:\n{rows}\n\n"
-            "Someone else wrote each change, and its author already says it works: check as if you had not seen "
+            + ("Each is closed already: your check comes after the merge, and a failure reopens it. Comment on the "
+               "closed issue; never reopen, relabel or close it yourself (the supervisor acts on your verdict). "
+               if closed else "")
+            + "Someone else wrote each change, and its author already says it works: check as if you had not seen "
             "that. For each issue, read it, its comments, its merged PR and every spec requirement it cites (with "
             "the spec's strings for every language), then drive what it asked for on screen with a script, in "
             "scripted mode or in live mode where marked, through the checklist rows its change needs, and try to "
             "break it: each viewport down to 390 and 320 px, the other language, a reload mid-turn and after, the "
-            "server dropped for 20 s and back, every entry point, an empty or odd input. Judge polish too (clipped, "
+            "server dropped for 20 s and back, every entry point, an empty or odd input. Also exercise the "
+            "neighbouring behavior on the same screen and flow (the controls next to the change, the other language, "
+            "a reload): most defects found after a merge sat next to a correct fix. Judge polish too (clipped, "
             "cramped, stretched, untranslated is a failure). Then comment once on that issue, signed `<!-- tester -->`: "
             "what you ran and what you saw (quote the screen), ending with a line of its own, "
             "`accept-verified: <what ran>` when every part works, or `accept-blocked: <what is missing>` when "
@@ -2296,7 +2404,8 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             "from a UX run's. Write $LOGDIR/explore_report.md now, its first line `Score: provisional`, and update "
             "it as you go; once you have walked the focus, replace that line with `Score: N/100` for this focus "
             "(only then: a number before that is not a score) and a line `Findings: B blockers, M majors` for it "
-            "(already-tracked ones count too; the supervisor caps the score at 85 - 8 per blocker - 5 per major), "
+            "(already-tracked defects count too; a feature that is still missing while its issue is open is missing scope, "
+            "not a finding; the supervisor caps the score at 85 - 8 per blocker - 5 per major), "
             "then what you checked and each finding's "
             "disposition (`filed #N`, `already #N`, `not filed: <why>`)."
             + rules
@@ -2332,10 +2441,11 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         "the supervisor reads that line. Write the report at the start with the first line `Score: provisional` "
         "and update it as you go, so a run cut short still reports what it saw; replace that line with "
         "`Score: N/100` only after the journeys and your probes have run and you have read the screenshots, "
-        "followed by a line `Findings: B blockers, M majors` counting every blocker and major you saw, filed now "
-        "or already tracked by an open issue (a feature the spec describes that the journeys reach and that is "
-        "missing or broken is a major, a blocker when a user cannot do what they came for); the supervisor caps "
-        "the score at 85 - 8 per blocker - 5 per major. "
+        "followed by a line `Findings: B blockers, M majors` counting every blocker and major you saw in what "
+        "exists, filed now or already tracked by an open issue (a feature that is there and broken is a major, a "
+        "blocker when a user cannot do what they came for). A feature whose issue is still open (a seed issue, say) "
+        "is missing scope, not a major: list it under `Missing scope:` in the report and leave it out of the count. "
+        "The supervisor caps the score at 85 - 8 per blocker - 2 per major (60 with a blocker, 75 with a major). "
         "The loop's logs (.issuelooper/run, other sessions' reports) are not part of your unit: never read "
         "them, and never take a score from them."
         + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: never copy it; "
@@ -2443,8 +2553,8 @@ ACCEPT_SKIP_LINE = re.compile(r"(?im)^[ \t>*-]*skip:.*$")
 
 def unchecked_rows(body: str, rows: list[str]) -> list[str]:
     """The checklist rows (ids) a verdict comment neither names nor skips with a reason. A
-    skip of a row in [accept] no_skip does not count. In cohort 55, 13 of 79 issues the
-    tester verified failed the harness QA."""
+    skip of a row in [accept] no_skip does not count. Verdicts that left rows out were
+    where verified issues later failed."""
     text = ACCEPT_SKIP_LINE.sub("", body).lower()  # a skip line names its row without running it
     no_skip = config.checklist()["no_skip"]
     skipped = {m.group(1).lower() for m in ACCEPT_SKIP.finditer(body)} - {r.lower() for r in no_skip}
@@ -2459,8 +2569,8 @@ SEEN_TEXT = re.compile(r"[\"“「][^\"”」]{2,}[\"”」]")
 def rows_without_evidence(body: str, rows: list[str]) -> list[str]:
     """The rows (ids) an author's verdict names without the evidence it must give for each:
     a line holding the row id, a screenshot path and the text asserted on screen in quotes.
-    With no rows, one such line must exist ("-" when it does not). Cohort 60: authors
-    verified 68 of their own 68 issues; QA failed a quarter of them."""
+    With no rows, one such line must exist ("-" when it does not). Authors verified nearly
+    all of their own issues, and an independent check failed a good share of them."""
     lines = [ln for ln in body.splitlines() if not ACCEPT_SKIP_LINE.match(ln)]
     skipped = {m.group(1).lower() for m in ACCEPT_SKIP.finditer(body)} - {r.lower() for r in config.checklist()["no_skip"]}
 
@@ -2718,7 +2828,13 @@ def pid_alive(pid: int) -> bool:
 
 # Session outcomes that put the claim back without counting a failed attempt.
 NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "timed out under quota",
-                 "stopped with the supervisor")
+                 "stopped with the supervisor", "cut off with its background task")
+# A worker that ended with no pull request and no release of its own, while a sweep it had
+# started in the background still ran (Session.work): not the agent's failure.
+BG_CUT = "cut off with its background task running (no pull request)"
+# The scripts whose run is a session's own work in progress, even while it sleeps (a sweep
+# waiting for a slot uses no CPU): Session.working_processes.
+WORK_SCRIPTS = ("sweep_locked.py", "sweep_run.py", "devcheck.py")
 
 
 class Session(threading.Thread):
@@ -2827,7 +2943,9 @@ class Session(threading.Thread):
             trans_k = 0  # resumes after a retryable error that ended the turn
             stall_k = 0  # resumes after the model went silent between steps
             idle_k = 0  # resumes after the model's turn ended on a background task
+            exit_k = 0  # resumes after the CLI exited while a sweep it started still ran
             waited_on: list[int] = []  # processes the stuck-stream rule last waited for
+            bg_waited: list[int] = []  # processes the background-task rule last waited for
             # A worker still going at POOL_WORKER_WRAP_S is cut and resumed in the same
             # conversation with a few minutes to commit and release: workers that ran
             # their full timeout were a quarter of all worker time, and most of them
@@ -2949,8 +3067,22 @@ class Session(threading.Thread):
                         continue
                     # The model ended its turn while a command it started still runs, and
                     # agy waits for that task until its own limit; the model does not act
-                    # again. Eight sessions sat like that until their 45-minute timeout.
+                    # again. In a test run of the sample, eight sessions sat like that until their
+                    # 45-minute timeout.
                     conv = self.background_idle(cfg.background_idle_s) if cfg.background_idle_s else None
+                    if conv:
+                        # Not while the task still works (a sweep, a live check): agy goes on by
+                        # itself when it finishes. Run 14: seven workers were resumed twice and
+                        # then ended mid-sweep, with no PR, 18-68 minutes each.
+                        working = self.working_processes()
+                        if working:
+                            if working != bg_waited:
+                                with open(self.dir / "resumes.log", "a") as rl:
+                                    rl.write(f"{time.time():.0f} turn over, waiting for its background task: "
+                                             f"{len(working)} process(es) still working "
+                                             f"({', '.join(map(str, working[:5]))})\n")
+                            bg_waited = working
+                            continue
                     if conv and idle_k < 2 and min(hard, ceiling) - time.time() > 120:
                         idle_k += 1
                         resume(conv, f"turn over, waiting on a background task for {cfg.background_idle_s:.0f} s", (
@@ -2967,8 +3099,8 @@ class Session(threading.Thread):
                         rc = 0
                         break
                     # agy's stream stopped behind a command it lost track of while the agent
-                    # went on, finished, and the process stayed: nine mergers in one run sat
-                    # like that, unseen, until their 45-minute timeout. Its own record of
+                    # went on, finished, and the process stayed: nine mergers in a test run of the
+                    # sample sat like that, unseen, until their 45-minute timeout. Its own record of
                     # the conversation shows the end; nothing is left to resume.
                     if cfg.unseen_idle_s and self.finished_unseen(cfg.unseen_idle_s):
                         # Not while something it started still works: two mergers in run 8
@@ -2995,6 +3127,25 @@ class Session(threading.Thread):
                         self.pool.quota_seen(role, group=self.quota_group)
                         resume(conv, f"stalled while alive, quota resume {quota_k} after {wait:.0f} s")
                     continue
+                # The CLI exited while a sweep it started in the background still runs: wait for
+                # the sweep, then resume the conversation to finish from its result.
+                if (rc == 0 and role == "worker" and self.unit.kind == "implement" and exit_k < 1
+                        and not self.pool.stopping and self.working_processes()):
+                    exit_k += 1
+                    with open(self.dir / "resumes.log", "a") as rl:
+                        rl.write(f"{time.time():.0f} exited while its background task still works; waiting for it\n")
+                    while self.working_processes() and time.time() < min(hard, ceiling) - 120:
+                        if self.pool.halt.wait(15):
+                            break
+                    conv = self.conversation()
+                    if conv and not self.pool.stopping and not self.work_done() \
+                            and time.time() < min(hard, ceiling) - 120:
+                        resume(conv, "exited while its background task ran", (
+                            "Your last turn ended while a command you started in the background (a sweep) was still "
+                            "running. It has finished now. Read its output, then finish the task as your prompt says; "
+                            "run what you still need in the foreground."), max(120, hard - time.time()))
+                        rc = None
+                        continue
                 # The CLI exited. After a quota error it usually does, so also resume here
                 # when the last event is that error and the unit's work is not done. The
                 # wait doubles from POOL_QUOTA_WAIT_S up to POOL_QUOTA_WAIT_MAX_S: a
@@ -3296,6 +3447,19 @@ class Session(threading.Thread):
                 busy.append(pid)
         return sorted(busy)
 
+    def working_processes(self, sample: float = 2.0) -> list[int]:
+        """busy_processes, and the session's sweeps and live checks (WORK_SCRIPTS) even while
+        they sleep: a sweep waiting for a slot is work in progress, not a server left idle."""
+        busy = set(self.busy_processes(sample))
+        prefixes = tuple(self.scratch_prefixes())
+        if prefixes:
+            spare = {1, os.getpid(), os.getppid()}
+            for pid, cwd in process_cwds().items():
+                if pid not in spare and cwd.startswith(prefixes) and \
+                        any(os.path.basename(a) in WORK_SCRIPTS for a in process_argv(pid)):
+                    busy.add(pid)
+        return sorted(busy)
+
     def kill_leftovers(self) -> list[int]:
         """Kill the processes still running in this session's scratch paths: servers and
         test runs a session started with setsid or nohup leave its process group and
@@ -3328,7 +3492,7 @@ class Session(threading.Thread):
         claim_file = self.dir / "claim"
         # Only an implement unit claims: an author resumed to accept its issue
         # (stage:accept) or resolve its PR (stage:pr) works on an issue claim.py would
-        # refuse, as cohort 59 found when every one of them ended "unclaimable".
+        # refuse: every one of them ended "unclaimable" when they claimed first.
         if u.role == "worker" and u.kind == "implement":
             pool = str(cfg.caps["worker"] or "unlimited")
             env.update(WRK_K=str(self.seq), WRK_CLAIM_FILE=str(claim_file), WORKER_POOL=pool)
@@ -3368,7 +3532,7 @@ class Session(threading.Thread):
                                    cfg.live, int(cfg.wrap_s() // 60) or 35,
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
-                                   bool(cfg.accept_guard))
+                                   bool(cfg.accept_guard), cfg.accept_mode)
             if u.info.get("area") or u.info.get("hot"):
                 pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
                 prompt += "\n" + area_text(u, cfg)
@@ -3400,6 +3564,10 @@ class Session(threading.Thread):
             prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys, previous)
 
         rc, elapsed, timed_out = self.session(prompt, env)
+        # Before the leftovers go: a worker's sweep still running at the end means the session
+        # was cut off with work in progress (BG_CUT), not that the agent gave up.
+        still = (u.role == "worker" and u.kind == "implement" and rc == 0 and not timed_out
+                 and not self.pool.stopping and bool(self.working_processes()))
         if cfg.kill_leftovers:
             self.kill_leftovers()
         if u.role == "tester":
@@ -3443,15 +3611,22 @@ class Session(threading.Thread):
                 "--loop",
                 str(self.seq),
             ]
-            if outcome.startswith(NOT_A_FAILURE):
+            if outcome.startswith(NOT_A_FAILURE) or still:
                 args.append("--no-fail")
             if outcome != "ok":
                 args += ["--reason", f"the worker session {outcome}"]
+            elif still:
+                args += ["--reason", "the worker session ended while its sweep was still running in the background"]
             self.sh(args, dict(env, CC_ROLE="worker"), "finish")
             try:
-                self.left_pr = bool(re.search(r"#\d+: pr #\d+", (self.dir / "finish.out").read_text(errors="replace")))
+                finish = (self.dir / "finish.out").read_text(errors="replace")
             except OSError:
-                pass
+                finish = ""
+            self.left_pr = bool(re.search(r"#\d+: pr #\d+", finish))
+            if outcome == "ok" and re.search(r"#\d+: released to ", finish):
+                # No pull request and no release of its own: finish had to release the claim.
+                # Recorded as "ok" before, which hid seven such endings in run 14.
+                outcome = BG_CUT if still else "ended without a pull request"
             self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
             self.clear_scratch()
         elif u.role == "merger":
@@ -3563,7 +3738,7 @@ class Session(threading.Thread):
             # other merge, whose PRs then conflicted again and got mergers of their own.
             if swept is None and (want_sweep or (attempt == 0 and self.needs_sweep(pr, head))):
                 # The same head on the same main, held after a red re-sweep: sweeping it again
-                # says the same. PR #157 was re-swept 15 times at one head in cohort 52.
+                # says the same. One PR was re-swept many times at one head.
                 before = self.pool.book.swept_held.get(pr)
                 if before and before[0] == u.key:
                     self.note(f"not re-swept: {before[1]} at this head and main already")
@@ -3577,16 +3752,17 @@ class Session(threading.Thread):
                     # The failing tests alone first, when the project says how ([sweep] rerun):
                     # failing again, they are the PR's; passing, the whole sweep runs again
                     # for the record Gate 2 reads.
-                    rerun, _ = self.pool.rerun_at(head, failing_tests(out), fetch=branch or "main")
+                    rerun, _ = self.pool.two_of_three(
+                        lambda: self.pool.rerun_at(head, failing_tests(out), fetch=branch or "main"))
                     if rerun is False:
                         return self.swept_hold(pr, self.sweep_hand_back(pr, n, head, out))
                     if rerun:
                         self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
                     swept, again = self.resweep(pr, branch, head, env)
                     if swept:
-                        self.note(f"the re-sweep passed on a second try (flaky: {', '.join(failing_tests(out)[:3])})")
-                        if rerun is None:
-                            self.pool.report_flaky(f"PR #{pr}'s head {head[:8]}", failing_tests(out))
+                        # Green for the merge (the train sweeps it again); flaky only when the
+                        # failing tests passed two of three reruns above.
+                        self.note(f"the re-sweep passed on a second try ({', '.join(failing_tests(out)[:3])})")
                     elif not same_failure(out, again):
                         return self.swept_hold(pr, self.flaky_hold(pr, "re-sweep", out, again))
                     else:
@@ -3666,7 +3842,7 @@ class Session(threading.Thread):
         sweep per merge would serialize the merges (most were behind main), so a quick check
         runs on the head merged with the current main instead, as late as it can: a check
         made before the review went stale when other merges landed meanwhile, and main
-        broke three times in one run that way. Its result holds for the main it merged;
+        broke three times in a test run of the sample that way. Its result holds for the main it merged;
         under the merge lock, a moved main means it runs again. The merge train's full
         sweep of the merged tree replaces the quick check."""
         if self.pool.cfg.fast_check_cmd and not self.pool.cfg.merge_train:
@@ -3773,7 +3949,7 @@ class Session(threading.Thread):
     def sweep_hand_back(self, pr: int, n: int, head: str, out: str) -> str:
         """Hand the PR back for its red sweep, with what failed. Handed back by the gates
         instead, the comment said "does not match Sweep SHA" or "missing the green line",
-        and the worker had to find the failing tests itself (PRs #110, #126, #140). When
+        and the worker had to find the failing tests itself. When
         every failing test is one that failed on a red main and the head is behind main,
         the failure is main's, inherited: the supervisor rebases the PR instead."""
         held = self.infra_hold(pr, "re-sweep", out) or self.known_flaky_hold(pr, "re-sweep", out)
@@ -3882,9 +4058,9 @@ class Session(threading.Thread):
                     self.pool.event(f"PR #{pr}: the merged-tree check timed out; held, tried again on a later poll")
                     return "held (the merged-tree check timed out)"
             elif not ok:  # once more: a single flaky failure handed PRs #106 and #103 back
-                ok, again = self.pool.rerun_tests(wt, failing_tests(why), env)  # the failing tests alone
+                ok, again = self.pool.two_of_three(lambda: self.pool.rerun_tests(wt, failing_tests(why), env))
                 if ok is None:
-                    ok, again = self.fast_check(wt, env)
+                    ok, again = self.pool.two_of_three(lambda: self.fast_check(wt, env))
                 self.note(f"merged-tree check, second try: {'ok (flaky)' if ok else again[-400:]}")
                 if ok:
                     self.pool.report_flaky(f"PR #{pr}'s head {head[:8]} merged with main {main[:8]}",
@@ -4316,6 +4492,8 @@ class Pool:
         self.crashes: collections.Counter = collections.Counter()
         self.deploying = False
         self.merge_lock = threading.Lock()
+        # flush_chores: two acceptance units ending together appended the same scripts twice.
+        self.chore_lock = threading.Lock()
         self.merge_lock_times: collections.deque = collections.deque(maxlen=500)  # (wait_s, hold_s), newest
         self.merge_lock_total = {"n": 0, "wait_s": 0.0, "hold_s": 0.0}  # every acquisition since start
         self.deploy_tried: set[str] = set()
@@ -4362,6 +4540,8 @@ class Pool:
         self.load_owners()
         for f, area in list(self.book.auto_hot.items()):
             self.make_hot(f, area)  # hot files the run found before a restart
+        for f, (area, t) in list(self.book.cooled.items()):
+            self.cool(f, area, t)  # and the ones it cooled
 
     # --- bookkeeping ---
     def log(self, kind: str, **kv):
@@ -4414,6 +4594,9 @@ class Pool:
         now = self.clock()
         with self.lock:
             self.book.conflicts += [(now, f, pr) for f in files]
+            for f in files:
+                if f in self.book.auto_hot:
+                    self.book.auto_hot_mark[f] = self.book.merges  # still conflicting: its expiry starts again
             if hard:
                 self.book.hard_conflicts.setdefault(pr, []).append((now, frozenset(files)))
                 self.check_starving(pr, now)
@@ -4428,7 +4611,8 @@ class Pool:
         prs: dict[str, set] = collections.defaultdict(set)
         with self.lock:
             for t, f, pr in self.book.conflicts:
-                if now - t <= cfg.split_window_s and not is_test(f):
+                # A file cooled after a split counts only its conflicts since then.
+                if now - t <= cfg.split_window_s and not is_test(f) and t >= (self.book.cooled.get(f) or ["", 0])[1]:
                     prs[f].add(pr)
         for f, ps in sorted(prs.items()):
             area = config.area_of(f, cfg.areas)
@@ -4443,15 +4627,90 @@ class Pool:
     def make_hot(self, f: str, area: str) -> None:
         with self.lock:
             self.book.auto_hot[f] = area
+            self.book.auto_hot_mark.setdefault(f, self.book.merges)
+            self.book.cooled.pop(f, None)
             for a in self.cfg.areas:
                 if a["name"] == area and f not in a["hot"]:
                     a["hot"] = list(a["hot"]) + [f]
+                if a["name"] == area and f in (a.get("cool") or []):
+                    a["cool"] = [x for x in a["cool"] if x != f]
+
+    def cool(self, f: str, area: str, since: float | None = None) -> None:
+        """f is no longer hot in area (a split shrank it): off the run's hot files, and on the
+        area's cool list, which overrides a glob in [areas] hot. Conflicts after this make it
+        hot again (auto_hot_files)."""
+        with self.lock:
+            self.book.auto_hot.pop(f, None)
+            self.book.auto_hot_mark.pop(f, None)
+            self.book.cooled[f] = [area, self.clock() if since is None else since]
+            for a in self.cfg.areas:
+                if a["name"] == area:
+                    a["hot"] = [x for x in a["hot"] if x != f]
+                    if f not in (a.get("cool") or []):
+                        a["cool"] = list(a.get("cool") or []) + [f]
+
+    def hot_area(self, f: str) -> str:
+        """The area whose hot list covers f ('' none)."""
+        return next((a["name"] for a in self.cfg.areas if any(config.path_matches(f, g) for g in a["hot"])
+                     and f not in (a.get("cool") or ())), "")
+
+    def hot_after_merge(self, pr: int, sha: str) -> None:
+        """After a merge: a change that moved code out of a hot file into new source files
+        makes those files hot in the same area (the modules split from live.py took a large
+        share of its conflicts while not hot), and cools the hot file when it shrank to 60 %
+        or less of its lines (most waits on live.py came after its split). Then an auto-hot file with no conflict
+        in POOL_AREA_AUTO_HOT_EXPIRE merges stops being hot."""
+        if not self.cfg.areas:
+            return
+        with self.lock:
+            self.book.merges += 1
+        if sha and self.cfg.area_hot_lock:
+            num = self.git("diff", "--numstat", f"{sha}^1", sha)
+            added = self.git("diff", "--name-only", "--diff-filter=A", f"{sha}^1", sha)
+            new = [f for f in added.stdout.split() if is_source(f) and not is_test(f)] if added.returncode == 0 else []
+            for line in num.stdout.splitlines() if num.returncode == 0 else []:
+                parts = line.split("\t")
+                if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                    continue
+                plus, minus, f = int(parts[0]), int(parts[1]), parts[2]
+                area = self.hot_area(f)
+                if not area or minus < max(40, 3 * plus):
+                    continue
+                for g in new:
+                    if not config.is_hot(g, self.cfg.areas):
+                        self.make_hot(g, area)
+                        self.log("auto_hot", file=g, area=area, split_from=f, pr=pr)
+                if new:
+                    self.event(f"PR #{pr} moved code out of hot file {f} into {', '.join(new[:5])}: those are now hot "
+                               f"files of the {area} area")
+                after = self.git("show", f"{sha}:{f}").stdout.count("\n")
+                before = after + minus - plus
+                if before and after <= 0.6 * before:
+                    self.cool(f, area)
+                    self.log("hot_cooled", file=f, area=area, lines=[before, after], pr=pr)
+                    self.event(f"{f} shrank from {before} to {after} lines in PR #{pr}: it is no longer a hot file of "
+                               f"the {area} area (conflicts make it hot again)")
+        expire = self.cfg.area_auto_hot_expire
+        with self.lock:
+            stale = [f for f, m in self.book.auto_hot_mark.items()
+                     if expire and self.book.merges - m >= expire and f in self.book.auto_hot]
+        for f in stale:
+            area = self.book.auto_hot.get(f, "")
+            with self.lock:
+                self.book.auto_hot.pop(f, None)
+                self.book.auto_hot_mark.pop(f, None)
+                for a in self.cfg.areas:
+                    if a["name"] == area:
+                        a["hot"] = [x for x in a["hot"] if x != f]
+            self.log("auto_hot_expired", file=f, area=area, merges=expire)
+            self.event(f"{f} had no conflict in {expire} merges: it is no longer a hot file of the {area} area")
+        self.save_owners()
 
     def check_starving(self, pr: int, now: float) -> None:
         """A P0/P1 PR whose rebase was left to a merger POOL_STARVE_AFTER times on the same
-        files is starving: every merge that touches them moves main under it. In cohort
-        52, #143 ("near here", P1) waited 5 h 40 min through 3 merger sessions while 77
-        commits landed. Until it lands, is closed, or POOL_STARVE_HOLD_S passes, merges of
+        files is starving: every merge that touches them moves main under it. A P1 PR once
+        waited hours through several merger sessions while dozens of commits landed. Until
+        it lands, is closed, or POOL_STARVE_HOLD_S passes, merges of
         other PRs that touch those files wait (starve_hold)."""
         if pr in self.starving or not self.cfg.starve_after:
             return
@@ -4684,9 +4943,9 @@ class Pool:
                 # Only failures count toward POOL_FAMILY_MAX: a merged PR that a live check
                 # or a reopen sends back is progress, not a loop.
                 b.family_starts[u.family] -= 1
-            if outcome.startswith(("quota error", "transient error", "timed out under quota")):
+            if outcome.startswith(("quota error", "transient error", "timed out under quota", BG_CUT)):
                 # The model's capacity, not the unit: no try spent, so it is due again
-                # when the pause ends.
+                # when the pause ends. A worker cut off mid-sweep is due again at once too.
                 b.tries[u.key] -= 1
                 b.family_starts[u.family] -= 1
             if outcome.startswith("held"):
@@ -4775,7 +5034,8 @@ class Pool:
                 # Issues without a verdict stay in the queue (a round is counted only after a
                 # clean end).
                 if not outcome.startswith("startup crash"):
-                    verified = self.settle_accept(u, w.started, outcome == "ok")
+                    settle = self.settle_after if u.info.get("after") else self.settle_accept
+                    verified = settle(u, w.started, outcome == "ok")
                     self.accept_chore(w.dir, verified, {x["n"]: x.get("title", "") for x in u.info["issues"]})
             finally:
                 with self.lock:
@@ -4815,9 +5075,16 @@ class Pool:
             return
         with self.lock:
             prev = self.book.convs.get(n) or {}
+            # An implement session outside an area (no area, or lent) ran a conversation of its
+            # own: it holds no area slot. Inheriting the last record's slot made the author look
+            # busy whenever another issue used that slot, and run 14's PRs 114 and 126 went to
+            # a merger seconds after their authors ended.
+            if u.kind == "implement":
+                area, slot = u.info.get("area"), u.info.get("slot")
+            else:
+                area, slot = u.info.get("area", prev.get("area")), u.info.get("slot", prev.get("slot"))
             self.book.convs[n] = {"conv": conv, "cli": w.cli.name, "t": round(self.clock(), 1), "seq": w.seq,
-                                  "area": u.info.get("area", prev.get("area")), "slot": u.info.get("slot", prev.get("slot")),
-                                  "files": w.branch_files or prev.get("files") or []}
+                                  "area": area, "slot": slot, "files": w.branch_files or prev.get("files") or []}
             area, k = u.info.get("area"), u.info.get("slot")
             if u.kind == "implement" and area and k is not None and (w.dir / "claim.out").exists():
                 slots = self.book.area_slots.setdefault(area, [])
@@ -4832,7 +5099,7 @@ class Pool:
                          tokens=slots[k]["tokens"], resumed=resumed)
         self.save_owners()
 
-    OWNED = ("auto_hot", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
+    OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
              "area_wait_s")
 
     def save_owners(self) -> None:
@@ -4866,11 +5133,15 @@ class Pool:
 
     def record_ux_score(self, w: Session, outcome: str = ""):
         """The score from the UX run's report (an explorer's from its own), for pool.jsonl
-        and the dashboard. 7 of 10 reports in one run had none, so a run's score could not
-        be followed. Only whole-app UX runs make the dashboard's series."""
+        and the dashboard. In a test run of the sample, 7 of 10 reports had none, so a run's
+        score could not be followed. Only whole-app UX runs make the dashboard's series."""
         name = REPORTS[w.unit.kind]
         score, why = score_detail(w.dir / name)
-        cap, blockers, majors = score_cap(w.dir / name)
+        if outcome.startswith("stopped with the supervisor") and score is not None:
+            # A run the stop cut off had not finished its walk: run 14's last run logged 50
+            # with half its journeys unrun.
+            score, why = None, "a score from a run the stop cut short"
+        cap, blockers, majors = score_cap(w.dir / name, w.unit.kind)
         reported = score
         if score is not None and cap is not None and score > cap:
             score = cap  # the report's own findings allow no more
@@ -5013,7 +5284,8 @@ class Pool:
     def main_check_due(self, st: dict):
         """Start the full check of the newest origin/main, unless one is running. The
         merged-tree check runs only the quick command, so a semantic conflict in the
-        slower tests reached main twice in one run and nobody noticed for half an hour."""
+        slower tests reached main twice in a test run of the sample, and nobody noticed for
+        half an hour."""
         main = st.get("main", "")
         with self.lock:
             if not self.cfg.main_check or not main or self.main_check_running or main == self.main_check_sha:
@@ -5116,7 +5388,7 @@ class Pool:
         test:` issue that carries FLAKY_MARK, so they failed and passed at one commit),
         each with its issue; read again after max_age seconds. An issue filed under the
         old rule (red, then green at a later commit) names a main break as often as a
-        flake (#194 in cohort 52), and does not count."""
+        flake, and does not count."""
         at, known = self.flaky_known
         if time.time() - at < max_age:
             return known
@@ -5137,11 +5409,39 @@ class Pool:
         self.flaky_known = (time.time(), known)
         return known
 
+    def two_of_three(self, run) -> tuple[bool | None, str]:
+        """A failure looked at again at the same commit: `run` (a rerun of the failing tests,
+        or the whole check) up to three times; True once two runs pass, False once two fail,
+        None when the first could not run (a later run that cannot counts as a failure).
+        One pass made a failure flaky before: trains merged on one rerun of a test that then
+        kept failing in later sweeps."""
+        passes = fails = 0
+        out = ""
+        for k in range(3):
+            ok, out = run()
+            if ok is None and k == 0:
+                return None, out
+            if ok:
+                passes += 1
+            else:
+                fails += 1
+            if passes >= 2 or fails >= 2:
+                break
+        return passes >= 2, out
+
+    def known_flaky_again(self, run, failing: list[str]) -> bool:
+        """Whether failures only in known flaky tests may count as green: when the project
+        has a rerun command, only if they pass two of three reruns at the same commit."""
+        if not self.cfg.rerun_cmd or not [t for t in failing if "::" in t]:
+            return True
+        ok, _ = self.two_of_three(run)
+        return ok is not False
+
     def rerun_tests(self, wt: str, tests: list[str], env: dict | None = None) -> tuple[bool | None, str]:
         """[sweep] rerun with just the failing tests, in a worktree that exists: (passed,
         output), or (None, "") when there is no such command or no test to name, and the
-        caller runs the whole check again (in cohort 52 a red main check's second full run
-        took 0.7 h a cohort, and each held PR's second full re-sweep as long again)."""
+        caller runs the whole check again (a red main check's second full run, and each held
+        PR's second full re-sweep, cost far more than rerunning the failing tests)."""
         tests = [t for t in tests if "::" in t]
         if not self.cfg.rerun_cmd or not tests or "{tests}" not in self.cfg.rerun_cmd:
             return None, ""
@@ -5185,8 +5485,8 @@ class Pool:
         """A test recorded as flaky (FLAKY_MARK) must be fixed or deleted within
         POOL_FLAKY_MERGES merges. Past that, its issue gets one comment saying so
         (FLAKY_DEADLINE, which also keeps it from being said twice) and P1 if it had a
-        lower priority. In cohort 52 test_issue_96 failed 29 runs, and fails 1 in 3 even
-        alone, and nobody fixed it."""
+        lower priority. A test that failed again and again, even alone, was never fixed
+        otherwise."""
         if not self.cfg.flaky_merges:
             return
         self.flaky_tests()
@@ -5262,9 +5562,8 @@ class Pool:
         """File one chore when main holds POOL_CONSOLIDATE_AT (40) files under one of the
         POOL_CONSOLIDATE_GLOB globs, or when one of their directories takes
         POOL_CONSOLIDATE_MIN (5) minutes to run: merge or parametrize them by flow. Not while
-        one is open. On cohort 52's final main, 104 of 251 e2e tests were a coverage subset
-        of another; in cohort 55 tests/accept reached 138 files and 14 minutes, and the chore
-        looked at tests/e2e only."""
+        one is open. Many e2e tests ended up as a coverage subset of another, and tests/accept
+        grew slow while the chore looked at tests/e2e only."""
         if not self.cfg.consolidate_at and not self.cfg.consolidate_min:
             return
         r = subprocess.run(["git", "-C", str(repo_root()), "ls-tree", "-r", "--name-only", sha],
@@ -5301,7 +5600,9 @@ class Pool:
             "- **merge** two tests that start from the same fixture and take the same steps into one;\n"
             "- **parametrize** copies of one test across viewports, languages or settings into one test;\n"
             "- **replace** a structural check (a grep of JS or HTML source) with a test that drives the behavior.\n\n"
-            "Keep every assertion that is not covered elsewhere. Do it in a few PRs, one flow each, with the sweep "
+            "Keep every assertion that is not covered elsewhere. "
+            + baseline_text(config.baseline_tests(repo_root())) +
+            "Do it in a few PRs, one flow each, with the sweep "
             "green after each; give the merged tests flow names (`test_settings.py`, `test_reload.py`). Slow tests: "
             "share the suite's app server (one per session, not per file), one browser page per test, and wait on "
             "what the page shows instead of fixed sleeps."
@@ -5332,7 +5633,8 @@ class Pool:
             return None, out
         failing = failing_tests(out)
         known = self.flaky_tests()
-        if failing and all(t in known for t in failing):
+        if failing and all(t in known for t in failing) and \
+                self.known_flaky_again(lambda: self.rerun_at(sha, failing), failing):
             for n in sorted({known[t] for t in failing}):
                 self.gh("issue", "comment", str(n), "--body", (
                     f"<!-- merger -->\nThese known flaky tests failed again on main at {sha[:8]}:\n\n"
@@ -5343,11 +5645,11 @@ class Pool:
             self.event(f"main {sha[:8]} failed only known flaky tests ({', '.join(failing[:2])}); "
                        "counted as green, and their issue has a comment")
             return True, out
-        again, out2 = self.rerun_at(sha, failing)
+        again, out2 = self.two_of_three(lambda: self.rerun_at(sha, failing))
         if again is False:
             return False, out  # the failing tests fail again: the full output tells the most
         if again is None:
-            again, out2 = self.sweep_main(sha)
+            again, out2 = self.two_of_three(lambda: self.sweep_main(sha))
         if again:
             self.report_flaky(f"main at {sha[:8]}", failing)
             return True, out2
@@ -5356,10 +5658,10 @@ class Pool:
     def report_flaky(self, where: str, failing: list[str]):
         """Tests that failed and then passed at one commit (`where`: main at a sha, a PR's
         head, a merged tree) are flaky. File an issue for them (or comment on the open
-        one), so someone makes them reliable: an e2e flake turned main red four times in
-        one run and nobody filed a fix. Only the same commit proves it: "red, then green
-        at a later commit with no change to the test" labeled a main break as flaky (#194
-        in cohort 52), and the known-flaky hold then re-swept PRs built on it for an hour."""
+        one), so someone makes them reliable: an e2e flake turned main red four times in a
+        test run of the sample and nobody filed a fix. Only the same commit proves it: "red, then green
+        at a later commit with no change to the test" labeled a main break as flaky, and the
+        known-flaky hold then re-swept PRs built on it for an hour."""
         tests = [t for t in failing if "::" in t]
         if not tests:
             return
@@ -5444,7 +5746,8 @@ class Pool:
         files = merged["files"]
         accept = self.cfg.accept and (needs_live or any(config.path_matches(f, g) for f in files
                                                          for g in self.cfg.accept_paths))
-        stage = ACCEPT_STAGE if accept else "stage:live" if needs_live else ""
+        # stage:live only in "gate" mode: with "after" or "off" the PR said Fixes and the merge closed it.
+        stage = ACCEPT_STAGE if accept else "stage:live" if needs_live and self.cfg.accept_mode == "gate" else ""
         args = ["issue", "edit", str(n), "--remove-label", "stage:pr"]
         if stage:
             args += ["--add-label", stage]
@@ -5453,15 +5756,21 @@ class Pool:
             with self.lock:
                 self.book.accept_merged[n] = {"pr": pr, "sha": merged["sha"], "t": self.clock(),
                                               "live": needs_live or touches_live(files), "files": files}
+        if self.cfg.accept_mode == "after":
+            with self.lock:
+                self.book.after_merged[n] = {"pr": pr, "sha": merged["sha"], "files": files, "t": self.clock()}
         self.gh(
             "issue", "comment", str(n), "--body",
             (f"<!-- merger -->\nMerged PR #{pr} (head {head[:8]}): {why}, so the supervisor landed it. "
              + ("It stays open at stage:accept until a tester who did not write it checks it on the deployed "
                 "build." if accept
-                else "It stays open at stage:live for the tester's live check." if needs_live
+                else "It stays open at stage:live for the tester's live check." if stage == "stage:live"
+                else "Its PR closes it. Once it is deployed, a tester who did not write it may check it there, and "
+                     "reopens it if it does not work." if self.cfg.accept_mode == "after"
                 else "The supervisor deploys main next." if self.cfg.deploy_cmd else "")).strip(),
         )
         self.note_large_files(pr, files)
+        self.hot_after_merge(pr, merged["sha"])
         self.log("merged", pr=pr, issue=n, head=head[:12])
 
     def merged_pr(self, pr: int) -> dict:
@@ -5499,8 +5808,8 @@ class Pool:
     # give main the tree the train swept, and that sweep is main's check. Red: the failing
     # tests run again on the same tree (flaky?), then on main alone (main's own failure?),
     # then on the trees in between, halving, to find the first PR that fails them; it goes
-    # back to its worker, and the PRs before it merge. In cohort 52 every PR head and every
-    # main got a full sweep: 43.6 h of sweeps in 6 h.
+    # back to its worker, and the PRs before it merge. Without it every PR head and every
+    # main got a full sweep, many machine-hours an hour.
     def enqueue(self, u: Unit) -> str:
         """Put a PR that passed the gates in the train's queue (the auto-merge unit's outcome)."""
         e = {"pr": u.number, "issue": u.info["issue"], "head": u.info["head"],
@@ -5614,7 +5923,7 @@ class Pool:
                     self.log("train_skip", pr=e["pr"], conflicts=conflicts[:20],
                              why=out.splitlines()[-1][:300] if out else "")
                     if conflicts:
-                        self.record_conflicts(e["pr"], conflicts)  # c60: settings.js's 14 train skips went uncounted
+                        self.record_conflicts(e["pr"], conflicts)  # train skips went uncounted before
                     continue
                 cars.append({**e, "commit": self.git("rev-parse", "HEAD", wt=wt).stdout.strip(),
                              "tree": self.git("rev-parse", "HEAD^{tree}", wt=wt).stdout.strip()})
@@ -5639,9 +5948,9 @@ class Pool:
             remove_worktree(root, wt, self.log)
 
     def train_check(self, wt: str) -> tuple[bool | None, str]:
-        """The train's full check: the sweep, then [accept] guard on the same tree (c55: two
-        regressions passed `make verify`, which leaves tests/accept out, and turned main
-        red until the guard after the deploy caught them). Each has its own time limit,
+        """The train's full check: the sweep, then [accept] guard on the same tree (regressions
+        passed `make verify`, which leaves tests/accept out, and turned main red until the
+        guard after the deploy caught them). Each has its own time limit,
         POOL_MAIN_CHECK_S and POOL_ACCEPT_GUARD_S, so the check takes at most their sum."""
         ok, out = self.sweep_tree(wt, "merge-train")
         if ok:
@@ -5678,27 +5987,28 @@ class Pool:
     def train_second_look(self, wt: str, base: str, cars: list[dict], out: str) -> tuple[bool | None, str]:
         """A red train, looked at again as second_look does for main: a failure of the
         machine is None; only known flaky tests count as green; otherwise the failing tests
-        (or the whole sweep) run again on the same tree, and a pass makes them flaky."""
+        (or the whole sweep) run again on the same tree, and two passes of three make them flaky."""
         if INFRA.search(out):
             return None, out
         failing = failing_tests(out)
         known = self.flaky_tests()
-        if failing and all(t in known for t in failing):
+        if failing and all(t in known for t in failing) and \
+                self.known_flaky_again(lambda: self.rerun_tests(wt, failing), failing):
             self.event(f"merge train of {self.train_label(cars)} failed only known flaky tests "
                        f"({', '.join(failing[:2])}); counted as green")
             return True, out
-        again, out2 = self.rerun_tests(wt, failing)
+        again, out2 = self.two_of_three(lambda: self.rerun_tests(wt, failing))
         if again is False and self.passes_alone(wt, failing):
             # The failing tests are guards that pass one at a time on this very tree: they
-            # depend on each other (cohort 60: #32's 11 guards failed together and test_accept_12
-            # and 42 passed alone 3 of 3). Not the PR's.
+            # depend on each other (one issue's guards failed together and each passed alone).
+            # Not the PR's.
             self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged (they fail together and "
                               "pass one at a time: test isolation)", failing)
             return True, out
         if again is False:
             return False, out
         if again is None:
-            again, out2 = self.train_check(wt)
+            again, out2 = self.two_of_three(lambda: self.train_check(wt))
         if again:
             self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged", failing)
             return True, out2
@@ -5765,8 +6075,8 @@ class Pool:
         if hi > 1:
             # The PRs before it merge only after the full check (sweep and guard) passed on
             # exactly their tree: the halving ran only the failing tests, and a guard runs only
-            # after a green sweep. Cohort 60: 6 of 107 trains merged unchecked, and one brought
-            # a guard that failed at its own commit (test_accept_50): main red for 15 min.
+            # after a green sweep. Trains once merged unchecked prefixes, and one brought a guard
+            # that failed at its own commit: main went red.
             prefix = cars[:hi - 1]
             ok, pout = (None, f"could not check out {prefix[-1]['commit'][:12]}")
             if self.git("checkout", "-q", "--detach", prefix[-1]["commit"], wt=wt).returncode == 0:
@@ -5801,8 +6111,8 @@ class Pool:
         rec = self.book.convs.get(n)
         if (self.cfg.author_guard and guards and guards == [t for t in failing if "::" in t] and conv_resumable(rec)
                 and self.book.guard_runs[pr] < self.cfg.author_guard_max):
-            # Only guards fail: the PR may change behavior an older guard assumes (c60: #32's server-side
-            # history against test_accept_38's "reload starts empty"). Its author decides.
+            # Only guards fail: the PR may change behavior an older guard assumes (server-side history
+            # against an older guard's "reload starts empty"). Its author decides.
             with self.lock:
                 self.book.guard_fix[pr] = {"head": head, "issue": n, "failing": failing[:20], "on_main": list(on_main)[:10],
                                            "out": out.strip()[-3000:], "base": base}
@@ -5904,8 +6214,8 @@ class Pool:
                 old = was_open.get(n)
                 if labels & IGNORED:
                     # A proposal waiting for the owner: not for the monitor to triage, but to
-                    # screen. Of 127 UX proposals in one run the owner rejected 94, 59 of them
-                    # as duplicates of open issues.
+                    # screen. The owner rejected most UX proposals, many of them as duplicates of
+                    # open issues.
                     if old is None and n not in was_closed and self.cfg.ux_screen:
                         self.event(f"new UX proposal #{n}: {i['title']}. Screen it before the owner reads it "
                                    "(issuelooper-monitor skill, Screen UX proposals)")
@@ -6091,6 +6401,186 @@ class Pool:
                 b.accept_rounds.pop(n, None)
         b.accept_ready, b.accept_target = ready, target
 
+    def track_after(self, st: dict) -> None:
+        """[accept] mode "after": the issues closed by a merged PR since tracking started
+        (st["closed"]: the 60 most recently updated), each close once. Its merge comes from
+        after_merge, or once from GitHub (a restarted supervisor; tried again after ten
+        minutes). One that changed nothing under [accept] paths (with paths set), a split or
+        a test-only chore needs no check. The rest are sampled once (sample_after): always for
+        seed, owner-request, P0, P1 and needs:live, 1 in N otherwise. A sampled issue is ready
+        once its merge is in the build the tester checks (the deployed sha, or main)."""
+        if self.cfg.accept_mode != "after":
+            return
+        b, now = self.book, self.clock()
+        if not b.after_since:
+            with self.lock:
+                b.after_since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+            self.save_owners()
+        target = self.own_deployed if self.cfg.deploy_cmd else st.get("main", "")
+        changed = False
+        for c in st.get("closed", []):
+            n, labels = c["number"], set(c.get("labels") or [])
+            if c.get("reason", "COMPLETED") != "COMPLETED" or str(c.get("closed", "")) < b.after_since:
+                continue
+            e = b.after.get(n)
+            if e and e.get("closed") == c.get("closed"):
+                continue  # this close is tracked already
+            skip = test_only_chore(c) or str(c.get("title", "")).startswith("Split ") or bool(labels & IGNORED)
+            with self.lock:
+                b.after[n] = {"closed": c.get("closed", ""), "title": c.get("title", ""), "labels": sorted(labels),
+                              "state": "n/a" if skip else "new", "refix": b.after_fails[n], "t": now}
+                b.accept_rounds[n] = 0
+            changed = True
+        fetched = False
+        for n, e in list(b.after.items()):
+            if e["state"] == "new":
+                m = b.after_merged.get(n)
+                if not m and now - e.get("asked", 0) >= 600:
+                    m = self.accept_merge_info(n)
+                    e["asked"] = now
+                    if not m.get("sha"):
+                        m = None
+                        if now - e["t"] > 3600:  # closed by hand, not by a merge: nothing to check
+                            e["state"] = "n/a"
+                            changed = True
+                if not m:
+                    continue
+                files = m.get("files") or []
+                product = not self.cfg.accept_paths or "needs:live" in e["labels"] or any(
+                    config.path_matches(f, g) for f in files for g in self.cfg.accept_paths)
+                sampled = product and self.sample_after(set(e["labels"]))
+                e.update(pr=m.get("pr"), sha=m.get("sha", ""), files=files,
+                         live="needs:live" in e["labels"] or touches_live(files),
+                         state="wait" if sampled else "skip" if product else "n/a")
+                self.log("after_tracked", issue=n, pr=e["pr"], sampled=sampled, product=product)
+                changed = True
+            if e["state"] == "wait" and target and e.get("sha"):
+                r = self.git("merge-base", "--is-ancestor", e["sha"], target)
+                if r.returncode not in (0, 1) and not fetched:
+                    fetched = True
+                    self.git("fetch", "-q", "origin", "main")
+                    r = self.git("merge-base", "--is-ancestor", e["sha"], target)
+                if r.returncode == 0:
+                    e["state"] = "ready"
+                    changed = True
+        with self.lock:
+            for n in [n for n in b.after_merged if n in b.after and b.after[n]["state"] != "new"]:
+                del b.after_merged[n]
+            b.accept_ready = [n for n, e in b.after.items() if e["state"] == "ready"]
+            b.accept_target = target
+        if changed:
+            self.save_owners()
+
+    def sample_after(self, labels: set) -> bool:
+        """Whether a closed issue gets the post-merge check: always for [accept] sample_labels
+        (owner requests, P0, needs:live, seed, features) and P1, 1 in N for the rest."""
+        if labels & {"P1"}:
+            return True
+        return self.sample_pick(labels)
+
+    def after_stats(self) -> dict:
+        """For state.json and the dashboard: the post-merge check (how many defects got past the merge)."""
+        b = self.book
+        states = collections.Counter(e["state"] for e in b.after.values())
+        checked = len(b.samples)  # every counted check: a pass, or a failure that reopened the issue
+        failed = sum(1 for x in b.samples if not x.get("agree"))
+        return {"tracked": len(b.after), "checked": checked, "verified": checked - failed, "failed": failed,
+                "fail_rate": round(failed / checked, 3) if checked else None,
+                "skipped": states["skip"], "pending": states["wait"] + states["ready"] + states["new"],
+                "blocked": states["blocked"], **self.sample_stats()}
+
+    def settle_after(self, u: Unit, started: float, finished: bool) -> list[int]:
+        """Act on the tester's verdict on each closed issue of an [accept] mode "after" unit:
+        `accept-verified:` labels it accept:verified; `accept-blocked:` tells the monitor; any
+        other verdict is checked once more by a fresh session before it counts (a false
+        failure costs a worker session). A counted failure reopens the issue at stage:triage
+        with the report, its priority raised to P1 if lower, and the refix resumes the
+        author's conversation when it can; a second counted failure after a refix goes to the
+        owner (stage:owner). Each check counts toward the failure rate (record_sample).
+        Returns the verified, for the acceptance chore."""
+        try:
+            login = bare_login(claimlib.loop_login())
+        except claimlib.GhError:
+            self.event("post-merge check of " + ", ".join("#" + str(x["n"]) for x in u.info["issues"])
+                       + " finished, and GitHub could not be read: read the tester's comments")
+            return []
+        start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+        verified = []
+        for x in u.info.get("issues") or []:
+            n, entry = x["n"], x.get("since") or ""
+            e = self.book.after.get(n)
+            if not e or e.get("closed") != entry or e.get("state") != "ready":
+                continue  # closed again since, or settled
+            try:
+                r = self.gh("issue", "view", str(n), "--json", "state,labels,comments")
+                data = json.loads(r.stdout) if r.returncode == 0 else None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                data = None
+            if not isinstance(data, dict):
+                self.event(f"post-merge check of #{n} finished: read the tester's comment")
+                continue
+            if data.get("state") == "OPEN":
+                e["state"] = "gone"  # somebody reopened it meanwhile; its next close is checked
+                continue
+            labels = {y.get("name") for y in data.get("labels") or []}
+            comments = [c for c in data.get("comments") or []
+                        if bare_login(str((c.get("author") or {}).get("login") or "")) == login]
+            verdicts = [c for c in comments if str(c.get("body", "")).lstrip().startswith("<!-- tester -->")
+                        and str(c.get("createdAt", "")) >= max(entry, start)]
+            if not verdicts:
+                if finished:
+                    with self.lock:
+                        self.book.accept_rounds[n] += 1
+                continue
+            body, url = str(verdicts[-1].get("body", "")), verdicts[-1].get("url", "")
+            missing = unchecked_rows(body, x.get("rows") or []) if ACCEPT_VERIFIED.search(body) else []
+            retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
+                          for c in comments)
+            if ACCEPT_BLOCKED.search(body):
+                e["state"] = "blocked"
+                self.event(f"#{n}: its post-merge check could not run ({url}); tell the owner what is missing")
+                how = "blocked"
+            elif ACCEPT_VERIFIED.search(body) and not missing:
+                self.gh("issue", "edit", str(n), "--add-label", AFTER_VERIFIED, "--remove-label", AFTER_FAILED)
+                e["state"] = "verified"
+                verified.append(n)
+                self.record_sample(n, True)
+                how = "verified"
+            elif not retried:
+                why = (f"names no checklist row {', '.join(missing)}" if missing else "did not show the behavior")
+                self.gh("issue", "comment", str(n), "--body",
+                        f"<!-- merger -->\n{ACCEPT_RETRY}\nThe post-merge check {why} ({url}). A fresh tester session "
+                        "checks it once more before it counts.")
+                with self.lock:
+                    self.book.accept_rounds[n] += 1
+                how = "retry"
+            else:
+                with self.lock:
+                    self.book.after_fails[n] += 1
+                owner = e.get("refix", 0) >= 1
+                to = "stage:owner" if owner else "stage:triage"
+                edit = ["issue", "edit", str(n), "--add-label", to, "--add-label", AFTER_FAILED,
+                        "--remove-label", AFTER_VERIFIED]
+                if not owner and priority(labels) > 1:
+                    edit += ["--add-label", "P1"] + (["--remove-label", "P2"] if "P2" in labels else [])
+                self.gh("issue", "reopen", str(n), "--comment",
+                        f"<!-- merger -->\n{ACCEPT_HANDBACK}\nReopened: two post-merge checks on the deployed build did "
+                        f"not show the behavior ({url}). "
+                        + ("It already failed this check once and was fixed again, so whether it holds as written is "
+                           "the owner's call. Waiting at stage:owner." if owner else
+                           "The next worker starts from what that comment saw (the issue's author, when its "
+                           "conversation can be resumed)."))
+                self.gh(*edit)
+                e["state"] = "failed"
+                self.record_sample(n, False)
+                if not owner:
+                    self.failed_try(n)
+                self.event(f"#{n} failed its post-merge check twice and was reopened at {to} ({url})")
+                how = "failed"
+            self.log("accept_settled", issue=n, verdict=how, after=True)
+        self.save_owners()
+        return verified
+
     def track_waits(self, now: float, started: set) -> None:
         """Log when an issue starts waiting for an area (a hot file another session works on,
         or the area's busy conversations) and when the wait ends, and total the seconds per
@@ -6161,8 +6651,17 @@ class Pool:
           among the areas it is found in.
         Files [areas] shared lists count for nothing. Run 12 sent live and tools issues to
         settings and shell: a strings table (i18n.js), the feed and the stylesheet name every
-        card and tool, so "Route card" (#20) went to settings on one hit in i18n.js."""
+        card and tool, so "Route card" (#20) went to settings on one hit in i18n.js.
+
+        The files (for the hot-file lock) are only those the issue will edit with some
+        confidence: paths its text names, and what its last branch changed. Files that
+        merely hold two of its names counted too, and such matches made a good share of the
+        hot-lock waits (cards issues waiting on live.py). A test-only
+        chore (acceptance tests, test consolidation, a flaky test) has no area and no
+        files: run 14's acceptance chore #82 waited on app.js for six hours, unclaimed."""
         table, n = self.cfg.areas, issue["number"]
+        if test_only_chore(issue):
+            return "", []
         shared = config.area_shared()
 
         def area(path: str) -> str:
@@ -6201,7 +6700,7 @@ class Pool:
             return bool(config.area_of(path, table)) or config.is_hot(path, table)
         named_all = {m for m in re.findall(r"[\w./-]+\.\w{1,5}\b", text) if known(m)}
         prev_all = [f for f in (self.book.convs.get(n) or {}).get("files") or [] if known(f)]
-        files = sorted(named_all | set(prev_all) | {p for p, names in hits.items() if len(names) >= 2 and known(p)})
+        files = sorted(named_all | set(prev_all))
         top = score.most_common(2)
         best = top[0][0] if top and top[0][1] > 0 and (len(top) == 1 or top[0][1] > top[1][1]) else ""
         return best, files
@@ -6222,8 +6721,7 @@ class Pool:
         """Act on the acceptance tester's verdict on each issue of its batch, as settle_live
         does: `accept-verified:` (or `live-verified:`) closes it, `accept-blocked:` sends it
         to the owner. A failure is checked once more by a fresh session before it counts:
-        the harness's QA tester retried each failure, and a false failure costs a worker
-        session. A counted failure goes back to stage:triage with the report; a second goes
+        a false failure costs a worker session. A counted failure goes back to stage:triage with the report; a second goes
         to the owner. An issue with no verdict is in the next batch. Returns the verified."""
         try:
             login = bare_login(claimlib.loop_login())
@@ -6365,6 +6863,12 @@ class Pool:
             with self.lock:
                 self.book.sample_n, self.book.sample_since = new, len(self.book.samples)
             self.log("accept_escalate", every=new, rate=stats["rate"], window=stats["window"])
+            if self.cfg.accept_mode == "after":
+                self.event(f"post-merge checks failed {stats['disagree']} of the last {stats['window']} checked issues "
+                           f"({stats['rate']:.0%}, over {self.cfg.accept_escalate_at:.0%}): the sample of the rest goes "
+                           f"from 1 in {every} to 1 in {new}")
+                self.save_owners()
+                return
             self.event(f"independent acceptance disagreed with the authors on {stats['disagree']} of the last "
                        f"{stats['window']} sampled issues ({stats['rate']:.0%}, over {self.cfg.accept_escalate_at:.0%}): "
                        f"the sample goes from 1 in {every} to 1 in {new}. Look at what the authors verified that the "
@@ -6461,8 +6965,8 @@ class Pool:
         "settings or other server-side data, uses the fresh-state fixture .issuelooper/project.md names (an app, "
         "user or profile of its own), never a server it starts itself;\n"
         "- a fresh state the test makes itself: its own browser context, never another test's leftovers, never an "
-        "assumption that history is empty or that a reload starts blank (cohort 60: test_accept_38 cleared "
-        "localStorage, reloaded and expected an empty feed, and broke when history moved to the server);\n"
+        "assumption that history is empty or that a reload starts blank (a guard that cleared localStorage, "
+        "reloaded and expected an empty feed broke when history moved to the server);\n"
         "- no endpoint only tests use (a `DELETE /api/history` to reset state) and no monkeypatched navigation "
         "(`page.goto`, `page.reload`): the review gate rejects both;\n"
         "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
@@ -6470,8 +6974,8 @@ class Pool:
         "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
         "- well under 100 lines, a few seconds to run.\n\n"
         "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
-        "`Regression of #N`. In cohort 55 that suite reached 288 tests and 14 minutes: 126 of 138 files started "
-        "their own server and all slept. Only this chore's PR may add files there.\n"
+        "`Regression of #N`, so every test there costs every later merge: a suite whose files each started their "
+        "own server and slept grew to many minutes. Only this chore's PR may add files there.\n"
     )
 
     def accept_chore(self, logdir: pathlib.Path, verified: list[int], titles: dict[int, str] | None = None) -> None:
@@ -6479,7 +6983,7 @@ class Pool:
         ($LOGDIR/accept/test_accept_<N>.py), with [accept] guard set, for a chore issue: a
         worker turns them into tests/accept/test_accept_<N>.py through the usual gates. Not
         for an issue whose test is already on main, nor for a split issue: its acceptance is
-        that nothing changed, and in cohort 55 its scripts became six line-count tests.
+        that nothing changed, and its scripts became line-count tests.
         flush_chores files or appends them."""
         if not self.cfg.accept_guard or not verified:
             return
@@ -6513,8 +7017,13 @@ class Pool:
         and nobody has claimed it (stage:triage or stage:ready), they are appended to it (a
         comment, and its title). Otherwise one new chore is filed once [accept] chore_batch
         scripts wait or the oldest has waited [accept] chore_every_s; append_only: only the
-        first. Cohort 60: one P1 chore per acceptance unit made 95 of D's 211 merges, and
-        product merges fell from c55's 133 to 109."""
+        first. One P1 chore per acceptance unit made a large share of all merges and crowded
+        out product work. One flush at a time (chore_lock): run 14
+        posted every append to #82 twice."""
+        with self.chore_lock:
+            self._flush_chores(append_only)
+
+    def _flush_chores(self, append_only: bool) -> None:
         with self.lock:
             items = list(self.book.chore_pending)
         if not items:
@@ -6598,7 +7107,7 @@ class Pool:
                 return  # nothing to run yet: no tests/accept/, or no test in it
             failing = failing_tests(out) if ok is False else []
             if ok is False:
-                again, _ = self.rerun_tests(wt, failing)  # the same commit: a pass makes them flaky
+                again, _ = self.two_of_three(lambda: self.rerun_tests(wt, failing))  # two passes make them flaky
                 if not again and self.passes_alone(wt, failing):
                     again = True  # they pass one at a time: they depend on each other, not a regression
                 if again:
@@ -6645,7 +7154,7 @@ class Pool:
         """Act on the tester's verdict on a stage:live issue: close it on a `live-verified:`
         line, send it to the owner on `live-check-blocked:`, hand it back to stage:triage
         otherwise, and to the owner on its second failed check. The monitor did this by
-        hand, one turn each (24 closes in one run); it is told what happened. When the
+        hand, one turn each, and it took much of its time; it is told what happened. When the
         verdict cannot be read, the monitor is asked to act, as before."""
         n = u.number
         ask = (f"live check of #{n} finished: read the tester's comment on #{n}; if it says "
@@ -6728,14 +7237,16 @@ class Pool:
 
     def track_blocked(self, st: dict, now: float) -> None:
         """Point the monitor, once, to a claimable issue of any priority that has waited
-        POOL_BLOCKED_REVIEW_MIN on open blockers. One P1 fix waited 6.7 hours on three
+        POOL_BLOCKED_REVIEW_MIN on open blockers. A P1 fix waited hours on three
         dependencies while workers took lower-ranked issues around it, and nobody
-        looked at whether it still needed them; in cohort 60 most of the 40 blocked issues
-        were P2, which this left out."""
+        looked at whether it still needed them; most blocked issues were P2, which an earlier
+        version left out."""
         b = self.book
         done = accepted(st)  # a blocker at stage:accept is merged: nothing to review
         open_numbers = {i["number"] for i in st["open"]}
-        native = {i["number"]: native_blockers(i, done) + line_blockers(i, open_numbers, done) for i in st["open"]}
+        # A blocker can be both a GitHub dependency and a `Blocked by:` line: named once.
+        native = {i["number"]: list(dict.fromkeys(native_blockers(i, done) + line_blockers(i, open_numbers, done)))
+                  for i in st["open"]}
         waiting = {
             i["number"]: i for i in st["open"]
             if native[i["number"]] and set(i["labels"]) & CLAIMABLE
@@ -6799,7 +7310,7 @@ class Pool:
     def ask_decompose(self, st: dict) -> None:
         """Ask the monitor, once per issue, to split one that has failed POOL_DECOMPOSE_AFTER
         times (Book.failed_tries) and is waiting for the next worker. The monitor may split
-        any issue, and in a 12-hour run split none: one issue took eleven sessions."""
+        any issue, and left to itself split none, while one issue took many worker sessions."""
         b, k = self.book, self.cfg.decompose_after
         if not k:
             return
@@ -6852,8 +7363,8 @@ class Pool:
     def check_files(self) -> None:
         """Tell the monitor when a file the loop relies on goes missing from the shared
         checkout, and when it is back: POOL_REQUIRED_FILES, by default .env when live
-        checks are on. In the sixth run .env disappeared; the live deploy stayed on an old
-        commit for 4.5 hours and nobody was told."""
+        checks are on. In a test run of the sample .env disappeared; the live deploy stayed on
+        an old commit for hours and nobody was told."""
         root = repo_root()
         missing = [f for f in self.cfg.required_files if not (root / f).exists()]
         gone = [f for f in missing if f not in self.book.missing]
@@ -6892,6 +7403,7 @@ class Pool:
         self.last_fetch = now
         good, _ = self.deployments()
         self.track_accept(st)  # git and gh reads: outside the lock
+        self.track_after(st)
         self.track_areas(st)
         pending = self.book.chore_pending
         if pending and (len(pending) >= max(1, self.cfg.accept_chore_batch)
@@ -6950,7 +7462,8 @@ class Pool:
             "merge_lock": self.merge_lock_stats(),
             "accept": {"ready": self.book.accept_ready, "build": self.book.accept_target[:12],
                        "held": sorted(self.book.accept_held),
-                       **({"sample": self.sample_stats()} if self.cfg.author_accept else {})},
+                       **({"sample": self.sample_stats()} if self.cfg.author_accept else {}),
+                       **({"after": self.after_stats()} if self.cfg.accept_mode == "after" else {})},
             "missing_files": self.book.missing,
             **({"area_waits": self.area_waits(now)} if self.cfg.areas else {}),
             **({"areas": {a["name"]: {

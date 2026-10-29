@@ -1405,6 +1405,47 @@ def test_merge_may_not_change_protected_paths() -> None:
     check("no protected paths: the gate is off", verdict, "allow")
 
 
+def test_merge_may_not_remove_baseline_tests() -> None:
+    """A consolidation chore's PR deleted a file of the owner's baseline tests, and the
+    review gate skipped it as a test-only PR."""
+    baseline = "def test_a01():\n    assert 1\ndef test_a02():\n    assert 1\n"
+    base = make_commit({"tests/e2e/test_iteration_1.py": baseline, "tests/e2e/test_x.py": "def test_x():\n    pass\n"})
+    body = ("<!-- worker -->\nCloses #132\n- **Sweep SHA:** {sha}\n- **Sweep:** waived - loop/process\n"
+            "- **Fail-before:** waived - loop/process\n")
+
+    def verdict_for(head: str, files: list, labels=None, env_extra=None) -> tuple[str, str]:
+        env, _ = with_fake_gh(labels={"132": labels or ["P2", "type:chore"]}, linked={"801": ["132"]}, prs={"801": {
+            "headRefOid": head, "baseRefOid": base, "body": body.format(sha=head[:7]), "files": files,
+            "headRefName": "issue-132"}})
+        return run("gh pr merge 801 --squash", role="merger",
+                   extra_env={**env, "GUARD_BASELINE_TESTS": "tests/e2e/test_iteration_1.py", **(env_extra or {})})
+    deleted = make_commit({"tests/e2e/test_x.py": "def test_x():\n    pass\n"}, parent=base)
+    verdict, reason = verdict_for(deleted, [{"path": "tests/e2e/test_iteration_1.py", "changeType": "DELETED"}])
+    check("deleting a baseline test file is refused, naming the tests",
+          (verdict, "test_iteration_1.py::test_a01" in reason, "owner-request" in reason), ("refuse", True, True))
+    folded = make_commit({"tests/e2e/test_iteration_1.py": "def test_a01():\n    assert 1\n",
+                          "tests/e2e/test_x.py": "def test_x():\n    pass\n"}, parent=base)
+    verdict, reason = verdict_for(folded, [{"path": "tests/e2e/test_iteration_1.py", "changeType": "MODIFIED"}])
+    check("folding one away is refused too", (verdict, "::test_a02" in reason, "::test_a01" in reason),
+          ("refuse", True, False))
+    moved = make_commit({"tests/e2e/test_iteration_1.py": "def test_a01():\n    assert 1\n",
+                         "tests/e2e/test_flow.py": "def test_a02():\n    assert 1\n",
+                         "tests/e2e/test_x.py": "def test_x():\n    pass\n"}, parent=base)
+    verdict, _ = verdict_for(moved, [{"path": "tests/e2e/test_iteration_1.py", "changeType": "MODIFIED"},
+                                     {"path": "tests/e2e/test_flow.py", "changeType": "ADDED"}])
+    check("a baseline test moved to another file, under its name, is fine", verdict, "allow")
+    added = make_commit({"tests/e2e/test_iteration_1.py": baseline + "def test_a03():\n    assert 1\n",
+                         "tests/e2e/test_x.py": "def test_x():\n    pass\n"}, parent=base)
+    verdict, _ = verdict_for(added, [{"path": "tests/e2e/test_iteration_1.py", "changeType": "MODIFIED"}])
+    check("adding a case to a baseline file is fine", verdict, "allow")
+    verdict, _ = verdict_for(deleted, [{"path": "tests/e2e/test_iteration_1.py", "changeType": "DELETED"}],
+                             labels=["P1", "owner-request"])
+    check("the owner asked for it (owner-request): allowed", verdict, "allow")
+    verdict, _ = verdict_for(deleted, [{"path": "tests/e2e/test_iteration_1.py", "changeType": "DELETED"}],
+                             env_extra={"GUARD_BASELINE_TESTS": "off"})
+    check("[guard] baseline_tests = off: the gate is off", verdict, "allow")
+
+
 def test_needs_live_close_requires_evidence() -> None:
     """The other end of gate 4: the issue stays open until somebody says where
     they saw the behavior."""
@@ -2020,7 +2061,7 @@ def test_a_push_of_a_stopped_rebase_is_refused() -> None:
 
 
 def test_files_in_the_shared_checkout() -> None:
-    # The shared checkout's .env (only the owner has it) disappeared in a run and live
+    # The shared checkout's .env (only the owner has it) disappeared in a test run of the sample and live
     # checks stopped for hours; workers link it into their worktrees and remove the link.
     shared = os.environ["SHARED_REPO_PATH"]
     for cmd in ("rm -f .env", 'rm "$SHARED_REPO_PATH/.env"', "mv .env .env.bak", f"rm -f {shared}/.env",
@@ -2247,7 +2288,7 @@ CHECKLIST_ENV = {
 
 
 def test_gate_7_holds_the_live_check_to_the_checklist() -> None:
-    """Cohort 52's QA reopens were partial implementations in a few rows: 320 px, Escape,
+    """Most reopened issues were partial implementations in a few rows: 320 px, Escape,
     the second language. Gate 7 refuses a live check that skipped a row the change triggers."""
     head = "6" * 40
     on = {"POOL_DEVCHECK": "1", "DEVCHECK_PATHS": "src/", **CHECKLIST_ENV}
@@ -2364,9 +2405,52 @@ def test_a_product_change_does_not_close_its_issue_on_merge() -> None:
     check("with it, it may", run("gh issue close 90", role="monitor", extra_env=env)[0], "allow")
 
 
+def test_gate_4_follows_the_accept_mode() -> None:
+    """[accept] mode: "gate" (Refs, close after acceptance), "after" (Fixes, checked after
+    the close) or "off" (Fixes). With acceptance and live checks off, needs:live issues
+    still sat at stage:owner because their PRs said Refs."""
+    head = "6" * 40
+    fixes = (f"<!-- worker -->\nFixes #90\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
+             "- **Fail-before:** waived - owner ruling\n")
+    refs = fixes.replace("Fixes #90", "Refs #90")
+
+    def merge(mode, text, files, linked, live="0", labels=None):
+        env, _ = with_fake_gh(prs={"96": {"headRefOid": head, "body": text, "files": files, "headRefName": "issue-90"}},
+                              linked={"96": linked}, labels=labels or {"90": ["P1"]})
+        return run("gh pr merge 96 --squash", role="merger",
+                   extra_env={**env, "ACCEPT_PATHS": "src/", "POOL_ACCEPT_MODE": mode, "POOL_LIVE": live})
+    src = [{"path": "src/data.json", "changeType": "MODIFIED"}]
+    check("gate: a product change says Refs", merge("gate", fixes, src, ["90"])[0], "refuse")
+    check("after: a product change that closes its issue merges", merge("after", fixes, src, ["90"])[0], "allow")
+    verdict, reason = merge("after", refs, src, [])
+    check("after: a product change that does not close its issue is refused, asking for Fixes",
+          (verdict, "Fixes #90" in reason), ("refuse", True))
+    check("after: a docs change may say Refs", merge("after", refs, [{"path": "docs/a.md", "changeType": "MODIFIED"}],
+                                                     [])[0], "allow")
+    check("off: Fixes merges, and Refs is no one's business", (merge("off", fixes, src, ["90"])[0],
+                                                               merge("off", refs, src, [])[0]), ("allow", "allow"))
+    live_issue = {"90": ["P1", "needs:live"]}
+    check("gate with live checks on: a needs:live issue is not closed by the merge",
+          merge("gate", fixes, [{"path": "docs/a.md", "changeType": "MODIFIED"}], ["90"], "1", live_issue)[0], "refuse")
+    check("after with live checks on: it is (the check comes after the close)",
+          merge("after", fixes, src, ["90"], "1", live_issue)[0], "allow")
+    env, _ = with_fake_gh()
+    tree = make_clean_repo()
+    (tree / "src").mkdir()
+    (tree / "src" / "data.json").write_text("{}")
+    subprocess.check_call(["git", "-C", str(tree), "add", "-A"])
+    subprocess.check_call(["git", "-C", str(tree), "commit", "-qm", "change"], stdout=subprocess.DEVNULL)
+    after = {**env, "ACCEPT_PATHS": "src/", "POOL_ACCEPT_MODE": "after"}
+    verdict, reason = run(f"cd {tree} && gh pr create --title t --body '{refs}'", role="worker", extra_env=after)
+    check("before the PR exists too: after mode, a product change with Refs is refused",
+          (verdict, "Fixes #90" in reason), ("refuse", True))
+    verdict, _ = run(f"cd {tree} && gh pr create --title t --body '{fixes}'", role="worker", extra_env=after)
+    check("and with Fixes it opens", verdict, "allow")
+
+
 def test_only_an_acceptance_chore_adds_tests_under_tests_accept() -> None:
-    """Cohort 55: 117 of tests/accept's 138 files were workers' tests of their own issues,
-    and the guard took 14 minutes on every deploy."""
+    """When workers put tests of their own issues in tests/accept, it grew to most of the
+    suite and the guard slowed every deploy."""
     head = "4" * 40
     body = (f"<!-- worker -->\nFixes #90\n- **Sweep SHA:** {head}\n- **Sweep:** waived - owner ruling\n"
             "- **Fail-before:** waived - owner ruling\n")
@@ -2384,7 +2468,7 @@ def test_only_an_acceptance_chore_adds_tests_under_tests_accept() -> None:
           merge(added, bodies={"90": "<!-- merger -->\n<!-- accept-chore -->\nThe tester verified #5"})[0], "allow")
     check("changing an existing guard test is not adding one",
           merge([{"path": "tests/accept/fixture_5.json", "changeType": "MODIFIED"}])[0], "allow")
-    # Cohort 60: #32's server-side history changed what test_accept_38 assumed; its author replaces it.
+    # A change to server-side history changed what an older guard assumed; its author replaces it.
     replaced = body + "- **Guard change:** tests/accept/fixture_90.json: #90 keeps history across a reload (R-HIST-1)\n"
     env, _ = with_fake_gh(prs={"95": {"headRefOid": head, "body": replaced, "files": added}}, linked={"95": ["90"]})
     check("a guard file the PR body names in a `Guard change:` line may be added",

@@ -107,10 +107,10 @@ time; answer them first. A message that needs nothing from you gets one line.
 A dependency (`blocked_by`) keeps an issue out of every worker's reach until the
 other is merged (a blocker at `stage:accept` or `stage:live` counts as done: its code
 is on main; if its acceptance check fails it goes back to `stage:triage` and blocks
-again), so it is the most expensive label you set: one P1 fix waited 6.7
-hours on three of them while workers took lower-ranked issues around it, and in
-cohort 60 the monitor's 236 edges blocked up to 40 issues while 41 of 50 worker
-slots sat empty. Add one only when the issue cannot be built without the other's
+again), so it is the most expensive label you set: a P1 fix waited hours on
+three of them while workers took lower-ranked issues around it, and a
+monitor that added edges freely blocked most of the queue while most worker slots sat
+empty. Add one only when the issue cannot be built without the other's
 code (it calls or renders something that does not exist yet); not for "related",
 not for "should come first", not for "both touch the same file" (the supervisor
 serializes hot files itself), and not for a dependency of a dependency. At most one
@@ -178,8 +178,8 @@ they read it, when the supervisor names a new one:
 Screening stays on for the whole run: a reminder or remark from the owner about
 proposals is not a request to stop closing duplicates and non-defects.
 
-In one run the owner rejected 94 of 127 proposals, 59 of them as duplicates of
-open issues; each one cost the owner a read.
+The owner rejected most proposals, many of them as duplicates of open issues;
+each one cost the owner a read.
 
 Issues titled `Split <file>: ...` come from the supervisor: that file conflicted in
 several pull requests in a short time, or grew past 900 lines (at most one such

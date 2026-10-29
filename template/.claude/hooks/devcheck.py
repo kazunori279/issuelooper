@@ -141,11 +141,11 @@ def change_key(diff: str) -> str:
     """A hash of what a diff changes: each file's name, its added lines in file order,
     then its removed lines in file order. Context lines, line numbers, blob ids and hunk
     boundaries are left out, and so is how git interleaves additions with removals, so
-    the same change on a moved base keeps its key (cohort 52, PR 101: an added line shown
-    before a removed block, then after it). So are blank lines and trailing whitespace,
-    which resolving a rebase conflict adds or drops between two blocks (every Gate 7
-    hand-back in one run was a single added blank line), and lines of only brackets and
-    punctuation, which git aligns to either end of a block (PR 98: two lines of `}`).
+    the same change on a moved base keeps its key (git may show an added line before a
+    removed block, then after it). So are blank lines and trailing whitespace,
+    which resolving a rebase conflict adds or drops between two blocks (most such Gate 7
+    hand-backs were a single added blank line), and lines of only brackets and
+    punctuation, which git aligns to either end of a block (two lines of `}`, say).
     The order of the lines that remain counts: calling authorize() then transfer() is
     another change from the reverse (issue #21)."""
     files: dict[str, tuple[list[str], list[str]]] = {}

@@ -332,6 +332,10 @@ def test_ownership_lines() -> None:
                                                                           "waiting": 1}}}),
           ["Area waits: live hot 10 min, busy 0 min (1 waiting)"])
     check("all off: nothing", dm.ownership_lines({}), [])
+    check("[accept] mode after: the post-merge failure rate", dm.ownership_lines(
+        {"after": {"checked": 8, "failed": 2, "fail_rate": 0.25, "every": 4, "pending": 3, "skipped": 5}}),
+        ["Post-merge check: 2 of 8 checked failed (25%) · the rest sampled 1 in 4 · 3 waiting, "
+         "5 not sampled"])
 
 
 def test_quota_pauses_per_group() -> None:

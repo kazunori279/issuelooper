@@ -259,7 +259,7 @@ try:
           ("At head e48dd89" in p, "daily.append(daily[-1])" in p, "Name every finding in this one reply" in p,
            "<<PREVIOUS>>" in p), (True, True, True, False))
 
-    # --- a guard change is judged against the issue and the spec (cohort 60, #32) ------
+    # --- a guard change is judged against the issue and the spec -----------------------
     g = rg.guard_text(["tests/accept/test_accept_38.py"],
                       "Fixes #32\n- **Guard change:** tests/accept/test_accept_38.py: history survives a reload (R-HIST-1)")
     check("the prompt names the guard, quotes the Guard change line, and says when to reject",
@@ -267,7 +267,7 @@ try:
     check("no guard: said so", "(this diff changes no acceptance guard)" in rg.build_prompt(7, "t", [], [], [], "d", False),
           True)
 
-    # --- a test that resets server state to pass (cohort 60, #32's conftest) ------------
+    # --- a test that resets server state to pass (a conftest that wipes history) --------
     hiding = rg.split_files(diff_for([("tests/conftest.py", [
         'monkeypatch.setattr(page, "goto", _goto)',
         'req = urllib.request.Request(f"{url}/api/history", method="DELETE")'])]))
@@ -346,8 +346,8 @@ try:
     check("record issue from body", r["issue"], 101)
     check("skipped: judge not asked", PROMPTS, [])
 
-    # Cohort 55: six tests that count a source file's lines merged in test-only PRs (acceptance
-    # chores), which the review skipped. A static check rejects them without the model.
+    # Tests that count a source file's lines merged in test-only PRs (acceptance chores),
+    # which the review skipped. A static check rejects them without the model.
     count = [("tests/accept/test_accept_265.py", [
         "def test_split():", "    src_dir = REPO / 'src' / 'concierge' / 'static' / 'js'",
         "    lines = len((src_dir / 'app.js').read_text(encoding='utf-8').splitlines())", "    assert lines < 400"])]

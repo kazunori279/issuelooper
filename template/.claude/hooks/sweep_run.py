@@ -326,9 +326,9 @@ def select_tests(changed: list[str], tracked: list[str], read=None, mapping: str
                  full_globs: tuple[str, ...] = DEFAULT_FULL, exclude: tuple[str, ...] = DEFAULT_EXCLUDE,
                  browser_cap: int = 10) -> tuple[list[str], str]:
     """The test files a change touches (see the module docstring), and why the whole suite
-    must run instead ('' when the selection stands). In cohort 55 a JS file's name pulled
-    about 13 browser tests under tests/accept into every affected sweep (110 s median,
-    against 48 s for the full sweep then); in run 10b an e2e test that drove the changed
+    must run instead ('' when the selection stands). A JS file's name once pulled about 13
+    browser tests under tests/accept into every affected sweep, which then took longer than
+    the full sweep; in run 10b an e2e test that drove the changed
     code by data-testid only, not naming its file, was left out (#104)."""
     import fnmatch
     read = read or (lambda p: (ROOT / p).read_text(errors="replace"))

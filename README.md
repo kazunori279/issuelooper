@@ -61,9 +61,9 @@ checks the last two at push time too). A pull request merges only when:
 | 1 | Every changed `.py` file parses and has no conflict markers. |
 | 2 | The PR names the head it swept, and a green sweep record exists for it. |
 | 3 | A test that failed before the fix passes after it (`Fail-before: <file> N -> M`), or a stated waiver. |
-| 4 | An issue whose acceptance needs the live environment is not closed by the merge. |
+| 4 | The PR's closing keyword follows `[accept] mode`: in `"gate"` a product change, or a `needs:live` issue with live checks on, says `Refs #N` and is not closed by the merge; in `"after"` a product change says `Fixes #N`. |
 | 5 | The reviewer passed this head, or the owner let this head through (`review-override: <sha> <why>` in a comment of theirs on the PR). A review that keeps failing (`REVIEW_MAX_ERRORS`, 3), or a PR rejected again after `[review] max_rejects` hand-backs, waits for the owner at `stage:owner`; neither merges. |
-| 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty). |
+| 6 | Nothing under the owner's protected paths changes (`[guard] protected_paths`, such as `["spec/"]`; off when empty), and no baseline test function disappears (the test files at the commit that installed issuelooper, or `[guard] baseline_tests`; a test moved to another file keeps its name; an `owner-request` issue may change them). |
 | 7 | With `[devcheck]` on, a change a user can see was used in the real environment before its PR: a passing `devcheck.py` record for its change, or a stated waiver. |
 
 The sweep runs the test suite, usually against test doubles (a scripted model, a
@@ -98,7 +98,7 @@ and the merge gates waits in a queue. The supervisor merges up to `[pool] train_
 once (`[pool] train_wait_s`, off by default, has it wait that long after the first PR is queued
 for more to join, unless the queue is full or holds a P0 PR). Green: they merge in that order, each checked to leave `main` with the tree the
 train ran, and that run is `main`'s check. Red: the failing tests run again on the
-same tree (a pass makes them flaky), then on `main` alone (the same tests running and
+same tree (two passes in up to three runs make them flaky), then on `main` alone (the same tests running and
 failing there make `main` red and blame no PR; a test `main` does not have, "not found"
 or a collection error, is the PR's), then on the trees in between, halving, to find the first
 PR that fails them. That PR is handed back with the failing tests, the PRs before it
@@ -121,8 +121,10 @@ at a time, for `POOL_MAIN_CHECK_S` (1200) at most. A check that fails
 on the machine (no space left on the device, say) counts as not run, and a PR whose check
 fails that way is held, not handed back; the monitor hears when the scratch file system
 is nearly full. A failure only in tests that have an open `Flaky test:`
-issue counts as green (the issue gets a comment), and any other failure runs the suite
-once more: a pass then counts as green and the tests are filed as flaky. A red `main`
+issue counts as green (the issue gets a comment) once those tests pass two of three reruns
+(with `[sweep] rerun`), and any other failure runs again up to three times: two passes
+then count as green and the tests are filed as flaky. One pass is not enough: a test that
+passed one rerun and kept failing afterwards let merges through. A red `main`
 tells the monitor and files an issue titled `main is red: <failing tests>` (P0) with
 the failing tests, the commits since
 the last green `main` and the end of the output; the next green `main` closes it.
@@ -136,14 +138,34 @@ rebased by the supervisor instead of handed back. The merged-tree check and
 re-sweeps run once more before acting on a failure (only the failing tests, with
 `[sweep] rerun = "<command with {tests}>"`) (a PR that fails twice the same
 way is handed back with the failing tests; twice differently, it is held as flaky),
-and a test that fails and then passes at the same commit (main, a PR's head or a
-merged tree) is flaky: the supervisor files a `Flaky test:` issue for it (or comments
+and a test that fails and then passes two of three reruns at the same commit (main, a
+PR's head or a merged tree) is flaky: the supervisor files a `Flaky test:` issue for it (or comments
 on the open one). A later green commit proves nothing: that rule once labeled a main
 break as flaky. A flaky test still flaky after `POOL_FLAKY_MERGES` (10) merges gets one
 comment on its issue asking to fix or delete it, and the issue goes to P1. `[sweep] main_check = false`
 turns it off.
 
-With `[accept] paths` set (the product code, such as `src/`), every issue whose pull
+`[accept] mode` picks how merged work is accepted:
+
+- `"gate"` (the default): the issue stays open after the merge until a tester accepts it,
+  as described next.
+- `"after"`: the merge closes the issue (`Fixes #N`), and an independent check follows
+  without holding the close or the issues that depend on it. The supervisor tracks issues
+  closed by a merged PR (once each close, kept across restarts) and, once the deployed
+  build has the merge, tester units check every issue with an `[accept] sample_labels`
+  label (owner requests, P0, needs:live, seeds, features) or P1, and 1 in `[accept]
+  sample` of the rest, with the same checklist and evidence rules. A pass labels it
+  `accept:verified`. A failure is checked once more by a fresh session, then reopens the
+  issue at `stage:triage` (raised to P1, `accept:failed`, the report attached), and its
+  author's conversation is resumed for the fix when it can be; a second counted failure
+  after a refix goes to the owner. When checks fail over `[accept] escalate_at` of the last
+  `[accept] window`, the rest are sampled more often. `state.json` (`accept.after`) and the
+  dashboard show the failure rate, an estimate of the defects that got past the merge. No
+  author acceptance runs: checks by the author of a change caught few of the defects an
+  independent tester caught, and closing at the merge keeps the loop fast and cheaper.
+- `"off"`: the merge closes the issue and nothing checks it afterwards.
+
+With `[accept] paths` set (the product code, such as `src/`) and mode `"gate"`, every issue whose pull
 request changes it gets an acceptance check after the merge, and the post-merge live
 check becomes part of it. Such a PR says `Refs #N`, not `Fixes`; the merge gate (and
 `gh pr create`) refuse one that would close its issue. The merge moves the issue to
@@ -168,23 +190,23 @@ The acceptance checklist (`[accept]` viewports, languages, always and live rows,
 tester. Both see it in their prompts. A worker's live-check script declares the rows
 it covers (`# accept-rows: viewport:320x640 lang:ja`) or skips one that cannot apply,
 with a reason (`# accept-skip: <id> <why>`). devcheck.py records them, and gate 7
-refuses a record that misses a row the PR's paths trigger. In cohort 52, most QA
-reopens were in these rows: 320 px, Escape, the second language, voice barge-in, live
-versus scripted.
+refuses a record that misses a row the PR's paths trigger. Most reopened issues were
+partial implementations in these rows: 320 px, Escape, the second language, voice
+barge-in, live versus scripted.
 
 With `[accept] guard` set (such as `uv run pytest -q tests/accept`), the scripts of
 the issues a tester verified become one chore issue. A worker turns them into
 `tests/accept/test_accept_<N>.py` through the usual gates. On each new build, the
 supervisor runs that command in the main lane, with no model. A failing test runs once
-more alone (a pass makes it flaky), then files `Regression of #N: <test>` (P1), once
+more alone, up to three times (two passes make it flaky), then files `Regression of #N: <test>` (P1), once
 while that issue is open. With the merge train, its full check runs the guard too,
 after the sweep and on the same merged tree, and a guard failure is bisected and
 handed back like a sweep failure. The sweep keeps `POOL_MAIN_CHECK_S` and the guard
 gets `[accept] guard_timeout_s` (1200). A deploy of a main the train checked this way
 is not guarded again. Only the chore's PR may add files under `tests/accept/` (the
 guard checks its issue for the chore's marker); workers keep their own tests in
-tests/e2e or tests/unit. In cohort 55, workers' own tests made 117 of its 138 files
-and the guard took 14 minutes. The chore asks for one compact test per issue: scripted
+tests/e2e or tests/unit. When workers put their own tests there, the guard grew to
+most of the suite and slowed every deploy. The chore asks for one compact test per issue: scripted
 mode, the suite's shared app server, one page, no fixed sleeps, no source-text checks.
 Split issues get no guard test.
 
@@ -197,11 +219,12 @@ the pool busy; each is off by default (the concierge sample turns them on):
   Code `--resume`) with main's new commits and the conflicting files. The guard lets it
   push only that PR's branch. A merger takes over when there is no conversation to
   resume or two author sessions did not land it.
-- `[accept] author`: once the deployed build has the merge, the author's conversation
+- `[accept] author` (mode `"gate"` only): once the deployed build has the merge, the author's conversation
   accepts its issue there, with the tester's verdict lines and, for each row, a screenshot
   and the text it asserted (a verified without them goes to a tester). A tester checks
   every issue with a label in `[accept] sample_labels` (owner requests, P0, needs:live,
-  `seed`, features) and 1 in `[accept] sample` (4) of the rest, the QA way: the cited spec
+  `seed`, features) and 1 in `[accept] sample` (4) of the rest, the way an independent
+  tester would: the cited spec
   requirements, every viewport and language, a dropped server, polish. When more than
   `[accept] escalate_at` (0.05) of the last `[accept] window` (20) samples fail what the
   author verified (after `[accept] min_samples`, 3), the sample doubles and the monitor
@@ -216,14 +239,21 @@ the pool busy; each is off by default (the concierge sample turns them on):
 - `[areas.<name>]` (path globs, hot files, title `words`, requirement-id `ids`): an issue
   goes to its area's conversation by an `area:<name>` label, else by the area that leads
   on title words, ids, its last branch's files and the files its names occur in
-  (`[areas] shared` files, which name everything, do not count). The conversation is
+  (`[areas] shared` files, which name everything, do not count). For the hot-file lock an
+  issue holds only the files its text names by path and those its last branch changed, and a
+  test-only chore (acceptance tests, consolidation, a flaky test) holds none. The conversation is
   resumed issue after issue; conversation k opens while k times `[areas] second_at` wait
   (at most `[areas] conversations`, 3), more than `[areas] lend_at` waiting go to
   ordinary workers, and a fresh conversation with the old one's notes starts after
   `[areas] refresh_after` (6) issues. Only a hot file makes an issue wait for another
   session, from that session's start until its PR is open and for `[areas] hot_hold_max_s`
   at most; with pool slots free, an issue waiting for a busy conversation goes to an
-  ordinary worker. A file that conflicts in `[areas] auto_hot_at` (4) PRs becomes hot.
+  ordinary worker. A file that conflicts in `[areas] auto_hot_at` (4) PRs becomes hot, and
+  so do new source files a merge moves code into out of a hot file; that hot file stops
+  being hot when the move shrank it to 60 % or less (its later conflicts make it hot again).
+  A file the run made hot stops being hot after `[areas] auto_hot_expire` (30) merges with
+  no conflict on it. Issues waiting for a hot file do not count as work that holds back
+  explorers.
   Waits are logged and totalled in `state.json` (`area_waits`).
 - `[pool] author_guard`: when the train's acceptance guards fail only because of a PR,
   its author is resumed to fix the code or update a guard its issue changes (a
@@ -235,8 +265,10 @@ After a bisect, the PRs ahead of the one handed back merge only once the full ch
 on their own tree, and guards that fail together but pass one at a time count as test
 isolation, not the PR's. The monitor is pointed to dependencies on unbuilt blockers while
 `[pool] edge_flag_at` (8) issues are blocked, and to blocked issues of every priority. UX
-and explorer reports carry `Findings: B blockers, M majors`, and the logged score is at
-most 85 - 8B - 5M.
+and explorer reports carry `Findings: B blockers, M majors`, counting defects in what
+exists (a feature whose issue is still open is missing scope, not a major). The logged
+score is at most 85 - 8B - 2M for a whole-app UX run (60 with a blocker, 75 with a major;
+fitted to independent audits) and 85 - 8B - 5M for an explorer.
 
 An issue `[pool] hub_at` (3) open issues depend on is a hub: it takes the highest priority
 among them and one level more, `[pool] hub_timeout` (1.5) times the worker timeout and
@@ -246,7 +278,8 @@ The supervisor also handles what goes wrong in long unattended runs: workers tha
 run long get a wrap-up turn, timed-out work is saved to a branch for the next
 worker, model quota errors are waited out with backoff, silent sessions are
 resumed (sooner for models that step quickly; a reply that stops mid-stream counts
-too, and so does an agy session whose turn ended while it waits on a background task;
+too, and so does an agy session whose turn ended while it waits on a background task, once that task
+(a sweep, a live check) has stopped working;
 an agy session whose stream stopped behind a step while its conversation went on and
 finished is ended `POOL_UNSEEN_IDLE_S` after the last step, once nothing it started
 in its scratch paths is still working), and a session's clocks stand still while the agent CLI retries a failed model
@@ -306,7 +339,7 @@ your own, with issuelooper installed and a seed backlog filed:
 - [`hello-world`](examples/hello-world/): a small Python CLI and six issues; see the
   loop work in 15-30 minutes.
 - [`live-ai-concierge`](examples/live-ai-concierge/): the voice and text concierge
-  the framework was developed and benchmarked on, from a first slice to the full spec
+  the framework was developed on, from a first slice to the full spec
   in about six hours, with UX checks for the testers.
 
 ```bash

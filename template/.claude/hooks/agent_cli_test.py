@@ -449,7 +449,7 @@ def test_ccrole_launch() -> None:
 
 
 def test_ccrole_sessions_never_wait_for_a_terminal() -> None:
-    """An editor or a credential prompt in a session never returns (19 of 60 mergers)."""
+    """An editor or a credential prompt in a session never returns (many mergers timed out on one)."""
     def env_seen(extra):
         _, out = run_ccrole(extra)
         return next(ln for ln in out if ln.startswith("GIT_EDITOR="))
@@ -513,7 +513,7 @@ def agy_conversation(root: pathlib.Path, conv: str, steps: list[tuple[int, int, 
 
 
 def test_agy_finished_unseen() -> None:
-    # Nine mergers in one run: agy's stream stopped at a command it lost track of
+    # Nine mergers in a test run of the sample: agy's stream stopped at a command it lost track of
     # (still ACTIVE), the agent went on and finished, and the process never exited.
     agy, claude = agent_cli.get("agy"), agent_cli.get("claude")
     root = pathlib.Path(tempfile.mkdtemp(prefix="agy-conv-"))

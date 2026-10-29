@@ -112,10 +112,10 @@ supervisor's, through these checks, so write the PR to pass them the first time.
 | 1 | Every changed `.py` file parses and has no conflict markers. |
 | 2 | The PR body's `- **Sweep SHA:** <sha>` equals the PR head, and a green sweep record exists for it. |
 | 3 | `- **Fail-before:** tests/<suite>/test_<name>.py <N> -> <M>` with M > N, and the named file gains a `def test_`, or one waiver: `waived - needs: tester repro`, `waived - loop/process`, `waived - docs only`, `waived - owner ruling`. |
-| 4 | A PR does not auto-close a `needs:live` issue: it says `Refs #N`, not `Fixes #N`. |
+| 4 | With `[accept] mode = "gate"` and live checks on, a PR does not auto-close a `needs:live` issue: it says `Refs #N`, not `Fixes #N`. With `"after"` or `"off"` it says `Fixes #N`. |
 | 5 | The review gate passed this head (or the owner let this head through with `review-override: <sha>`; a review that fails, or a PR rejected again after its hand-backs, waits for the owner). A second model reads the diff for data that is made up and shown to the user as if real (when a source fails, finds nothing or leaves a field out), code that exists to pass tests or evaluators (special-casing sample or fixture inputs, test-mode branches, hidden duplicates for checks), and the project's own rules (`.issuelooper/review_rules.md`). Show an honest empty state or error instead of invented data. |
 | 6 | Nothing the project lists as the owner's (`guard.protected_paths`, such as the spec) changes. A test that needs other data brings its own copy under the tests; an owner's file that looks wrong is a comment on the issue. |
-| 4 | With `[accept] paths` set, a PR that changes them says `Refs #N`, not `Fixes`: the issue closes after the tester's acceptance check, not on the merge. |
+| 4 | With `[accept] paths` set: in mode `"gate"` a PR that changes them says `Refs #N`, not `Fixes` (the issue closes after the tester's acceptance check, not on the merge); in mode `"after"` it says `Fixes #N` (the merge closes it, and a tester may check it afterwards). |
 | 7 | With `[devcheck]` on, a PR for an issue labelled as `devcheck.labels` lists, or one that changes `devcheck.paths`, says `- **Live check:** <sha> pass`, and a passing record of that check exists for the same change (the head, or an earlier head the branch only moved from). A change no user can see may waive it (`waived - no visible change`, `docs only`, `loop/process`, `owner ruling`); a labelled issue only by `owner ruling`. The record covers every acceptance checklist row the PR's paths trigger (`[accept]`): its scripts declare `# accept-rows: <ids>`, or `# accept-skip: <id> <why>` for a row that cannot apply. |
 
 ## Labels
@@ -130,6 +130,7 @@ One label per axis. Two `stage:` labels on one issue is a bug.
 | `stage:accept` | merged; the acceptance check is owed (a product change, or `needs:live`) | supervisor, merger, monitor | supervisor, monitor |
 | `stage:live` | merged; the live check is owed (with the acceptance check on: the same as `stage:accept`) | supervisor, merger, monitor | supervisor, monitor |
 | `stage:owner` | waits for the owner's decision; only the owner answers it | anyone | anyone, once the owner answered |
+| `accept:verified`, `accept:failed` | (`[accept] mode = "after"`) a closed issue's check after the merge passed, or failed twice and reopened it | supervisor | monitor |
 | `needs:live` | acceptance needs the live environment | monitor, worker, tester, aide | monitor before the merge; at `stage:live` or `stage:owner` only the owner |
 | `P0`, `P1`, `P2` | priority (P2 is the default; P0 is broken now) | monitor; tester and aide when filing | monitor |
 | `hold:monitor` | the monitor stopped this change from landing | monitor | monitor |

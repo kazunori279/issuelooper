@@ -1,6 +1,6 @@
 # issuelooper settings for the Live AI Concierge sample: FastAPI and plain JS, with a
 # live voice/text mode on the Gemini Live API and a scripted mode that needs no
-# credentials. These are the settings of the 12-hour benchmark runs, on Gemini 4 Argon.
+# credentials, with every role on one model.
 #
 # Each key sets the environment variable named beside it, unless that variable is
 # already exported (the environment wins). `python3 .claude/hooks/config.py check`
@@ -51,7 +51,8 @@ command = "bash .issuelooper/deploy.sh"   # POOL_DEPLOY_CMD: run from the shared
                              # deploy.sh serves main on :8000 (scripted) and :8001 (live, with .env) for you to try
 
 [live]
-enabled = true               # POOL_LIVE: needs:live issues get a tester's live check after their merge
+enabled = true               # POOL_LIVE: the post-merge check of a needs:live issue (or a change to the live paths)
+                             # runs in live mode
 
 [devcheck]
 enabled = true               # POOL_DEVCHECK: before the PR, a worker runs the app from its branch in live mode and
@@ -70,25 +71,25 @@ paths = ["src/"]             # DEVCHECK_PATHS
 labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS
 
 [accept]
-paths = ["src/"]             # ACCEPT_PATHS: a PR that changes these says `Refs #N`; a tester accepts its issue on
-                             # the deployed build (a batch of up to [accept] batch, 6, per unit) before it closes
-units = 3                    # POOL_ACCEPT_UNITS: acceptance units side by side, of 16 sessions (c55: one unit fell
-                             # behind 10-15 merges an hour and stage:accept reached 62); with author on, they run the
-                             # independent sample and the issues whose author cannot be resumed
-author = true                # POOL_AUTHOR_ACCEPT: the author's conversation accepts its own issue on the deployed build
-sample = 4                   # POOL_ACCEPT_SAMPLE: a tester also checks 1 in 4 bugs and chores (sample_labels: always)
-escalate_at = 0.05           # POOL_ACCEPT_ESCALATE_AT: over 5 % of the last 20 samples failing what the author verified
-window = 20                  # POOL_ACCEPT_WINDOW: doubles the sample rate for bugs and chores (c60: 2 of 34 disagreed
-min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES: while QA failed a quarter); features and seeds are always sampled
-neighbourhood_min = 10       # POOL_ACCEPT_NEIGHBOURHOOD_MIN: the author's look around its change after verifying it
-chore_priority = "P2"        # POOL_ACCEPT_CHORE_PRIORITY: c60 filed 97 P1 chores, 95 of its 211 merges
+mode = "after"               # POOL_ACCEPT_MODE: the merge closes the issue (`Fixes #N`); once it is deployed, a tester who
+                             # did not write it checks seeds, owner requests, P0/P1, needs:live and features, and 1 in 4
+                             # of the rest, and a failure (checked twice) reopens it. Checks by the author of a change
+                             # caught few of the defects an independent tester caught
+paths = ["src/"]             # ACCEPT_PATHS: the product code whose closed issues get that check (docs and tests do not)
+units = 3                    # POOL_ACCEPT_UNITS: acceptance units side by side, of 16 sessions (a batch of up to
+                             # [accept] batch, 6, per unit)
+sample = 4                   # POOL_ACCEPT_SAMPLE: 1 in 4 of the bugs and chores (sample_labels and P1: always)
+escalate_at = 0.2            # POOL_ACCEPT_ESCALATE_AT: over 20 % of the last 20 checks failing doubles the sample of
+window = 20                  # POOL_ACCEPT_WINDOW: the rest
+min_samples = 3              # POOL_ACCEPT_MIN_SAMPLES
+chore_priority = "P2"        # POOL_ACCEPT_CHORE_PRIORITY: P1 chores crowded out product work
 chore_batch = 5              # POOL_ACCEPT_CHORE_BATCH: one chore per 5 verified scripts (or per hour)
 guard = "uv run pytest -q -p no:cacheprovider tests/accept"   # ACCEPT_GUARD: the accepted issues' Playwright
                              # scripts, run on each deploy with no model; a failure files `Regression of #N`
 # The acceptance checklist (ids: viewport:<size>, lang:<code>, always:/live:<first three
 # words>). Live-check scripts declare `# accept-rows: <ids>`, or `# accept-skip: <id> <why>`;
-# gate 7 refuses a record that misses a row the PR's paths trigger. Most of cohort 52's QA
-# reopens were in these rows: 320 px, Escape, half-translated Japanese, voice barge-in,
+# gate 7 refuses a record that misses a row the PR's paths trigger. Most reopened issues
+# were partial in these rows: 320 px, Escape, half-translated Japanese, voice barge-in,
 # scripted but not live.
 viewports = ["1280x800", "390x844", "320x640"]
 languages = ["en", "ja"]
@@ -134,7 +135,7 @@ focuses = [                  # POOL_EXPLORE_FOCUSES: taken in turn
 ]
 max = 3                      # POOL_EXPLORE_MAX: explorers at once, of 16 sessions
 per_hour = 4                 # POOL_EXPLORE_PER_HOUR: the model quota is shared with every other session
-issues = 1                   # POOL_EXPLORE_ISSUES: c60's explorers filed 111 issues, 17 % merged, 37 % duplicates
+issues = 1                   # POOL_EXPLORE_ISSUES: with more, explorers filed many duplicates and little that merged
 open_max = 12                # POOL_EXPLORE_OPEN_MAX: no explorers while 12 of their filings are open
 
 # Areas of the app (src/concierge): each issue goes to its area's conversation. main.py holds the
@@ -155,13 +156,13 @@ shared = ["src/concierge/static/js/i18n.js", "src/concierge/static/js/feed.js", 
 [areas.live]
 paths = ["src/concierge/main.py", "src/concierge/live*.py", "src/concierge/sessions.py", "src/concierge/memory.py",
          "src/concierge/static/js/audio.js", "src/concierge/static/js/*live*"]
-hot = ["src/concierge/main.py", "src/concierge/live.py"]   # c60 conflicts: live.py 15, main.py 10
+hot = ["src/concierge/main.py", "src/concierge/live.py"]   # where parallel live work conflicts most
 words = ["live mode", "live session", "voice", "microphone", "mic", "barge-in", "interrupt", "speaking"]
 ids = ["R-RUN", "R-CONV", "R-NF"]
 [areas.settings]
 paths = ["src/concierge/static/js/settings*.js", "src/concierge/static/js/i18n.js", "src/concierge/static/js/volume.js",
          "src/concierge/static/css/settings*"]
-hot = ["src/concierge/static/js/settings.js"]   # c60: 25 conflicts, the most of any file
+hot = ["src/concierge/static/js/settings.js"]   # every settings change touches it
 words = ["setting", "settings", "language", "japanese", "profile", "profiles", "memory", "remember", "location"]
 ids = ["R-SET", "R-LANG", "R-PROF", "R-MEM"]
 [areas.cards]
@@ -172,7 +173,7 @@ ids = ["R-WEB", "R-MAP", "R-WX", "R-ROUTE", "R-PLACE", "R-IMG", "R-YT"]
 paths = ["src/concierge/static/index.html", "src/concierge/static/style.css", "src/concierge/static/js/app.js",
          "src/concierge/static/js/feed.js", "src/concierge/static/js/composer.js"]
 hot = ["src/concierge/static/js/app.js", "src/concierge/static/index.html", "src/concierge/static/style.css"]
-                             # c60 conflicts: app.js 17; feed.js (4) is in `shared`
+                             # app.js conflicts often; feed.js is in `shared`
 words = ["layout", "top bar", "feed", "scroll", "history", "starter", "narrow", "two-column"]
 ids = ["R-LAYOUT", "R-HIST"]
 [areas.tools]
@@ -191,8 +192,8 @@ worker_timeout = "60m"       # POOL_TIMEOUT_WORKER: 60 with the live check on
 merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
 author_resolve = true        # POOL_AUTHOR_RESOLVE: the author's conversation resolves its PR's conflicts; a merger only
-                             # when it cannot (c58: 32 merger sessions, a median 14.5 min, in 4 h)
-author_guard = true          # POOL_AUTHOR_GUARD: c60's hub #32 was handed back twice for guards its own change made stale
+                             # when it cannot (a merger re-reads the issue, the PR and main from scratch)
+author_guard = true          # POOL_AUTHOR_GUARD: a change that makes an older guard stale is fixed by its author, not handed back
 starve_hold_s = 1800         # POOL_STARVE_HOLD_S: run 11's starving PRs on main.py held 9 PRs 179 times in 34 min
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports

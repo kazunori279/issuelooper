@@ -18,8 +18,8 @@ backlog as issues with their priorities and dependencies.
 | [`live-ai-concierge`](live-ai-concierge/) | A voice and text concierge on Google ADK and the Gemini Live API, from a first slice to the full spec: 54 issues, plus what the testers' UX runs and spec checks find | about 6 hours | also a Google Cloud project with Vertex AI |
 
 Start with `hello-world` to see the loop work: the workers, the reviewer, the merges
-and the monitor. `live-ai-concierge` is the app issuelooper was developed and
-benchmarked on; it shows what the loop does unattended over hours, with the testers
+and the monitor. `live-ai-concierge` is the app issuelooper was developed on; it
+shows what the loop does unattended over hours, with the testers
 making the next work.
 
 Other files here:

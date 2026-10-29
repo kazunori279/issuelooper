@@ -211,6 +211,38 @@ try:
           (config.link_shared_files(tree), config.link_shared_files(shared)), ([], []))
     os.environ["SWEEP_LINK_FILES"] = ""
     check("off by default", config.link_shared_files(pathlib.Path(tempfile.mkdtemp())), [])
+    # [accept] mode.
+    for env_mode, enabled, want in (("", "", "gate"), ("after", "", "after"), ("off", "", "off"), ("AFTER", "", "after"),
+                                    ("bogus", "", "gate"), ("after", "0", "off")):
+        os.environ["POOL_ACCEPT_MODE"], os.environ["POOL_ACCEPT"] = env_mode, enabled or "1"
+        check(f"accept mode {env_mode!r} (enabled {enabled or 'default'})", config.accept_mode(), want)
+    os.environ.pop("POOL_ACCEPT_MODE")
+    os.environ.pop("POOL_ACCEPT")
+    # Baseline tests: a consolidation chore once deleted some of the owner's tests.
+    repo = pathlib.Path(tempfile.mkdtemp())
+    def g(*a):
+        subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    g("init", "-q")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "t")
+    (repo / "tests" / "e2e").mkdir(parents=True)
+    (repo / "tests" / "e2e" / "test_page.py").write_text("x")
+    (repo / "tests" / "e2e" / "helpers.py").write_text("x")
+    g("add", "-A")
+    g("commit", "-qm", "the owner's app")
+    (repo / ".claude" / "hooks").mkdir(parents=True)
+    (repo / ".claude" / "hooks" / "ccpool.py").write_text("x")
+    g("add", "-A")
+    g("commit", "-qm", "Install issuelooper")
+    (repo / "tests" / "e2e" / "test_issue_5.py").write_text("x")
+    g("add", "-A")
+    g("commit", "-qm", "a worker's test")
+    os.environ.pop("GUARD_BASELINE_TESTS", None)
+    check("baseline tests: the test files at the install commit", config.baseline_tests(repo), ["tests/e2e/test_page.py"])
+    os.environ["GUARD_BASELINE_TESTS"] = "tests/e2e/test_page.py, tests/unit/*"
+    check("or the configured paths and globs", config.baseline_tests(repo), ["tests/e2e/test_page.py", "tests/unit/*"])
+    os.environ["GUARD_BASELINE_TESTS"] = "off"
+    check("or none", config.baseline_tests(repo), [])
 finally:
     os.environ.clear()
     os.environ.update(saved)

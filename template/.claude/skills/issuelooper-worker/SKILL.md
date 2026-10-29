@@ -29,14 +29,17 @@ prompt says older comments were left out and you need them, or to see a comment
 written after the claim. An `owner-request` issue says what the owner wants as a
 user: build that, not a control or a label that only suits a test.
 
-If live checks are on and any acceptance criterion can only be observed in the
-live environment (`.issuelooper/project.md`, *Live mode*), add `needs:live`
-(`gh issue edit $N --add-label needs:live`) and write `Refs #N` instead of
-`Fixes #N` in the PR. The merge gate refuses a PR that would close a
-`needs:live` issue. With `[accept] paths` set (your prompt names them), every PR that
-changes them writes `Refs #N` too: the issue waits at `stage:accept` after the merge
-until a tester who did not write it checks it on the deployed build, through the same
-checklist as your live check.
+If any acceptance criterion can only be observed in the live environment
+(`.issuelooper/project.md`, *Live mode*), add `needs:live`
+(`gh issue edit $N --add-label needs:live`). Whether the PR says `Fixes #N` or
+`Refs #N` follows `[accept] mode`, and your prompt says which:
+- `"gate"`: a PR for a `needs:live` issue (with live checks on), or one that changes
+  `[accept] paths`, writes `Refs #N`; the issue waits at `stage:accept` (or
+  `stage:live`) after the merge until a tester who did not write it checks it.
+- `"after"`: always `Fixes #N`. The merge closes the issue; a tester may check it on the
+  deployed build later and reopens it if it fails.
+- `"off"`: always `Fixes #N`; the merge closes it.
+When your prompt says nothing about it, write `Fixes #N`.
 
 **Check a `needs:live` change in the live environment yourself, before the PR.**
 The tester's live check after the merge is the gate, but a change it sends back
@@ -221,7 +224,7 @@ The PR body:
 
 ```
 <!-- worker -->
-Fixes #N                         <- Refs #N if the issue carries needs:live, or the PR changes [accept] paths
+Fixes #N                         <- Refs #N only when your prompt says so ([accept] mode "gate")
 
 **Cause:** <file:line and one or two sentences>
 **Change:** <what you changed and why>

@@ -223,7 +223,7 @@ class InstallTest(unittest.TestCase):
 
     def test_pre_push_refuses_an_empty_issue_branch(self):
         # A rebase stopped on a conflict leaves HEAD at origin/main; pushed to the issue
-        # branch, GitHub closed its pull request for good (#100 and #120 in one run).
+        # branch, GitHub closed its pull request for good (twice in a test run of the sample).
         repo = self.repo()
         main = git(repo, "rev-parse", "HEAD").strip()
         git(repo, "update-ref", "refs/remotes/origin/main", main)

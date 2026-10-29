@@ -76,15 +76,15 @@ SETTLE_S = float(os.environ.get("CLAIM_SETTLE_S", "2"))
 READ_RETRIES = int(os.environ.get("CLAIM_READ_RETRIES", "3"))  # re-reads while the claim's own comment is missing
 JITTER_S = float(os.environ.get("CLAIM_JITTER_S", "3"))
 # GitHub's secondary rate limit blocks content creation for a minute or more after a
-# burst of writes (bulk filing): 11 claims failed on it in one run. Waits double from
+# burst of writes (bulk filing): 11 claims failed on it in a test run of the sample. Waits double from
 # CLAIM_RATE_WAIT_S; three of them fit the supervisor's 10 minutes for a claim.
 RATE_RETRIES = int(os.environ.get("CLAIM_RATE_RETRIES", "3"))
 RATE_WAIT_S = float(os.environ.get("CLAIM_RATE_WAIT_S", "45"))
 RATE_LIMITED = re.compile(r"(?i)secondary rate limit|abuse detection|submitted too quickly")
 # The supervisor sets CLAIM_HUB=1 for an issue many open issues depend on (ccpool.py,
 # POOL_HUB_AT): its failed attempts are still recorded, but they neither refuse a claim
-# nor park it at stage:owner; the supervisor tells the monitor instead. Cohort 60's hub #32
-# (four issues waiting on it) sat at stage:triage for 3 h after its second failure.
+# nor park it at stage:owner; the supervisor tells the monitor instead. A parked hub held
+# every issue waiting on it for hours after its second failure.
 HUB = os.environ.get("CLAIM_HUB", "").strip() == "1"
 # Claims this much older than yours do not compete with it: they are left over
 # from an earlier cycle (a PR the merger later handed back). A live rival claimed

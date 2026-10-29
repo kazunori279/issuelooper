@@ -22,8 +22,8 @@ sweep_run.py's own output: the `git:` provenance line, the `green:` line, and
 
 A clean checkout whose HEAD already has a green sweep record for the same command is
 not swept again: it prints the record's `git:`, `sweep record:` and `green:` lines as
-a sweep would, and --update-pr goes on from there (SWEEP_FORCE=1 sweeps anyway). In
-cohort 52, 3.9 h went to sweeping commits that were already green. It looks again once
+a sweep would, and --update-pr goes on from there (SWEEP_FORCE=1 sweeps anyway): hours
+went to sweeping commits that were already green. It looks again once
 it has the slot, since another sweep of the same commit may have turned green while it
 waited, and then gives the slot back unused. A record counts only for the same command
 and kind (a full sweep is never satisfied by an affected record) and the same
@@ -33,7 +33,7 @@ or "after-slot" and the wait.
 With `[sweep] format` (SWEEP_FORMAT, e.g. `uv run ruff format src tests`), an agent's
 sweep of a clean checkout runs the formatter first. When it changes files, the sweep
 stops there (exit 1) and names them: commit them and sweep again. Lint-only red runs
-were 69 of 174 red sweeps in cohort 52. The supervisor's own sweeps (SWEEP_CALLER set:
+were a large share of red sweeps. The supervisor's own sweeps (SWEEP_CALLER set:
 re-sweeps, auto-rebases, the main check) never format: what they check must stay as
 committed, and a format diff there is red, as before.
 

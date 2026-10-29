@@ -318,7 +318,7 @@ CARDS_JS = (
 def reload_keeps_cards(page: Page):
     """Reload, then fail the step unless the cards and their maps come back (R-HIST-1: the
     feed shows the previous turns again). "Maps vanish after reload" was a major in every
-    late audit of one cohort, and the UX runs never caught it."""
+    late independent review, and the UX runs never caught it."""
     before = page.evaluate(CARDS_JS)
     page.reload()
     after = page.evaluate(CARDS_JS)

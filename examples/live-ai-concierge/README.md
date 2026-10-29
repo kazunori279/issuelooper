@@ -1,6 +1,6 @@
 # Sample: Live AI Concierge
 
-The app issuelooper was developed and benchmarked on, from its first slice to the
+The app issuelooper was developed on, from its first slice to the
 full spec, in about six hours. A person talks to an AI concierge by voice or by
 typing; it answers out loud, and when it uses a tool (weather, web search, places,
 routes, place details, images, videos) the result appears as a card next to the
@@ -25,10 +25,9 @@ work.
 
 ### The UX checks
 
-In the benchmark this sample comes from, a harness ran a UX tester outside the
-loop: scripted user journeys, a few actions of its own, and a harsh review of every
-screenshot, filed as proposals for a developer to accept. Here the loop's own tester
-does that job in its UX runs, with the harness's material in the app repository:
+The loop's own tester walks the app in its UX runs: scripted user journeys, a few
+actions of its own, and a harsh review of every screenshot. Its material is in the app
+repository:
 
 - `ux/journeys.py`: the journeys as a Playwright script. Eight scripted journeys (a
   first-time visitor on a desktop, a phone user, a heavy user, settings and memory,
@@ -58,9 +57,8 @@ as `UX: ...` issues; no one has to accept them first.
   `http://localhost:*/*` (any port: the testers run the app on ports of their own),
   for the maps in the places, route and place cards. Without one the cards show lists.
 - Ports 8000 and 8001 free: `deploy.sh` serves the app there for you.
-- Cost: in the benchmark, every role on Gemini 4 Argon cost about $570 of model
-  usage at Vertex list prices over 12 hours with 16 sessions, so plan on roughly
-  half that for six hours.
+- Cost: 16 agent sessions for six hours use a lot of model tokens; check your model's
+  prices and quota before a long run.
 - Model quota: 16 sessions on one model reach its tokens-per-minute quota now and
   then (52 times in our six-hour run); the supervisor waits each one out, but a
   higher quota makes the run faster.
@@ -80,7 +78,7 @@ into their trees; without it, the `needs:live` issues cannot be verified.
 
 ```bash
 cd concierge
-herdr --session concierge     # your repository's name, as create.sh's last lines say
+herdr --session concierge     # the session name create.sh printed last (your repository's name)
 ```
 
 In the herdr pane:
@@ -95,25 +93,25 @@ issues at once.
 
 ## 3. What happens
 
-In a six-hour test run of this sample with every role on `gemini-3.8-flash-high`
-(run 10b; the config above names `gemini-4-argon-high`, so expect other times and
-scores with it), and an owner who only answered questions:
+Times and scores depend on the model and on the settings. In run 14 of this sample (six
+hours, every role on `gemini-3.8-flash-high`, acceptance in `"gate"` mode with author
+acceptance, an owner who only answered questions), most seed issues closed, and closes
+trailed merges by about an hour, because each product change closed only after its
+acceptance check.
 
-- **The first hour:** 16 workers take the issues by priority, and 27 pull requests
-  merged in the first hour. Live mode is built in stages (typed text through ADK in
-  #1, then the model's voice, the microphone, voice input, and the live tools for the
-  cards), and the other live issues wait for #1. Each change to the app merges with
-  `Refs #N` and closes only after a tester who did not write it accepts it on the
-  deployed build, so closes trail merges: 10 seed issues closed in the first hour.
+This config runs `[accept] mode = "after"`: each pull request says `Fixes #N` and its merge
+closes the issue, and a tester who did not write the change then checks
+the seeds, owner requests, P0/P1, `needs:live` issues and a sample of the rest on the
+deployed build, reopening a failure. The dashboard shows that failure rate.
+
+- **The first hour:** 16 workers take the issues by priority. Live mode is built in stages
+  (typed text through ADK in #1, then the model's voice, the microphone, voice input, and
+  the live tools for the cards), and the other live issues wait for #1.
 - **UX runs from the start:** each run walks the deployed app and files at most five
-  findings. On Flash the UX tester was lenient: eight runs filed four issues and
-  scored the app 92 twice. A stronger model files more.
-- **By the end:** 52 of the 54 seed issues closed (all P0 in 3 hours 33 minutes, all
-  P1 in 3 hours 53 minutes), with 69 merges. We scored the final app 74 of 100 by
-  `ux/rubric.md`.
-- **When the workers run out of issues:** extra UX runs and spec checks, one
-  requirement at a time, make the next work. With 16 sessions that did not happen
-  within six hours.
+  findings. Features whose seed issues are still open count as missing scope, not as
+  defects, so the early scores rate what is built.
+- **When the workers run out of issues:** explorers, extra UX runs and spec checks, one
+  requirement at a time, make the next work.
 
 Every merge is deployed: <http://localhost:8000/> runs `main` in scripted mode (try
 the starter chips), and <http://localhost:8001/> in live mode when `.env` is set.
@@ -128,9 +126,8 @@ You are the owner. You do not have to watch, but the loop goes further with you:
   (or ask the aide to). Add `owner-request` to keep one at P1 or above.
 - Ask the monitor what shipped and what is stuck, and re-rank work in its pane.
 
-In the benchmark, a developer checked in every 15 minutes and filed about 50
-requests over 12 hours; every role on Gemini 4 Argon held a UX score of 80 or more
-(of 100, from a harsh audit of the deployed app) from 4 h 39 min to the end.
+The loop goes further when the owner checks in often and files what they want as
+requests.
 
 ## 5. Stop
 

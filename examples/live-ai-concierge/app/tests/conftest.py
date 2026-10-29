@@ -4,8 +4,8 @@ acceptance guards in tests/accept both see these fixtures.
 `server_url` is one app for the whole run. `fresh_server_url` is an app of the test's own
 with an empty sessions database: the per-test user state for anything that reloads, or
 relies on or changes conversations, settings or memory. Never reset shared state from a
-test (an endpoint only tests call, a patched `page.goto` or `page.reload`): cohort 60's
-guards did, and the review gate rejects it."""
+test (an endpoint only tests call, a patched `page.goto` or `page.reload`): guards that
+did hid what they checked, and the review gate rejects it."""
 
 import os
 import pathlib

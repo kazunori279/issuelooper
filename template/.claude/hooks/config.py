@@ -34,6 +34,7 @@ import os
 import pathlib
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 
@@ -107,6 +108,7 @@ KEYS = {
     ("areas", "lend_free"): "POOL_AREA_LEND_FREE",
     ("areas", "hot_hold_max_s"): "POOL_AREA_HOT_HOLD_MAX_S",
     ("areas", "auto_hot_at"): "POOL_AREA_AUTO_HOT_AT",
+    ("areas", "auto_hot_expire"): "POOL_AREA_AUTO_HOT_EXPIRE",
     ("pool", "edge_flag_at"): "POOL_EDGE_FLAG_AT",
     ("areas", "shared"): "POOL_AREA_SHARED",
     ("review", "enabled"): "REVIEW_GATE",
@@ -134,8 +136,10 @@ KEYS = {
     ("pool", "starve_hold_s"): "POOL_STARVE_HOLD_S",
     ("guard", "secret_urls"): "GUARD_SECRET_URLS",
     ("guard", "protected_paths"): "GUARD_PROTECTED_PATHS",
+    ("guard", "baseline_tests"): "GUARD_BASELINE_TESTS",
     ("guard", "background_check"): "GUARD_BACKGROUND",
     ("accept", "enabled"): "POOL_ACCEPT",
+    ("accept", "mode"): "POOL_ACCEPT_MODE",
     ("accept", "paths"): "ACCEPT_PATHS",
     ("accept", "batch"): "POOL_ACCEPT_BATCH",
     ("accept", "guard"): "ACCEPT_GUARD",
@@ -365,7 +369,47 @@ def area_of(path: str, table: list[dict] | None = None) -> str:
 
 
 def is_hot(path: str, table: list[dict] | None = None) -> bool:
-    return any(path_matches(path, g) for a in (areas() if table is None else table) for g in a["hot"])
+    """Whether a path is one of an area's hot files, and not one the supervisor cooled after
+    a split shrank it (an area's "cool" list, kept by ccpool)."""
+    return any(any(path_matches(path, g) for g in a["hot"]) and path not in (a.get("cool") or ())
+               for a in (areas() if table is None else table))
+
+
+def baseline_tests(root: str | pathlib.Path | None = None) -> list[str]:
+    """The owner's baseline tests, which no pull request deletes or folds away, as paths or
+    globs (path_matches): [guard] baseline_tests (GUARD_BASELINE_TESTS; "off" for none), else
+    the test files (tests/**/test_*.py) at the commit that installed issuelooper (the first
+    to add .claude/hooks/ccpool.py). A test consolidation chore once deleted part of the
+    owner's tests unreviewed."""
+    raw = os.environ.get("GUARD_BASELINE_TESTS")
+    where = str(root or os.environ.get("SHARED_REPO_PATH") or ".")
+
+    def git(*a: str) -> list[str]:
+        r = subprocess.run(["git", "-C", where, *a], capture_output=True, text=True, timeout=30)
+        return r.stdout.split("\n") if r.returncode == 0 else []
+    if raw is not None and raw.strip():
+        if raw.strip().lower() in ("off", "none", "0"):
+            return []
+        return [g.strip() for g in raw.split(",") if g.strip()]
+    first = [c for c in git("log", "--diff-filter=A", "--format=%H", "--", ".claude/hooks/ccpool.py") if c]
+    if not first:
+        return []
+    return sorted(f for f in git("ls-tree", "-r", "--name-only", first[-1], "--", "tests")
+                  if f.startswith("tests/") and os.path.basename(f).startswith("test_") and f.endswith(".py"))
+
+
+ACCEPT_MODES = ("gate", "after", "off")
+
+
+def accept_mode() -> str:
+    """[accept] mode (POOL_ACCEPT_MODE): "gate" (the default; a product change says `Refs #N`
+    and its issue closes after a tester's acceptance check), "after" (the merge closes it;
+    a tester checks a sample of closed issues on the deployed build and reopens a failure)
+    or "off" (the merge closes it, no check). [accept] enabled = false is "off"."""
+    if os.environ.get("POOL_ACCEPT", "1").strip().lower() in ("0", "off", "false", "no"):
+        return "off"
+    mode = os.environ.get("POOL_ACCEPT_MODE", "").strip().lower()
+    return mode if mode in ACCEPT_MODES else "gate"
 
 
 def accept_paths() -> list[str]:

@@ -11,7 +11,7 @@ Run it with a Python that has Playwright and its Chromium installed (the project
 environment when it tests with Playwright).
 
 Why: a UX run that opens every screenshot puts all of them into one conversation, and a
-tester went over the model's request size limit within 16 minutes that way. Twelve
+tester soon went over the model's request size limit that way. Twelve
 screenshots on one JPEG sheet cost about as much as one full-size screenshot.
 """
 

@@ -78,6 +78,10 @@ LABEL_RULES = {
     # merge (the PR said `Refs #N`), waiting for the tester's acceptance check. The
     # supervisor moves it on; the tester only comments.
     "stage:accept": {"add": {"merger", "monitor"}, "remove": {"monitor"}},
+    # [accept] mode "after": the supervisor's record of a post-merge check on a closed issue.
+    # No session sets them (the tester only comments); the monitor may clear a wrong one.
+    "accept:verified": {"add": set(), "remove": {"monitor"}},
+    "accept:failed": {"add": set(), "remove": {"monitor"}},
     "P0": {"add": {"monitor", "tester", "aide"}, "remove": {"monitor"}},
     "P1": {"add": {"monitor", "tester", "aide"}, "remove": {"monitor"}},
     "P2": {"add": {"monitor", "tester", "aide"}, "remove": {"monitor"}},
@@ -260,8 +264,8 @@ CLOSING_REF = re.compile(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#(\
 
 
 # Only the chore that turns tester-verified scripts into tests adds files under
-# tests/accept/; its issue carries this marker (ccpool.ACCEPT_CHORE). In cohort 55, 117 of
-# its 138 files were workers' tests of their own issues, and it took 14 minutes.
+# tests/accept/; its issue carries this marker (ccpool.ACCEPT_CHORE). When workers added
+# tests of their own issues there, it grew to most of the suite and slowed every deploy.
 ACCEPT_CHORE = "<!-- accept-chore -->"
 ACCEPT_TESTS = "tests/accept/"
 
@@ -296,9 +300,26 @@ def refuse_accept_tests(added: list[str]) -> None:
 
 
 def accept_on() -> bool:
-    """POOL_ACCEPT (on unless 0) with [accept] paths set."""
-    return os.environ.get("POOL_ACCEPT", "1").strip().lower() not in ("0", "off", "false", "no") \
-        and bool(config.accept_paths())
+    """[accept] mode "gate" (config.accept_mode) with [accept] paths set: a product change
+    says `Refs #N` and its issue waits for the tester's acceptance check."""
+    return config.accept_mode() == "gate" and bool(config.accept_paths())
+
+
+def after_product_paths(paths: list[str]) -> list[str]:
+    """With [accept] mode "after", the paths among these under [accept] paths: a PR that
+    changes them closes its issue (`Fixes #N`), and a tester may check it after the merge."""
+    if config.accept_mode() != "after":
+        return []
+    return [p for p in paths if any(config.path_matches(p, g) for g in config.accept_paths())]
+
+
+def refuse_product_change_without_close(which: str, product: list[str]) -> None:
+    block(
+        f"This pull request changes product code ({', '.join(f'`{p}`' for p in product[:3])}) and closes no "
+        f"issue.\n\nWith `[accept] mode = \"after\"` the merge closes the issue, and a tester who did not write "
+        "the change may check it on the deployed build afterwards (a failure reopens it). Write "
+        f"`Fixes {which}` instead of `Refs`, also for a `needs:live` issue."
+    )
 
 
 def product_paths(paths: list[str]) -> list[str]:
@@ -1060,7 +1081,7 @@ def command_segments(command: str) -> list[tuple[list[str], str]]:
 def shared_file_check(command: str, cwd: str | None) -> None:
     """Nothing removes, moves or overwrites a file in the shared checkout: by a path in
     it, or by a relative path in a command that runs there (agy starts each command in
-    it). The shared checkout's .env, which only the owner has, disappeared in one run and
+    it). The shared checkout's .env, which only the owner has, disappeared in a test run of the sample and
     live checks stopped for hours; workers link it into their worktrees and remove the
     link again, and a bare `rm -f .env` run there, or after a `cd` that failed, removes
     the real file."""
@@ -1191,9 +1212,9 @@ def command_dir(command: str, cwd: str | None, starts: tuple[str, ...]) -> str |
 def git_push_check(command: str, cwd: str | None) -> None:
     """No push of a head that is not the branch's work. A rebase that stops on a conflict
     leaves HEAD at origin/main; pushed, the issue branch has no commits beyond main and
-    GitHub closes its pull request (#100, #109 and #120 in one run: `git rebase
-    origin/main` and `git push --force-with-lease` on the next line of one command; #100
-    and #120 stayed closed and their issues needed new pull requests)."""
+    GitHub closes its pull request (three times in a test run of the sample: `git rebase
+    origin/main` and `git push --force-with-lease` on the next line of one command; two
+    stayed closed and their issues needed new pull requests)."""
     segments = [(w, sep) for w, sep in command_segments(command) if w]
     env: dict[str, str] = {}
     here = cwd
@@ -1218,7 +1239,7 @@ def git_push_check(command: str, cwd: str | None) -> None:
             block(
                 f"This `git push` runs after `{unchecked}` even when that stops on a conflict. A "
                 "stopped rebase leaves HEAD at origin/main, and pushing it gives the issue branch no "
-                "commits beyond main: GitHub then closes the pull request (three times in one run).\n\n"
+                "commits beyond main: GitHub then closes the pull request, and it may stay closed.\n\n"
                 f"Join them with `&&` (`{unchecked} ... && git push ...`), or push in a command of its "
                 "own after checking that the rebase finished (`git status` shows no rebase in progress)."
             )
@@ -1597,6 +1618,41 @@ def check_case_count(ref: str, path: str) -> int | None:
     return None if content is None else len(CHECK_CASE.findall(content))
 
 
+OWNER_REQUEST = "owner-request"
+TEST_NAME = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test_\w+)", re.MULTILINE)
+
+
+def baseline_tests_removed(files, base_sha: str, head_sha: str) -> list[str]:
+    """The owner's baseline test functions (config.baseline_tests) that the PR removes:
+    `path::name` for each one in a baseline file at the fork point that is no longer in
+    that file at the head nor in any test file the PR changes (a move keeps its name).
+    [] when nothing can be read (the merge gates fail closed elsewhere)."""
+    changed = [str(f.get("path") or "") for f in (files if isinstance(files, list) else []) if isinstance(f, dict)]
+    baseline = config.baseline_tests()
+    if not baseline or not head_sha:
+        return []
+    fork = merge_base(base_sha, head_sha)
+    if not fork:
+        return []
+    # The PR's baseline files, and a listed baseline file gone at the head (a rename).
+    touched = [p for p in changed if any(config.path_matches(p, g) for g in baseline)]
+    moved = any(str(f.get("changeType") or "").upper() in ("DELETED", "RENAMED")
+                for f in (files if isinstance(files, list) else []) if isinstance(f, dict))
+    touched += [b for b in baseline if moved and not any(c in b for c in "*?[") and b not in touched
+                and get_file_content_at_commit(fork, b) is not None and get_file_content_at_commit(head_sha, b) is None]
+    if not touched:
+        return []
+    kept: set[str] = set()
+    for p in set(changed) | set(touched):
+        if p.endswith(".py") and "test" in p:
+            kept.update(TEST_NAME.findall(get_file_content_at_commit(head_sha, p) or ""))
+    lost = []
+    for b in touched:
+        before = TEST_NAME.findall(get_file_content_at_commit(fork, b) or "")
+        lost += [f"{b}::{name}" for name in dict.fromkeys(before) if name not in kept]
+    return lost
+
+
 def merge_base(base: str, head: str) -> str | None:
     """Where the branch actually forked, or None if this checkout cannot say.
 
@@ -1776,7 +1832,9 @@ def check_pr_merge(command: str) -> None:
     Gate 5: a passing review record exists for the PR head ($REVIEW_DIR/<sha>.json,
     written by review_gate.py). See review_gate_check.
 
-    Gate 6: the PR changes nothing under $GUARD_PROTECTED_PATHS, the owner's files.
+    Gate 6: the PR changes nothing under $GUARD_PROTECTED_PATHS, the owner's files, and
+    removes no test function of the owner's baseline tests (config.baseline_tests) unless
+    its issue carries owner-request.
 
     Gate 7 (POOL_DEVCHECK on): a PR for an issue carrying one of $DEVCHECK_LABELS, or
     one that changes $DEVCHECK_PATHS, names a passing devcheck.py record for its
@@ -1842,9 +1900,11 @@ def check_pr_merge(command: str) -> None:
             "true",
             "yes",
         )
+        # Only with [accept] mode "gate": with "after" or "off" the merge closes the issue,
+        # and Refs there left needs:live issues waiting for the owner to close them.
         live = (
             [n for n in closing if LIVE in (issue_labels(n, repo) or set())]
-            if live_on
+            if live_on and config.accept_mode() == "gate"
             else []
         )
         if live:
@@ -1866,12 +1926,18 @@ def check_pr_merge(command: str) -> None:
                 "test — say so on the issue. The monitor clears it; a merge does not."
             )
 
-        # Gate 4 for the acceptance check: a product change does not close its issue.
+        # Gate 4 for the acceptance check: a product change does not close its issue ("gate"),
+        # or closes it ("after").
+        paths = [str(f.get("path") or "") for f in (files if isinstance(files, list) else []) if isinstance(f, dict)]
         if closing:
-            product = product_paths([str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
-                                     if isinstance(f, dict)])
+            product = product_paths(paths)
             if product:
                 refuse_closing_product_change(", ".join(f"#{n}" for n in closing), product)
+        else:
+            product = after_product_paths(paths)
+            if product:
+                refuse_product_change_without_close(
+                    ", ".join(f"#{n}" for n in pr_issues(data, body)[:1]) or "#N", product)
 
         # New files under tests/accept/ come only from an acceptance chore.
         added = [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
@@ -1899,6 +1965,20 @@ def check_pr_merge(command: str) -> None:
                 "tests. If the owner's file itself looks wrong, say so on the issue for the owner."
             )
 
+        # Gate 6 for the owner's baseline tests: none deleted or folded away.
+        lost = baseline_tests_removed(files, base_sha, head_sha)
+        if lost and not any(OWNER_REQUEST in (issue_labels(n, repo) or set()) for n in pr_issues(data, body)[:3]):
+            block(
+                f"{target} removes the owner's baseline tests: {', '.join(f'`{t}`' for t in lost[:8])}"
+                + (f" and {len(lost) - 8} more" if len(lost) > 8 else "") + ".\n\n"
+                "These tests were in the repository before the loop started (or `[guard] baseline_tests` names "
+                "them): they are the owner's definition of what must keep working, and a consolidation chore once "
+                "deleted some of them without anyone reviewing it.\n\n"
+                "Keep them as they are: add cases to them, or merge per-issue tests into them, but do not delete, "
+                "rename or fold them into other tests. A baseline test that moves to another file keeps its name "
+                "there. If the owner asked for this change, the issue carries `owner-request`."
+            )
+
         # Gate 1: Check AST parse and conflict markers on changed .py files of PR head commit
         changed_py: list[str] = []
         if isinstance(files, list):
@@ -1916,6 +1996,7 @@ def check_pr_merge(command: str) -> None:
                         "diff-tree",
                         "--no-commit-id",
                         "--name-only",
+                        "--diff-filter=d",  # a deleted file has nothing to parse
                         "-r",
                         head_sha,
                     ],
@@ -2699,6 +2780,11 @@ def check_pr_create(command: str, cwd: str | None = None) -> None:
         product = product_paths(pr_create_paths(command, cwd))
         if product:
             refuse_closing_product_change(", ".join(f"#{n}" for n in dict.fromkeys(closing_refs)), product)
+    elif not closing_refs and config.accept_mode() == "after":
+        product = after_product_paths(pr_create_paths(command, cwd))
+        if product:
+            issue = ([n for n in [claimed_issue()] if n] + ISSUE_REF.findall(body))[:1]
+            refuse_product_change_without_close(f"#{issue[0]}" if issue else "#N", product)
 
     # Gate 7, as far as it can be told before the PR exists: the issue's labels and
     # the files the branch changes. The merge gate checks the record against the head.

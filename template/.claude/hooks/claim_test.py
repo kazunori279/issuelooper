@@ -326,7 +326,7 @@ def test_claim_named_issue() -> None:
 
 
 def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
-    """Cohort 55: dependents of merged issues at stage:accept waited over an hour."""
+    """Dependents of merged issues at stage:accept waited as if their blockers were not merged."""
     def blocker(n, labels, state="open"):
         return issue(n, labels, state=state)
     repo = Repo([
@@ -552,8 +552,8 @@ def test_finish_without_pr_releases_then_parks() -> None:
 
 
 def test_a_hub_is_never_parked_by_its_failures() -> None:
-    """Cohort 60: hub #32 (four issues waiting on it) failed twice and sat at stage:triage
-    for three hours; the third failure would have parked it at stage:owner."""
+    """A hub (four issues waiting on it) failed twice and sat at stage:triage for hours;
+    the third failure would have parked it at stage:owner."""
     repo = Repo([issue(32, ["stage:triage", "P1"])])
     cf = repo.dir / "claim"
     for loop in ("1", "2", "3", "4"):
@@ -783,9 +783,8 @@ def test_sweep_update_pr_body() -> None:
 
 
 def test_a_commit_with_a_green_record_is_not_swept_again() -> None:
-    """Cohort 52: 3.9 h of sweeps went to commits that already had a green record (a
-    worker sweeping twice; the supervisor re-sweeping because the PR body's Sweep SHA
-    was stale)."""
+    """Hours of sweeps went to commits that already had a green record (a worker sweeping
+    twice; the supervisor re-sweeping because the PR body's Sweep SHA was stale)."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
     (wt / ".gitignore").write_text(".claude/\n")
@@ -881,7 +880,7 @@ def test_a_record_written_while_waiting_for_the_slot_is_reused() -> None:
 
 
 def test_an_agent_sweep_formats_first() -> None:
-    """Cohort 52: 69 of 174 red sweeps were lint-only (ruff format), each an agent turn."""
+    """Many red sweeps were lint-only (ruff format), each costing an agent turn."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
     (wt / ".gitignore").write_text(".claude/\n")
@@ -949,7 +948,7 @@ def test_ux_proposed_is_never_claimed() -> None:
 
 
 def test_secondary_rate_limit_is_waited_out() -> None:
-    # 11 claims failed in one run on GitHub's secondary rate limit after bulk filing.
+    # 11 claims failed in a test run of the sample on GitHub's secondary rate limit after bulk filing.
     with tempfile.TemporaryDirectory() as d:
         tmp = pathlib.Path(d)
         (tmp / "gh").write_text(f"""#!/usr/bin/env bash

@@ -149,14 +149,14 @@ def test_change_key_ignores_where_the_change_sits() -> None:
         False,
     )
     # A rebase that resolves two additions at one place often leaves a blank line
-    # between them, or drops one; every Gate 7 hand-back in a run was that.
+    # between them, or drops one; most such Gate 7 hand-backs were that.
     blank = a.replace("+added\n", "+added   \n+\n")
     check("an added blank line and trailing whitespace do not change the key",
           devcheck.change_key(a), devcheck.change_key(blank))
     indented = a.replace("+added", "+    added")
     check("indentation does", devcheck.change_key(a) == devcheck.change_key(indented), False)
-    # Cohort 52, PR 101: the same own lines, but once the base moved git showed an added
-    # line before a removed block in one diff and after it in the other.
+    # The same own lines, but once the base moved git showed an added line before a
+    # removed block in one diff and after it in the other.
     hdr = "diff --git a/feed.js b/feed.js\n--- a/feed.js\n+++ b/feed.js\n@@ -1,5 +1,6 @@\n"
     checked = (hdr + " const card = make();\n+if (!card) return;\n \n-if (narrow()) {\n"
                "-  place(card);\n+const turn = ensure();\n+turn.push(card);\n")

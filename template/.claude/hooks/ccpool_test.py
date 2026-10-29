@@ -77,10 +77,10 @@ def pr(n, issue, head="b" * 40, mergeable="MERGEABLE", draft=False):
     }
 
 
-def closed(n, labels=(), reason="COMPLETED", at="2026-10-09T11:00:00Z"):
+def closed(n, labels=(), reason="COMPLETED", at="2026-10-09T11:00:00Z", title=""):
     return {
         "number": n,
-        "title": f"issue {n}",
+        "title": title or f"issue {n}",
         "closed": at,
         "reason": reason,
         "labels": sorted(labels),
@@ -807,8 +807,8 @@ if sys.argv[1:3] == ["issue", "view"]:
 
 
 def test_live_checks_settle_themselves() -> None:
-    """The supervisor acts on the tester's verdict; the monitor closed 24 issues by
-    hand in one run, a turn each."""
+    """The supervisor acts on the tester's verdict; the monitor closed such issues by hand,
+    a turn each."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-live-"))
     gh = d / "gh"
     gh.write_text(FAKE_GH_ISSUE)
@@ -901,9 +901,9 @@ def with_env(env: dict):
 
 
 def test_acceptance_batches_the_merged_issues_in_the_build() -> None:
-    """Cohort 52: the harness's QA tester reopened 22 % of D's closed issues; only the 31
-    stage:live issues had a check of issuelooper's own. One tester unit per build accepts
-    the merged issues it contains."""
+    """Closed issues were often reopened by an outside check, and only the stage:live issues
+    had a check of issuelooper's own. One tester unit per build accepts the merged issues it
+    contains."""
     restore = with_env(ACCEPT_ENV)
     try:
         issues = [iss(4, ["stage:accept", "P2"], title="sheet"), iss(5, ["stage:accept", "P0"], title="ja"),
@@ -946,8 +946,8 @@ def test_acceptance_batches_the_merged_issues_in_the_build() -> None:
 
 
 def test_acceptance_units_run_side_by_side_and_never_share_an_issue() -> None:
-    """c55: one unit at a time accepted 6-8 issues an hour against 10-15 merges, and the
-    queue reached 62. Run 10b: the next unit took issues the last one was settling."""
+    """One unit at a time accepted fewer issues an hour than merged, and the queue kept
+    growing. Run 10b: the next unit took issues the last one was settling."""
     restore = with_env(ACCEPT_ENV)
     try:
         h = Rig(state([iss(n, ["stage:accept", "P1"]) for n in range(1, 10)]),
@@ -1106,6 +1106,128 @@ def test_a_product_change_waits_for_acceptance_after_its_merge() -> None:
         os.environ.pop("FAKE_GH_PR", None)
 
 
+def test_after_mode_checks_closed_issues_after_the_merge() -> None:
+    """[accept] mode "after": the merge closes the issue; a tester who did not write it checks
+    a sample on the deployed build and a counted failure reopens it. Checks by the author of
+    a change caught few of the defects an independent tester caught."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-after-"))
+    gh = d / "gh"
+    gh.write_text(ACCEPT_GH)
+    gh.chmod(0o755)
+    log = d / "gh.log"
+    restore = with_env({"FAKE_GH_LOG": str(log), "ISSUELOOPER_LOGIN": "loop-bot", "CCROLE_WORKER_CLI": "claude",
+                        **ACCEPT_ENV})
+    try:
+        st = state(closed_=[closed(10, ["seed", "P2"], at="2026-10-09T11:00:00Z"),
+                            closed(11, ["P2", "type:bug"], at="2026-10-09T11:01:00Z"),
+                            closed(12, ["P2", "type:chore"], at="2026-10-09T11:02:00Z", title="Acceptance tests for #10"),
+                            closed(13, ["P2"], reason="NOT_PLANNED", at="2026-10-09T11:03:00Z"),
+                            closed(14, ["P1"], at="2026-10-09T11:04:00Z"),
+                            closed(9, ["P1"], at="2026-10-01T00:00:00Z")])
+        h = Rig(st, gh=str(gh), accept_mode="after", accept_paths=["src/"], accept_sample=0, accept_units=2,
+                accept_batch=1)
+        b = h.pool.book
+        b.after_since = "2026-10-09T00:00:00Z"
+        for n, files in ((10, ["src/a.js"]), (11, ["src/b.js"]), (14, ["docs/x.md"])):
+            b.after_merged[n] = {"pr": 100 + n, "sha": f"{n}" * 20, "files": files, "t": h.now}
+        h.pool.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+        started = h.step()
+        check("a sampled closed issue (seed) gets a tester unit; a bug outside the sample, a test chore, a "
+              "not-planned close, an older close and a docs-only change do not",
+              ([u.info["issues"][0]["n"] for u in started if u.kind == "accept"], {n: e["state"] for n, e in b.after.items()}),
+              ([10], {10: "ready", 11: "skip", 12: "n/a", 14: "n/a"}))
+        u = next(u for u in started if u.kind == "accept")
+        prompt = ccpool.tester_prompt(u, 8021, "60m")
+        check("its prompt says the issue is closed and the supervisor acts on the verdict",
+              ("closed when their pull requests merged" in prompt, "never reopen, relabel or close" in prompt), (True, True))
+        check("and to exercise the neighbouring behavior, as the author's live check does (most defects "
+              "found after a merge sat next to a correct fix)",
+              ("neighbouring behavior on the same screen and flow" in prompt,
+               "neighbouring behavior" in ccpool.worker_prompt({"issue": 5, "token": "t", "from": "x"}, "1", "45m", "u",
+                                                               devcheck=True, checklist="rows")), (True, True))
+        check("one unit at a time per issue: no second check while it runs", [x for x in h.step() if x.kind == "accept"], [])
+        again = ccpool.Pool(h.pool.cfg, fetcher=lambda: st, spawn=False)
+        check("a restarted supervisor keeps what it tracked (no recheck of everything)",
+              ({n: e["state"] for n, e in again.book.after.items()}, again.book.after_since),
+              ({10: "ready", 11: "skip", 12: "n/a", 14: "n/a"}, "2026-10-09T00:00:00Z"))
+
+        def tester(body, at="2026-10-09T12:30:00Z"):
+            return {"author": {"login": "loop-bot"}, "body": "<!-- tester -->\n" + body, "createdAt": at, "url": "https://x/c/1"}
+
+        def settle(comments, labels=("seed", "P2"), state_="CLOSED"):
+            log.write_text("")
+            os.environ["FAKE_GH_VIEW"] = json.dumps({"state": state_, "labels": [{"name": x} for x in labels],
+                                                     "comments": comments})
+            verified = h.pool.settle_after(u, ccpool.claimlib.parse_time("2026-10-09T12:00:00Z").timestamp(), True)
+            return [x for x in log.read_text().splitlines() if not x.startswith("issue view")], verified
+        calls, verified = settle([tester("ran it with Tab, Enter, Escape\nrows: always:keyboard-tab-enter\naccept-verified: script")])
+        check("verified: labelled accept:verified, counted as a pass, handed to the acceptance chore",
+              (calls, verified, b.after[10]["state"], b.samples[-1]["agree"]),
+              (["issue edit 10 --add-label accept:verified --remove-label accept:failed"], [10], "verified", True))
+        b.after[10]["state"] = "ready"
+        calls, _ = settle([tester("the sheet does not open")])
+        check("a first failure is checked once more by a fresh session, not counted",
+              (calls[0].startswith("issue comment 10"), ccpool.ACCEPT_RETRY in calls[0], b.after[10]["state"],
+               b.accept_rounds[10]), (True, True, "ready", 1))
+        retry = {"author": {"login": "loop-bot"}, "body": f"<!-- merger -->\n{ccpool.ACCEPT_RETRY}\nagain",
+                 "createdAt": "2026-10-09T12:31:00Z"}
+        calls, _ = settle([tester("the sheet does not open"), retry, tester("still does not open", "2026-10-09T12:40:00Z")])
+        check("a second failure counts: reopened at stage:triage with the report, raised to P1, accept:failed",
+              (calls[0].startswith("issue reopen 10 --comment"), calls[1],
+               b.after[10]["state"], b.after_fails[10], b.samples[-1]["agree"]),
+              (True, "issue edit 10 --add-label stage:triage --add-label accept:failed --remove-label accept:verified "
+                     "--add-label P1 --remove-label P2", "failed", 1, False))
+        check("state.json's count of defects found after the merge", {k: h.pool.after_stats()[k] for k in ("checked", "failed", "fail_rate")},
+              {"checked": 2, "failed": 1, "fail_rate": 0.5})
+        h.finish(u.key)
+        h.pool.book.convs[10] = {"conv": "s-author", "cli": "claude", "files": ["src/a.js"]}
+        h.st = state([iss(10, ["stage:triage", "P1", "accept:failed"])], closed_=[c for c in st["closed"] if c["number"] != 10])
+        refix = [x for x in h.step() if x.number == 10]
+        check("the refix resumes the author's conversation", [(x.kind, x.info.get("resume")) for x in refix],
+              [("implement", "s-author")])
+        h.finish(refix[0].key)
+        h.st = state(closed_=[closed(10, ["seed", "P1", "accept:failed"], at="2026-10-09T14:00:00Z")])
+        b.after_merged[10] = {"pr": 120, "sha": "f" * 40, "files": ["src/a.js"], "t": h.now}
+        u2 = next(x for x in h.step() if x.kind == "accept")
+        check("its next close is checked again, as a refix", (b.after[10]["refix"], u2.info["issues"][0]["since"]),
+              (1, "2026-10-09T14:00:00Z"))
+        u = u2
+        retry2 = dict(retry, createdAt="2026-10-09T14:31:00Z")
+        calls, _ = settle([tester("broken again", "2026-10-09T14:30:00Z"), retry2,
+                           tester("still broken", "2026-10-09T14:40:00Z")], labels=("seed", "P1", "accept:failed"))
+        check("a counted failure after a refix goes to the owner", calls[1].split(" --add-label ")[1], "stage:owner")
+        b.after[10]["state"] = "ready"
+        calls, _ = settle([tester("still broken", "2026-10-09T14:40:00Z")], state_="OPEN")
+        check("somebody reopened it meanwhile: nothing done, and its next close is checked",
+              (calls, b.after[10]["state"]), ([], "gone"))
+        check("dependents are not blocked by the check: a closed issue is done",
+              ccpool.blocked(iss(20, ["stage:triage"], body="Blocked by: #10"), {20}, set()), False)
+    finally:
+        restore()
+        os.environ.pop("FAKE_GH_VIEW", None)
+
+
+def test_after_mode_samples_and_escalates() -> None:
+    """Sampling: always seed, owner-request, P0/P1 and needs:live; 1 in N for the rest, N
+    halving when post-merge checks fail over [accept] escalate_at of the window."""
+    h = Rig(state(), accept_mode="after", accept_paths=["src/"], accept_sample=2, accept_escalate_at=0.2,
+            accept_min_samples=3, accept_window=10)
+    picks = [h.pool.sample_after(set(labels)) for labels in (["P1"], ["owner-request"], ["needs:live"], ["seed"], ["P0"],
+                                                             ["P2", "type:bug"], ["P2", "type:bug"], ["P2", "type:bug"])]
+    check("always for P1, owner requests, needs:live, seeds and P0; 1 in 2 for bugs", picks,
+          [True, True, True, True, True, True, False, True])
+    for n, ok in ((1, True), (2, False), (3, False)):
+        h.pool.record_sample(n, ok)
+    check("2 of 3 checks failed (over 20 %): the rest are sampled 1 in 1, and the monitor hears it",
+          (h.pool.sample_every(), any("post-merge checks failed 2 of the last 3" in e for e in h.pool.events)),
+          (1, True))
+    stats = h.pool.after_stats()
+    check("state.json's numbers", (stats["checked"], stats["failed"], stats["fail_rate"], stats["every"]), (3, 2, 0.667, 1))
+    h.step()
+    check("and in state.json", json.loads((h.pool.cfg.logdir / "state.json").read_text())["accept"]["after"]["fail_rate"],
+          0.667)
+
+
 def test_acceptance_verdicts_settle_themselves() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-acceptsettle-"))
     gh = d / "gh"
@@ -1163,7 +1285,7 @@ def test_acceptance_verdicts_settle_themselves() -> None:
           (calls, pool.book.accept_rounds[9]), ([], 1))
     calls, pool, _ = settle([], finished=False)
     check("a unit that timed out leaves an issue without a verdict for its retry", pool.book.accept_rounds[9], 0)
-    # Cohort 55: 13 of 79 issues the tester verified failed the harness QA. A verdict must name
+    # Verified issues that later failed had verdicts that left rows out. A verdict must name
     # the checklist rows the merged change needs.
     unit.info["issues"][0]["rows"] = ["viewport:320x640", "lang:ja", "always:reload-mid-task"]
     calls, pool, verified = settle([tester("rows: viewport:320x640 always:reload-mid-task\nskip: lang:ja the change has no "
@@ -1191,8 +1313,8 @@ def test_acceptance_verdicts_settle_themselves() -> None:
 
 
 def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
-    """Proposal §1 steps 3-4 and §4: c58's acceptance units took a median 13 min for one
-    issue, mostly re-reading; c55's independent QA failed 16.5 % of what D's tester verified."""
+    """Acceptance units took long for one issue, mostly re-reading what the author already
+    knew; an independent check still failed part of what a tester had verified."""
     restore = with_env({**ACCEPT_ENV, "CCROLE_WORKER_CLI": "claude"})
     try:
         issues = [iss(4, ["stage:accept", "P1"], title="sheet"), iss(5, ["stage:accept", "P1"], title="ja"),
@@ -1276,7 +1398,7 @@ def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
     check("an owner request is always sampled", ccpool.ACCEPT_SAMPLE in calls[0], True)
     for kind in ("type:feature-request", "seed", "needs:live"):
         calls = settle([author("accept-verified: script")], labels=("stage:accept", kind))
-        check(f"cohort 60: {kind} is always sampled", ccpool.ACCEPT_SAMPLE in calls[0], True)
+        check(f"{kind} is always sampled", ccpool.ACCEPT_SAMPLE in calls[0], True)
     calls = settle([{"author": loop, "body": f"<!-- worker -->\n{ccpool.AUTHOR_ACCEPT}\nIt works.\naccept-verified: script",
                      "createdAt": "2026-10-23T12:30:00Z", "url": "u"}])
     check("a verified with no screenshot and no asserted text goes to a tester, unclosed",
@@ -1359,7 +1481,7 @@ def test_verdicts_settle_whatever_ended_the_session() -> None:
 
 
 def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
-    """Fixed regressions came back in cohort 52 ("maps blank after reload"). A verified
+    """Fixed regressions came back ("maps blank after reload"). A verified
     issue's script becomes tests/accept/, run on each build with no model."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-guard-"))
     work, g = git_repo(d)
@@ -1427,9 +1549,9 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
                "print('five')" in created[0] if created else True),
               (["issue create --title Acceptance tests for #6"], True, False))
-        check("the chore asks each guard to make its own fresh state (cohort 60's test_accept_38)",
+        check("the chore asks each guard to make its own fresh state (one assumed an empty feed after reload)",
               ("a fresh state the test makes itself" in created[0], "never an assumption that" in created[0]), (True, True))
-        check("filed as a chore at P2 (cohort 60: 95 P1 chores of 211 merges crowded out product work)",
+        check("filed as a chore at P2 (P1 chores crowded out product work)",
               ("--label type:chore --label P2 --label stage:triage" in created[0]), True)
         # Batching: one chore per [accept] chore_batch scripts, appended while one is open and unclaimed.
         log.write_text("")
@@ -1456,6 +1578,16 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               ([x.split(" --body")[0] for x in lines if x.startswith(("issue comment", "issue edit"))][:2],
                any(x.startswith("issue create") for x in lines)),
               (["issue comment 90", "issue edit 90 --title Acceptance tests for #61, #62, #63, #64"], False))
+        log.write_text("")
+        (logdir / "accept/test_accept_65.py").write_text("print(65)\n")
+        pool.book.chore_pending = [{"n": 65, "path": str(logdir / "accept/test_accept_65.py"), "t": 0}]
+        threads = [threading.Thread(target=pool.flush_chores, args=(True,)) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        check("two units ending together append the same scripts once (run 14: every append to #82 twice)",
+              sum(x.startswith("issue comment 90") for x in log.read_text().splitlines()), 1)
         os.environ.pop("FAKE_GH_LIST", None)
         log.write_text("")
         pool.cfg.accept_guard = ""
@@ -1467,7 +1599,7 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
 
 
 def test_long_dependency_waits_are_pointed_out() -> None:
-    """One P1 fix waited 6.7 hours on three dependencies and nobody looked at them again."""
+    """A P1 fix waited hours on three dependencies and nobody looked at them again."""
     blocked = dict(iss(238, ["stage:triage", "P1"]), blocked_by=3)
     low = dict(iss(240, ["stage:triage", "P2"]), blocked_by=1)
     h = Rig(state([blocked, low]), blocked_review_s=3600)
@@ -1475,7 +1607,7 @@ def test_long_dependency_waits_are_pointed_out() -> None:
     check("a new wait: nothing said", [e for e in h.pool.events if "open blocker" in e], [])
     h.step(3600)
     said = [e for e in h.pool.events if "open blocker" in e]
-    check("an hour later the monitor is told once about each, P2 too (cohort 60: most of 40 blocked issues were P2)",
+    check("an hour later the monitor is told once about each, P2 too (most blocked issues were P2)",
           [e.split(" has")[0] for e in said], ["#238 (P1)", "#240 (P2)"])
     h.step(600)
     check("once", sum("open blocker" in e for e in h.pool.events), 2)
@@ -1486,9 +1618,9 @@ def test_long_dependency_waits_are_pointed_out() -> None:
 
 
 def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
-    """Cohort 55: merged hub issues #15, #1 and #22 sat at stage:accept for over an hour
-    (19 in that queue), their dependents waited as if they were not merged, and after the
-    60-minute review the monitor cut 14 issues' dependencies."""
+    """Merged hub issues sat at stage:accept for over an hour behind a long queue, their
+    dependents waited as if they were not merged, and after the 60-minute review the monitor
+    cut many issues' dependencies."""
     def starts(blocker_labels, **dep):
         issues = [iss(20, ["stage:triage", "P1"], body=dep.pop("body", "")), *([iss(15, blocker_labels)] if
                   blocker_labels is not None else [])]
@@ -1531,11 +1663,18 @@ def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
     check("it fires for the one still open, counted and named",
           [e.split(" (`gh")[0].split("min on ")[1] for e in h.pool.events if "open blocker" in e],
           ["1 open blocker(s) (#22)"])
+    both = dict(iss(17, ["stage:triage", "P1"], body="Blocked by: #22"), blocked_by=1, blockers=[22])
+    h = Rig(state([both, iss(22, ["stage:triage", "P1"])]), blocked_review_s=3600)
+    h.step()
+    h.step(3600)
+    check("a blocker that is both a dependency and a `Blocked by:` line is named once (runs 13, 14: \"#1, #1\")",
+          [e.split(" (`gh")[0].split("min on ")[1] for e in h.pool.events if "open blocker" in e],
+          ["1 open blocker(s) (#22)"])
 
 
 def test_monitor_is_asked_to_split_an_issue_that_keeps_failing() -> None:
-    """The monitor may split any issue, and in a 12-hour run split none; one took eleven
-    worker sessions. Only the issue's own failures count: all seven requests in run 7
+    """The monitor may split any issue, and left to itself split none, while one issue took
+    many worker sessions. Only the issue's own failures count: all seven requests in run 7
     counted claim failures, sessions that delivered a PR, and gate 7 or merger-loop
     hand-backs."""
     h = Rig(state([iss(9, ["stage:triage", "P0"]), iss(10, ["stage:pr", "P1"]),
@@ -1594,7 +1733,7 @@ def test_monitor_is_asked_to_split_an_issue_that_keeps_failing() -> None:
 
 
 def test_new_ux_proposals_go_to_the_monitor_to_screen() -> None:
-    """The owner rejected 94 of 127 proposals in one run, 59 as duplicates."""
+    """The owner rejected most UX proposals, many as duplicates."""
     h = Rig(state([iss(1, ["stage:triage"])]))
     h.step()
     h.st = state([iss(1, ["stage:triage"]), iss(300, ["ux:proposed", "type:bug"], title="UX: near here")])
@@ -2232,13 +2371,13 @@ def test_main_check_reports_a_red_main() -> None:
     h.step()
     h.st = state(main="3" * 40)
     h.step()
-    check("one check at a time (a red one runs twice: a pass the second time would be a flake)",
-          swept, ["1", "1", "2"])
+    check("one check at a time (a red one runs again: two passes in three would make it a flake; it fails twice)",
+          swept, ["1", "1", "1", "2"])
     gate.set()
     settle()
     h.step()
     settle()
-    check("then the newest main only, not the ones in between", swept, ["1", "1", "2", "2", "3"])
+    check("then the newest main only, not the ones in between", swept, ["1", "1", "1", "2", "2", "2", "3"])
     log = calls()
     check("still red on the same tests (2): no second issue and no comment",
           (log.count("issue create"), log.count("issue comment")), (1, 1))
@@ -2337,7 +2476,7 @@ def test_ux_journeys_and_score() -> None:
     check("no journeys script: the tester keeps its own per repository, not in a shared /tmp/ux",
           (f"{SCRATCH}/ux/journeys.py" in own, "/tmp/ux/" in own), (True, False))
     given = ccpool.tester_prompt(ux, 8021, "60m", "ux/journeys.py")
-    check("the previous run's score is in the prompt, with the drift rule (c55: 12-15 points over the audit)",
+    check("the previous run's score is in the prompt, with the drift rule (scores drifted up from run to run)",
           ("previous UX run scored 75 at bbbbbbbbbbbb" in ccpool.tester_prompt(ux, 8021, "60m", previous={"score": 75,
                                                                                                         "sha": "b" * 40}),
            "previous UX run" in given), (True, False))
@@ -2408,16 +2547,28 @@ def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
     rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
     check("... and the reason says provisional", (rec["score"], rec["missing"]),
           (None, "only a provisional score in ux_report.md"))
-    # Cohort 60: 60 for four hours while history, profiles and forget were missing (audit 43-51).
+    # A UX run held 60 for hours while whole features were missing.
     (w.dir / "ux_report.md").write_text("Score: 60/100\nFindings: 3 blockers, 2 majors\n")
-    check("the findings line caps the score: 85 - 8 x 3 - 5 x 2, and 50 with a blocker",
-          ccpool.score_cap(w.dir / "ux_report.md"), (50, 3, 2))
+    check("the findings line caps the score: 85 - 8 x 3 - 2 x 2",
+          ccpool.score_cap(w.dir / "ux_report.md"), (57, 3, 2))
+    check("an explorer keeps 85 - 8 B - 5 M, and 50 with a blocker", ccpool.score_cap(w.dir / "ux_report.md", "explore"),
+          (50, 3, 2))
+    (w.dir / "ux_report.md").write_text("Score: 70/100\nFindings: 1 blockers, 0 majors\n")
+    check("at most 60 with a blocker", ccpool.score_cap(w.dir / "ux_report.md")[0], 60)
+    (w.dir / "ux_report.md").write_text("Score: 60/100\nFindings: 3 blockers, 2 majors\n")
     pool.finished(w, "ok")
     rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
     check("the capped score is logged, with what the report said",
-          (rec["score"], rec["reported"], rec["cap"], pool.ux_scores[-1]["score"]), (50, 60, 50, 50))
-    (w.dir / "ux_report.md").write_text("Score: 66/100\nFindings: 0 blockers, 4 majors\n")
-    check("majors only: 85 - 20", ccpool.score_cap(w.dir / "ux_report.md")[0], 65)
+          (rec["score"], rec["reported"], rec["cap"], pool.ux_scores[-1]["score"]), (57, 60, 57, 57))
+    (w.dir / "ux_report.md").write_text("Score: 80/100\nFindings: 0 blockers, 4 majors\n")
+    check("majors only: 85 - 8, and at most 75 with a major", ccpool.score_cap(w.dir / "ux_report.md")[0], 75)
+    (w.dir / "ux_report.md").write_text("Score: 66/100\nFindings: 0 blockers, 7 majors\n")
+    check("0 blockers, 7 majors: 71", ccpool.score_cap(w.dir / "ux_report.md")[0], 71)
+    (w.dir / "ux_report.md").write_text("Score: 50/100\nFindings: 0 blockers, 7 majors\n")
+    pool.finished(w, "stopped with the supervisor")
+    rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
+    check("a run the stop cut short records no score (run 14's last run logged 50)",
+          (rec["score"], rec["missing"].startswith("a score from a run the stop cut short")), (None, True))
     (w.dir / "ux_report.md").write_text("Score: 66/100\n")
     pool.finished(w, "ok")
     rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
@@ -2428,11 +2579,14 @@ def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
     check("the prompt asks for `Score: provisional` until the journeys ran, and never the previous score",
           ("`Score: provisional`" in prompt, "never copy it" in prompt, ".issuelooper/run" in prompt,
            "`Findings: B blockers, M majors`" in prompt), (True, True, True, True))
+    check("an open issue's missing feature is missing scope, not a major (in a test run of the sample, 11 of 11 counted findings were open issues)",
+          ("is missing scope, not a major" in prompt, "`Missing scope:`" in prompt, "2 per major" in prompt),
+          (True, True, True))
 
 
 def test_explorers_fill_the_idle_slots() -> None:
-    """Proposal §3: c55 at 3 h 45 min had 11 agents for 4 claimable issues, and D's own
-    testers filed about 5 issues an hour; idle UX runs and spec checks waited for an idle pool."""
+    """Late in a run most agent slots stood idle with few claimable issues left, while idle
+    UX runs and spec checks waited for a fully idle pool."""
     focuses = ["phone 320 px", "Japanese, every screen", "reload and restore"]
     h = Rig(state([iss(1, ["stage:triage", "P1"])]), global_cap=4, explore=True, explore_focuses=focuses,
             explore_max=2, explore_per_hour=3, spec=True, ux=True, ux_gap_s=1e12, ux_idle_gap_s=0, spec_gap_s=0)
@@ -2459,7 +2613,7 @@ def test_explorers_fill_the_idle_slots() -> None:
     busy = Rig(state([iss(n, ["stage:triage", "P1"]) for n in range(1, 5)]), global_cap=4, explore=True,
                explore_focuses=focuses)
     check("no free slot: no explorer", sorted(u.kind for u in busy.step()), ["implement"] * 4)
-    # Cohort 60: 111 explorer filings, 86 of them while the hub sat unclaimed and work waited.
+    # Unlimited explorers filed mostly while the hub sat unclaimed and work waited.
     for label, st in (("8 claimable issues wait", state([iss(n, ["stage:triage", "P2"]) for n in range(1, 9)])),
                       ("10 issues are blocked", state([iss(1, ["stage:triage", "P2"])] + [
                           iss(n, ["stage:triage", "P2"], body="Blocked by: #1") for n in range(2, 12)])),
@@ -2467,6 +2621,16 @@ def test_explorers_fill_the_idle_slots() -> None:
                                                               for n in range(1, 13)]))):
         held = Rig(st, global_cap=40, explore=True, explore_focuses=focuses)
         check(f"no explorer while {label}", [u.kind for u in held.step() if u.kind == "explore"], [])
+    # Issues waiting on hot files counted as claimable and held explorers off for hours.
+    hot = Rig(state([iss(n, ["stage:triage", "P2"]) for n in range(1, 9)]), global_cap=40, explore=True,
+              explore_focuses=focuses, areas=AREAS)
+    hot.pool.track_areas = lambda st: None
+    hot.pool.book.issue_area = {n: "live" for n in range(1, 9)}
+    hot.pool.book.issue_files = {n: ["src/live.py"] for n in range(1, 9)}
+    hot.pool.book.running["wrk:99"] = ccpool.Unit("worker", "implement", "wrk:99@x", "wrk:99", 99, (4,),
+                                                  {"hot": ["src/live.py"], "area": "live", "slot": 0})
+    check("issues waiting on a hot file do not hold the explorers back",
+          [u.kind for u in hot.step() if u.kind == "explore"], ["explore", "explore"])
     nocap = Rig(state([iss(1, ["stage:triage", "P1"])]), explore=True, explore_focuses=focuses)
     check("with no global cap, explorers only while no worker is due", sorted(u.kind for u in nocap.step()), ["implement"])
     u = ccpool.Unit("tester", "explore", "exp:a:0", "tst:exp0", None, (5, 0),
@@ -2482,9 +2646,9 @@ AREAS = [{"name": "live", "paths": ["src/live.py", "src/js/live*"], "hot": ["src
 
 
 def test_areas_route_issues_to_their_conversations() -> None:
-    """Proposal §2: several "arm A"s in parallel. c58 PR #144 starved on live.py and other PRs
-    were held 89 times in an hour on app.js and live.py; arm A, one session, had the least
-    duplication and no handoffs."""
+    """Several single-session owners in parallel, one per area. A PR starved on live.py and
+    other PRs were held again and again on app.js and live.py; one session working an area
+    alone had the least duplication and no handoffs."""
     old_cli = os.environ.get("CCROLE_WORKER_CLI")
     os.environ["CCROLE_WORKER_CLI"] = "claude"
     try:
@@ -2619,8 +2783,18 @@ def test_routing_follows_the_words_ids_and_specific_files() -> None:
         check("#8 web search tool after a branch in tools/: tools, not settings", b.issue_area[8], "tools")
         check("#7 live and tools tie: no area, any worker, not shell", b.issue_area[7], "")
         check("a settings issue by its words and id", b.issue_area[50], "settings")
-        check("the hot-file lock still sees the files it names (shared ones included)",
+        check("the hot-file lock still sees the files its last branch changed (shared ones included)",
               "src/concierge/main.py" in b.issue_files[8], True)
+        # Files that only held two of an issue's names locked cards issues on live.py.
+        weak = iss(60, ["stage:triage"], title="Card title hierarchy", body="The `card-title` and `card-link` styles.")
+        chore = iss(61, ["stage:triage", "type:chore"], title="Acceptance tests for #5, #6",
+                    body=f"<!-- merger -->\n{ccpool.ACCEPT_CHORE}\nScripts naming `sendMessage` in src/concierge/main.py")
+        ccpool.name_hits = lambda root, text, ref="origin/main", id_pattern="": {
+            "src/concierge/main.py": {"card-title": 2, "card-link": 1}}
+        check("two of its names in a hot file are no prediction that it edits that file",
+              h.pool.route(weak)[1], [])
+        check("a test-only chore has no area and no files (run 14's #82 waited 6 h on app.js)",
+              h.pool.route(chore), ("", []))
     finally:
         ccpool.name_hits = real
         if old is None:
@@ -2656,9 +2830,8 @@ def test_a_session_leaves_no_scratch_and_counts_only_its_own_usage() -> None:
 
 
 def test_a_hub_goes_first_and_is_not_parked() -> None:
-    """Cohort 60: hub #32 ("Resume the conversation after a reload", P2; #33, #34, #36 and
-    #37, all P1, wait on it) failed twice (a train hand-back, a timeout) and then sat at
-    stage:triage for 3 h behind P1 work, until the monitor raised it to P1."""
+    """A P2 hub with four P1 issues waiting on it failed twice (a train hand-back, a timeout)
+    and then sat at stage:triage for hours behind P1 work, until the monitor raised it."""
     old_cli = os.environ.get("CCROLE_WORKER_CLI")
     os.environ["CCROLE_WORKER_CLI"] = "claude"
     try:
@@ -2691,9 +2864,9 @@ def test_a_hub_goes_first_and_is_not_parked() -> None:
 
 
 def test_guards_the_train_blames_go_back_to_the_author() -> None:
-    """Cohort 60: the train handed #32's PR back twice for acceptance guards it broke by
-    design (test_accept_38 cleared localStorage, reloaded and expected an empty feed, which
-    server-side history changes), and the issue sat 3 h before anyone resumed it."""
+    """The train handed a PR back twice for acceptance guards it broke by design (a guard
+    cleared localStorage, reloaded and expected an empty feed, which server-side history
+    changes), and the issue sat for hours before anyone resumed it."""
     old_cli = os.environ.get("CCROLE_WORKER_CLI")
     os.environ["CCROLE_WORKER_CLI"] = "claude"
     try:
@@ -2747,8 +2920,8 @@ def test_guards_the_train_blames_go_back_to_the_author() -> None:
 
 
 def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
-    """Cohort 60: 236 monitor-added edges blocked up to 40 issues (337 issue-hours) while 6-9
-    of 50 workers ran; hot-file waits had a median of 34 min and a p90 of 5 h."""
+    """Monitor-added edges blocked most of the queue while most worker slots stood idle, and
+    hot-file waits ran to hours."""
     blocked = [iss(n, ["stage:triage", "P2"], body="Blocked by: #1") for n in range(10, 19)]
     h = Rig(state([iss(1, ["stage:triage", "P2"]), iss(2, ["stage:triage", "P2"])] + blocked), edge_flag_at=8)
     h.step()
@@ -2780,7 +2953,7 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
 
 
 def test_a_file_that_keeps_conflicting_becomes_hot() -> None:
-    """Cohort 60: settings.js conflicted 25 times (14 train skips); the settings area had no hot list."""
+    """settings.js conflicted more than any file, often as train skips; the settings area had no hot list."""
     import copy
     areas = copy.deepcopy(CONCIERGE_AREAS)
     h = Rig(state(), areas=areas, area_auto_hot_at=4, split_after=99, gh=gh_log())
@@ -2798,13 +2971,62 @@ def test_a_file_that_keeps_conflicting_becomes_hot() -> None:
                                             ccpool.config.is_hot("tests/e2e/test_a.py", h.pool.cfg.areas)), (None, False))
 
 
+def test_files_split_off_a_hot_file_are_hot_and_the_file_cools() -> None:
+    """live.py was split and stayed hot (most of its waits came after), and the files split
+    from it were not hot, though they took a large share of the conflicts."""
+    import copy
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-split-hot-"))
+    work, g = git_repo(d)
+    main_py = work / "src" / "concierge" / "main.py"
+    main_py.parent.mkdir(parents=True)
+    main_py.write_text("".join(f"line_{k} = {k}\n" for k in range(200)))
+    g("add", "-A")
+    g("commit", "-qm", "base")
+    main_py.write_text("".join(f"line_{k} = {k}\n" for k in range(60)))
+    (work / "src" / "concierge" / "live_session.py").write_text("".join(f"line_{k} = {k}\n" for k in range(60, 200)))
+    (work / "tests").mkdir()
+    (work / "tests" / "test_live_session.py").write_text("def test_x():\n    pass\n")
+    g("add", "-A")
+    g("commit", "-qm", "split")
+    sha = g("rev-parse", "HEAD")
+    restore = with_env({"SHARED_REPO_PATH": str(work)})
+    try:
+        h = Rig(state(), areas=copy.deepcopy(CONCIERGE_AREAS), area_auto_hot_at=4, area_auto_hot_expire=3,
+                split_after=99, gh=gh_log())
+        f, new = "src/concierge/main.py", "src/concierge/live_session.py"
+        check("before: main.py is a hot file of live", config_is_hot(h, f), True)
+        h.pool.hot_after_merge(7, sha)
+        check("a merge that moves code out of it: the new source file is hot in its area, the test file not",
+              (config_is_hot(h, new), h.pool.book.auto_hot.get(new), config_is_hot(h, "tests/test_live_session.py")),
+              (True, "live", False))
+        check("and the file, down from 200 to 60 lines, is no longer hot; the monitor hears both",
+              (config_is_hot(h, f), sum("no longer a hot file" in e or "are now hot" in e for e in h.pool.events)),
+              (False, 2))
+        again = ccpool.Pool(ccpool.Config(**{**h.pool.cfg.__dict__, "areas": copy.deepcopy(CONCIERGE_AREAS)}),
+                            fetcher=state, spawn=False)
+        check("a restarted supervisor keeps both", (ccpool.config.is_hot(new, again.cfg.areas),
+                                                    ccpool.config.is_hot(f, again.cfg.areas)), (True, False))
+        for pr_n in (101, 102, 103, 104):
+            h.pool.record_conflicts(pr_n, {f})
+        check("conflicts after the cooling make it hot again", config_is_hot(h, f), True)
+        h.pool.record_conflicts(105, {new})
+        for _ in range(2):
+            h.pool.hot_after_merge(8, "")
+        check("an auto-hot file with a conflict 2 merges ago stays hot", config_is_hot(h, new), True)
+        h.pool.hot_after_merge(9, "")
+        check("after POOL_AREA_AUTO_HOT_EXPIRE (3) merges with no conflict it is not hot any more",
+              (config_is_hot(h, new), new in h.pool.book.auto_hot), (False, False))
+    finally:
+        restore()
+
+
 def config_is_hot(h, f):
     return ccpool.config.is_hot(f, h.pool.cfg.areas)
 
 
 def test_a_train_prefix_merges_only_when_checked_and_guards_rerun_alone() -> None:
-    """Cohort 60: after the train split out PR 129, PRs 126 and 130 merged unchecked, and 126's
-    guard test_accept_50 failed at its own commit (main red 15 min); #32's 11 guards failed
+    """After the train split out one PR, the PRs around it merged unchecked, and one of them
+    brought a guard that failed at its own commit (main went red); one issue's guards failed
     together, and passed one at a time."""
     h = Rig(state())
     cars = [{"pr": 126, "issue": 1, "head": "1" * 40, "commit": "c1" * 20},
@@ -3389,6 +3611,25 @@ def test_two_prs_check_their_gates_side_by_side() -> None:
           (outcomes, overlap, wait < 0.3), ({9: "ok", 10: "ok"}, True, True))
 
 
+def test_the_accept_mode_sets_what_runs() -> None:
+    """[accept] mode: own-accept and stage:accept only in "gate"; with "after" or "off" the
+    merge closes the issue, also a needs:live one (no stage:live)."""
+    restore = with_env({"POOL_ACCEPT_MODE": "after", "ACCEPT_PATHS": "src/", "POOL_AUTHOR_ACCEPT": "1"})
+    try:
+        cfg = ccpool.Config.from_env()
+        check("after: no stage:accept gate and no author acceptance", (cfg.accept_mode, cfg.accept, cfg.author_accept),
+              ("after", False, False))
+        os.environ["POOL_ACCEPT_MODE"] = "gate"
+        cfg = ccpool.Config.from_env()
+        check("gate: as before", (cfg.accept_mode, cfg.accept, cfg.author_accept), ("gate", True, True))
+    finally:
+        restore()
+    for mode, want in (("gate", ["issue edit 2 --remove-label stage:pr --add-label stage:live"]),
+                       ("after", ["issue edit 2 --remove-label stage:pr"]), ("off", ["issue edit 2 --remove-label stage:pr"])):
+        outcome, log, pool = auto_session(ALLOW, live=True, accept_mode=mode)
+        check(f"{mode}: a needs:live issue after its merge", [x for x in log if x.startswith("issue edit")], want)
+
+
 def test_auto_merge_when_the_review_waits_for_the_owner() -> None:
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-reviewowner-"))
     old = os.environ.get("REVIEW_DIR")
@@ -3858,8 +4099,8 @@ echo "https://github.com/o/r/issues/88"
 
 
 def test_a_starving_pr_holds_merges_on_its_files() -> None:
-    """Cohort 52: #143 ("near here", P1) waited 5 h 40 min through 3 merger sessions while
-    77 commits landed, every merge touching its files."""
+    """A P1 PR waited hours through several merger sessions while dozens of commits landed,
+    every merge touching its files."""
     def st(*extra):
         return state([iss(1, ["stage:pr", "P1"]), iss(2, ["stage:pr", "P2"]), iss(3, ["stage:pr", "P0"])][:2 + len(extra)],
                      prs=[pr(11, 1), pr(12, 2)] + list(extra))
@@ -4094,10 +4335,12 @@ def test_a_single_flaky_failure_is_tried_again() -> None:
     w.hand_back = lambda pr, n, text: handed.append(text)
     fail = "FAILED tests/unit/test_weather.py::test_card - flaky\n1 failed"
     for results, want, back in (
-        ([(False, fail), (True, "ok")], "", 0),
-        ([(False, fail), (False, fail.replace("test_card", "test_other"))],
+        ([(False, fail), (True, "ok"), (True, "ok")], "", 0),
+        ([(False, fail), (False, fail.replace("test_card", "test_other")), (False, fail.replace("test_card", "test_other"))],
          "held (the merged-tree check failed twice, differently: flaky)", 0),
-        ([(False, fail), (False, fail)], "breaks main once merged (handed back)", 1),
+        ([(False, fail), (False, fail), (False, fail)], "breaks main once merged (handed back)", 1),
+        # One pass after a failure no longer makes it flaky; two of three must pass.
+        ([(False, fail), (True, "ok"), (False, fail), (False, fail)], "breaks main once merged (handed back)", 1),
     ):
         queue = list(results)
         w.fast_check = lambda wt, env: queue.pop(0)
@@ -4106,17 +4349,36 @@ def test_a_single_flaky_failure_is_tried_again() -> None:
               (w.merged_check(5, 1, "h" * 40, "issue-1", {}), len(handed), queue), (want, back, []))
 
 
+def test_a_failure_is_flaky_only_after_two_passes_in_three() -> None:
+    """Trains merged after one rerun of a failing test passed, and the test then kept failing
+    in later sweeps."""
+    pool = ccpool.Pool(ccpool.Config(logdir=pathlib.Path(tempfile.mkdtemp(prefix="ccpool-2of3-")) / "pool"),
+                       fetcher=state, spawn=False)
+    for runs, want, used in (([True, True], True, 2), ([False, False], False, 2), ([True, False, True], True, 3),
+                             ([True, False, False], False, 3), ([None], None, 1), ([True, None, False], False, 3)):
+        queue = list(runs)
+        ok, _ = pool.two_of_three(lambda: (queue.pop(0), "out"))
+        check(f"reruns {runs}: {want}", (ok, len(runs) - len(queue)), (want, used))
+    fails = [(False, "FAILED tests/e2e/test_issue_163.py::t")] * 3
+    check("no rerun command: a known flaky failure counts as green, as before",
+          pool.known_flaky_again(lambda: fails.pop(0), ["tests/e2e/test_issue_163.py::t"]), True)
+    pool.cfg.rerun_cmd = "pytest {tests}"
+    check("with one, it must pass two reruns of three first",
+          pool.known_flaky_again(lambda: fails.pop(0), ["tests/e2e/test_issue_163.py::t"]), False)
+
+
 def test_a_flaky_red_main_gets_an_issue() -> None:
     """main went red four times on an e2e weather-card flake and nobody filed a fix. Only a
-    failure and a pass at one commit make a test flaky: cohort 52's main break (#194) was
-    labeled flaky because a later commit was green with no change to the test."""
+    failure and a pass at one commit make a test flaky: a main break was labeled flaky
+    because a later commit was green with no change to the test."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-flaky-"))
     gh = d / "gh"
     gh.write_text(FAKE_GH_LOG)
     gh.chmod(0o755)
     h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
     red = "FAILED tests/e2e/test_issue_14.py::test_weather_card - Timeout\n== sweep is red ==\n"
-    runs = {"1": [(False, red), (False, red)], "2": [(True, "green")], "3": [(False, red), (True, "green")]}
+    runs = {"1": [(False, red), (False, red), (False, red)], "2": [(True, "green")],
+            "3": [(False, red), (True, "green"), (True, "green")]}
     h.pool.sweep_main = lambda sha: runs[sha[0]].pop(0)
     h.pool.commits_since = lambda old, new: []
     for k in "12":
@@ -4159,7 +4421,8 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
     h = Rig(state(main="1" * 40), main_check=True, gh=str(gh))
     flaky = "FAILED tests/unit/test_a.py::test_x - boom\n== sweep is red ==\n"
     other = "FAILED tests/unit/test_b.py::test_y - boom\n== sweep is red ==\n"
-    runs = {"1": [(False, flaky)], "2": [(False, other), (True, "45 green")], "3": [(False, other), (False, other)]}
+    runs = {"1": [(False, flaky)], "2": [(False, other), (True, "45 green"), (True, "45 green")],
+            "3": [(False, other), (False, other), (False, other)]}
     h.pool.sweep_main = lambda sha: runs[sha[0]].pop(0)
     h.pool.commits_since = lambda old, new: []
     h.pool.touched = lambda old, new, paths: []
@@ -4177,7 +4440,7 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
                   (True, True, False))
         if k == "2":
             log = (d / "gh.log").read_text()
-            check("another test failed and passed on the second run: main green, the test reported as flaky",
+            check("another test failed and then passed two runs at the same commit: main green, reported as flaky",
                   (h.pool.main_check_last["ok"], "--title main is red" in log,
                    "passed when they ran again at the same commit" in log), (True, False, True))
     check("failed twice: main red, as before",
@@ -4196,9 +4459,10 @@ def test_known_flaky_tests_do_not_turn_main_red() -> None:
           (outcome, "pr comment" in log), ("held (the re-sweep failed only known flaky tests: #135)", False))
     stale2 = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
     outcome, _, log, pool = resweep_session(stale2, ALLOW_SH, sweeps=[(False, RED_SWEEP), (True, "281 green")])
-    check("a re-sweep that fails, then passes at the same head: merged, and the test recorded as flaky",
+    check("a re-sweep that fails, then passes once at the same head: merged (the train sweeps it again), but one "
+          "pass does not make the test flaky",
           (outcome, any("failed and passed at one commit (PR #9's head cccccccc)" in e for e in pool.events)),
-          ("ok", True))
+          ("ok", False))
 
 
 def test_a_check_that_failed_on_the_machine_blames_nobody() -> None:
@@ -4229,8 +4493,8 @@ def test_a_check_that_failed_on_the_machine_blames_nobody() -> None:
 
 
 def test_the_second_try_reruns_only_the_failing_tests() -> None:
-    """Cohort 52: a red main check's second full run cost 0.7 h a cohort, and every held
-    PR's second full re-sweep as long again; the failing tests alone say the same."""
+    """A red main check's second full run, and every held PR's second full re-sweep, cost far
+    more than running the failing tests alone, which say the same."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-rerun-"))
     h = Rig(state(main="1" * 40), main_check=True, gh="true",
             rerun_cmd=f"echo {{tests}} > {d}/ran; grep -q flaky {d}/ran")
@@ -4264,8 +4528,8 @@ def test_the_second_try_reruns_only_the_failing_tests() -> None:
 
 
 def test_a_held_pr_is_not_reswept_at_the_same_head() -> None:
-    """Cohort 52: PR #157, built on a broken main, was re-swept 15 times at one head
-    (19:49-20:46), each time held instead of rebased."""
+    """A PR built on a broken main was re-swept many times at one head within an hour, each
+    time held instead of rebased."""
     stale = "<!-- worker -->\nFixes #2\n- **Sweep SHA:** " + "b" * 40 + "\n"
     refuse = "echo '{\"decision\": \"block\", \"reason\": \"does not match Sweep SHA\"}'\n"
     red = {"sha": "d" * 40, "ok": False, "failing": ["tests/e2e/test_issue_20.py::test_map"]}
@@ -4312,7 +4576,7 @@ def test_a_held_pr_is_not_reswept_at_the_same_head() -> None:
 
 
 def test_a_flaky_test_has_a_deadline() -> None:
-    """Cohort 52: test_issue_96 failed 29 runs (1 in 3 even alone) and nobody fixed it."""
+    """A test failed run after run (even alone, now and then) and nobody fixed it."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-flakydl-"))
     gh = d / "gh"
     gh.write_text(FAKE_GH_LOG)
@@ -4342,7 +4606,7 @@ def test_a_flaky_test_has_a_deadline() -> None:
 
 
 def test_a_consolidation_chore_when_per_issue_tests_pile_up() -> None:
-    """Cohort 52's final main: 104 of 251 e2e tests were a coverage subset of another."""
+    """Many e2e tests ended up a coverage subset of another."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-consolidate-"))
     old = os.environ.get("SHARED_REPO_PATH")
     try:
@@ -4367,11 +4631,16 @@ def test_a_consolidation_chore_when_per_issue_tests_pile_up() -> None:
         check("at the threshold: one chore, P2, with what to delete, merge, parametrize or replace",
               ("issue create --title Consolidate per-issue tests: 3 tests/e2e/test_issue_*.py files --label type:chore --label P2" in log,
                all(w in log for w in ("**delete**", "**merge**", "**parametrize**", "**replace**"))), (True, True))
+        check("no install commit here, so no baseline tests to name", "baseline tests" in log, False)
+        check("with baseline tests (a chore once deleted some), the chore names them and says never delete",
+              ("`tests/e2e/test_page.py`" in ccpool.baseline_text(["tests/e2e/test_page.py"]),
+               "never delete, rename or fold" in ccpool.baseline_text(["tests/e2e/test_page.py"]),
+               ccpool.baseline_text([])), (True, True, ""))
         (d / "gh.list").write_text(json.dumps([{"number": 300, "title": "Consolidate per-issue tests: 3 files"}]))
         (d / "gh.log").write_text("")
         h.pool.consolidation_chore(sha)
         check("not again while one is open", "issue create" in (d / "gh.log").read_text(), False)
-        # Cohort 55: tests/accept reached 138 files and 14 minutes, and the chore counted tests/e2e only.
+        # tests/accept grew slow while the chore counted tests/e2e only.
         (d / "gh.list").write_text("[]")
         (d / "gh.log").write_text("")
         (work / "tests" / "accept").mkdir()
@@ -4515,10 +4784,19 @@ def test_worker_prompt_says_refs_and_the_checklist() -> None:
           ("changes src/ writes `Refs #5`" in " ".join(text.split()), "# accept-rows: <ids>" in text,
            "lang:ja" in text), (True, True, True))
     guarded = ccpool.worker_prompt(claim, "1", "45m", "u", accept="src/", guard=True)
-    check("with the guard on, workers are told tests/accept is not theirs (cohort 55: 117 of 138 files)",
+    check("with the guard on, workers are told tests/accept is not theirs (their own tests filled it)",
           ("Never add a file under tests/accept/" in guarded, "tests/accept/test_accept_5.py" in guarded), (True, False))
     plain = ccpool.worker_prompt(claim, "1", "45m", "u")
     check("without them, neither", ("Refs #5" in plain, "accept-rows" in plain), (False, False))
+    live_claim = dict(claim, needs_live=True)
+    check("[accept] mode: gate with live checks on says Refs for needs:live; after and off say Fixes, even for it",
+          ["Refs #5" in ccpool.worker_prompt(live_claim, "1", "45m", "u", live=True, mode=m) for m in ("gate", "after", "off")]
+          + ["Write `Fixes #5`" in ccpool.worker_prompt(live_claim, "1", "45m", "u", live=True, mode=m)
+             for m in ("gate", "after", "off")],
+          [True, False, False, False, True, True])
+    after = ccpool.worker_prompt(claim, "1", "45m", "u", mode="after")
+    check("after: a tester may check it after the deploy, and a failure reopens it",
+          ("may check it" in after, "reopens it" in after), (True, True))
 
 
 def test_worker_prompt_points_to_the_project() -> None:
@@ -4630,7 +4908,8 @@ time.sleep(120)
 
 def test_idle_on_a_background_task_is_resumed() -> None:
     """agy sessions sat until their 45-minute timeout with the turn over, waiting for a
-    background task (8 in one run); the tool still read as running, so no stall fired."""
+    background task (8 in a test run of the sample); the tool still read as running, so no
+    stall fired."""
     for name, want_calls, nudged in (("agy-idle", 2, True), ("agy-idle-always", 3, True)):
         d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-idle-"))
         agy = d / name
@@ -4659,6 +4938,86 @@ def test_idle_on_a_background_task_is_resumed() -> None:
     check("a CLI without that state is never taken for it", claude.background_idle(0), None)
 
 
+def test_a_background_sweep_is_waited_for_not_cut_off() -> None:
+    """Run 14: seven workers ran sweep_locked.py as an agy background task and ended their
+    turn; the background rule resumed them twice and then ended them mid-sweep, with no
+    pull request, and the end said "ok" (18-68 minutes lost each)."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-bgsweep-"))
+    agy = d / "agy-idle-always"
+    agy.write_text(FAKE_AGY_IDLE)
+    agy.chmod(0o755)
+    tmp = d / "scratch"
+    (tmp / "wrk-1-5-wt").mkdir(parents=True)
+    (tmp / "sweep_locked.py").write_text("import time\ntime.sleep(36)\n")
+    restore = with_env({"ISSUELOOPER_TMP": str(tmp)})
+    sweep = subprocess.Popen([sys.executable, str(tmp / "sweep_locked.py")], cwd=tmp / "wrk-1-5-wt")
+    try:
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy), render="cat", timeouts={"worker": "60m"},
+                                         stall_s=0, background_idle_s=1), fetcher=state, spawn=False)
+        w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
+        w.dir.mkdir(parents=True)
+        check("a sweep waiting for its slot (asleep) still counts as work in progress",
+              (sweep.pid in w.working_processes(), w.busy_processes()), (True, []))
+        t0 = time.time()
+        rc, _, timed_out = w.session("do issue 5", dict(os.environ, CCROLE_WORKER_CLI="agy"))
+        log = (w.dir / "resumes.log").read_text()
+        first = next((float(x.split()[0]) for x in log.splitlines() if " resume 1 " in x), 0)
+        check("the background rule waits while the sweep runs, and resumes only after it ended",
+              ("waiting for its background task: 1 process(es)" in log, first - t0 >= 28, sweep.poll() == 0),
+              (True, True, True))
+    finally:
+        restore()
+        if sweep.poll() is None:
+            sweep.kill()
+
+
+def test_a_worker_with_no_pull_request_is_not_ok() -> None:
+    """A worker that ended with no pull request and no release of its own was recorded as
+    ok (run 14, seven times); one cut off while its sweep ran is no failed attempt."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-nopr-"))
+    tmp = d / "scratch"
+    (tmp / "wrk-1-5-wt").mkdir(parents=True)
+    (tmp / "devcheck.py").write_text("import time\ntime.sleep(30)\n")
+    restore = with_env({"ISSUELOOPER_TMP": str(tmp)})
+    calls = []
+    real_sh = ccpool.Session.sh
+    try:
+        for finished, sweeping, want, no_fail in (("#5: pr #9", False, "ok", False),
+                                                  ("#5: released to stage:triage", False, "ended without a pull request", False),
+                                                  ("#5: released", False, "ok", False),
+                                                  ("#5: released to stage:triage", True, ccpool.BG_CUT, True)):
+            pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh="true", kill_leftovers=False,
+                                             caps={r: 0 for r in ccpool.ROLES}, timeouts={"worker": "45m"}),
+                               fetcher=state, spawn=False)
+            w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
+            calls.clear()
+
+            def sh(self, args, env, name, _out=finished):
+                calls.append((name, args))
+                if name == "claim":
+                    (self.dir / "claim").write_text(json.dumps({"issue": 5, "token": "t", "from": "stage:triage",
+                                                                "title": "x"}))
+                if name == "finish":
+                    (self.dir / "finish.out").write_text(_out + "\n")
+                return 0
+            ccpool.Session.sh = sh
+            w.session = lambda prompt, env: (0, 600.0, False)
+            w.issue_thread = lambda n: {}
+            (tmp / "wrk-1-5-wt").mkdir(parents=True, exist_ok=True)
+            proc = subprocess.Popen([sys.executable, str(tmp / "devcheck.py")], cwd=tmp / "wrk-1-5-wt") if sweeping else None
+            try:
+                outcome = w.work()
+            finally:
+                if proc:
+                    proc.kill()
+            check(f"finish says {finished!r}, a sweep {'still running' if sweeping else 'not running'}: {want}",
+                  (outcome, "--no-fail" in calls[-1][1]), (want, no_fail))
+        check("a cut-off worker is no failed attempt", ccpool.BG_CUT.startswith(ccpool.NOT_A_FAILURE), True)
+    finally:
+        ccpool.Session.sh = real_sh
+        restore()
+
+
 FAKE_AGY_UNSEEN = r"""#!/usr/bin/env python3
 import json, os, sqlite3, sys, time
 with open(sys.argv[0] + ".calls", "a") as f:
@@ -4677,7 +5036,7 @@ time.sleep(120)
 
 
 def test_a_stream_stuck_behind_a_finished_conversation_ends_early() -> None:
-    """Nine agy mergers in one run: the stream stopped at a command agy lost track of,
+    """Nine agy mergers in a test run of the sample: the stream stopped at a command agy lost track of,
     the agent finished unseen, and the process sat until the 45-minute timeout."""
     d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-unseen-"))
     agy = d / "agy-unseen"
@@ -4982,13 +5341,13 @@ def test_session_events_are_read_incrementally() -> None:
     t0 = time.perf_counter()
     after = w.events()
     appended = time.perf_counter() - t0
-    check("benchmark: 10 lines appended to 20,000 cost a small part of the first read, and the result is a full read's",
+    check("timing: 10 lines appended to 20,000 cost a small part of the first read, and the result is a full read's",
           (len(first), len(after), appended < whole / 5, after == full()), (20000, 20010, True, True))
 
 
 def test_the_author_resolves_its_own_conflict() -> None:
-    """Proposal §1 step 2: c58's 32 merger sessions (median 14.5 min) each re-read the issue,
-    the PR and main; the author's conversation, resumed, knows the change."""
+    """Merger sessions each re-read the issue, the PR and main; the author's conversation,
+    resumed, knows the change."""
     old_cli = os.environ.get("CCROLE_WORKER_CLI")
     os.environ["CCROLE_WORKER_CLI"] = "claude"  # resumable by id, no record to look for
     try:
@@ -5048,7 +5407,7 @@ def test_the_author_resolves_its_own_conflict() -> None:
     check("a unit with a recorded conversation starts by resuming it, with its own time limit",
           (rc, calls[0][-2:], calls[0][calls[0].index("--print-timeout") + 1]),
           (0, ["--conversation", "conv-1"], f"{2700 + 900 + 2400}s"))
-    # Cohort 59: every resolve and own-accept unit ran claim.py first, which refuses an
+    # Every resolve and own-accept unit used to run claim.py first, which refuses an
     # issue at stage:pr or stage:accept, so all of them ended "unclaimable" in seconds.
     pool.cfg.kill_leftovers = False
     for unit in (ccpool.Unit("worker", "resolve", "own:41@x", "mrg:41", 41, (0,),
@@ -5062,6 +5421,31 @@ def test_the_author_resolves_its_own_conflict() -> None:
         outcome = w.work()
         check(f"a {unit.kind} unit starts its session without claiming the issue",
               (outcome, (w.dir / "claim.out").exists(), len(prompts)), ("ok", False, 1))
+
+
+def test_an_author_outside_its_old_area_slot_still_resolves() -> None:
+    """Run 14: PRs 114 and 126 conflicted seconds after their authors ended and went to a
+    merger: the authors had run outside an area (lent, or no area), yet their records kept
+    an older session's area slot, which another issue was using, so they looked busy."""
+    restore = with_env({"CCROLE_WORKER_CLI": "claude"})
+    try:
+        conflicting = state([iss(2, ["stage:pr", "P1"])], prs=[pr(40, 2, head="c" * 40, mergeable="CONFLICTING")])
+        h = Rig(conflicting, author_resolve=True, timeouts={"worker": "60m", "merger": "45m", "tester": "60m"})
+        h.pool.book.convs[2] = {"conv": "s-old", "cli": "claude", "area": "shell", "slot": 0, "files": []}
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:2@x", "wrk:2", 2, (4,), {"lent": "shell"}), 1)
+        w.dir.mkdir(parents=True)
+        (w.dir / "session.jsonl").write_text("")
+        w.conversation = lambda: "s-new"
+        h.pool.record_conv(w)
+        check("a lent session's conversation holds no area slot",
+              {k: h.pool.book.convs[2][k] for k in ("conv", "area", "slot")}, {"conv": "s-new", "area": None, "slot": None})
+        h.pool.book.running["shell-k0"] = ccpool.Unit("worker", "implement", "wrk:9@x", "wrk:9", 9, (4,),
+                                                      {"area": "shell", "slot": 0, "resume": "s-shell"})
+        h.pool.book.rebase_failed[40] = "c" * 40
+        check("so the conflict goes to the author while another issue uses the old slot",
+              [(u.role, u.kind, u.info.get("resume")) for u in h.step() if u.number == 40], [("worker", "resolve", "s-new")])
+    finally:
+        restore()
 
 
 def test_quota_time_moves_the_deadlines_and_is_no_failure() -> None:
@@ -5632,9 +6016,10 @@ def test_a_red_train_hands_back_only_the_pr_that_breaks_it() -> None:
         base = t.g("rev-parse", "origin/main")
         t.pool.run_train()
         merges = [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")]
-        check("the failing tests run again on the tree, on main alone, then halving: PR #12 is found",
-              t.reruns, ["bad,pr1,pr3,pr4", "", "bad,pr1", "pr1"])
-        check("the train's full sweep, then one on the prefix that merges (cohort 60: 6 trains merged unchecked)",
+        check("the failing tests run again on the tree (twice: two passes in three would be a flake), on main "
+              "alone, then halving: PR #12 is found",
+              t.reruns, ["bad,pr1,pr3,pr4", "bad,pr1,pr3,pr4", "", "bad,pr1", "pr1"])
+        check("the train's full sweep, then one on the prefix that merges (unchecked prefixes merged before)",
               (len(t.sweeps), t.sweeps[-1]), (2, "merge-train:pr1"))
         check("PR #11 before it merges, #12 goes back with its failure, #13 and #14 wait",
               (merges, sorted(t.pool.book.train), t.main_files()), (["11"], [13, 14], ["app.py", "pr1"]))
@@ -5683,10 +6068,10 @@ def test_a_train_holds_on_a_flake_a_machine_failure_or_a_moved_main() -> None:
     try:
         t.red_once = True
         t.pool.run_train()
-        check("red once, the failing test passes on the same tree: a flake, and the batch merges",
+        check("red once, the failing test passes twice on the same tree: a flake, and the batch merges",
               ([x.split()[2] for x in t.gh_log() if x.startswith("pr merge")], t.reruns,
                any("failed and passed at one commit" in e for e in t.pool.events)),
-              (["11", "12"], ["pr1,pr2"], True))
+              (["11", "12"], ["pr1,pr2", "pr1,pr2"], True))
     finally:
         t.close()
     t = TrainRig({1: "pr1=a"})
@@ -5745,8 +6130,8 @@ def test_a_test_main_does_not_have_is_the_prs_not_mains() -> None:
 
 
 def test_the_trains_check_runs_the_acceptance_guard() -> None:
-    """c55: two regressions passed `make verify` (no tests/accept) and turned main red
-    until the guard after the deploy caught them."""
+    """Regressions passed `make verify` (no tests/accept) and turned main red until the
+    guard after the deploy caught them."""
     t = TrainRig({1: "pr1=a", 2: "gbad=b"})
     try:
         t.pool.cfg.accept_guard = "pytest tests/accept"
