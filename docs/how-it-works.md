@@ -183,6 +183,10 @@ Starting a brand-new agent session for every conflict, guard failure, or related
 
 The supervisor records the agent conversation ID for each issue in `.issuelooper/run/pool/owners.json`. When a PR conflicts with `main` after rebase, or when its rebased tree fails tests, the supervisor resumes the **original author's conversation** (`agy --conversation`, `claude --resume`) with the new commits on `main` and the conflicting file list. `role_guard.py` permits that session to push only that PR's branch. If no conversation is recorded or two author sessions (`POOL_AUTHOR_RESOLVE_MAX`) fail to land the PR, a dedicated `merger` session takes over.
 
+### Seed checkpoint forking (`[pool] fork`)
+
+When `[pool] fork = true` (the default), the first worker to open a PR in each area (and the first in the repository overall) saves a dedicated snapshot of its conversation as a seed checkpoint (`area_seeds` and `repo_seed` in `owners.json`). Later workers, parallel area slots, overflow (`lent`) workers, and conflict or guard-fix sessions whose author conversation is currently busy fork from that checkpoint (`agy` copies the SQLite conversation database to a new UUID; `claude` runs `--resume <id> --fork-session`). Because forked sessions already hold the initial exploration of `.issuelooper/project.md`, `spec/`, and the area's modules, workers skip redundant file discovery and share a warm prompt-cache prefix while running in parallel without locking a single conversation.
+
 ### Area conversations and hot-file locks (`[areas.<name>]`)
 
 When multiple workers edit the same subsystem simultaneously, they create avoidable merge conflicts. Defining `[areas.<name>]` tables in `config.toml` routes related issues to persistent area conversations and serializes edits to hot files:

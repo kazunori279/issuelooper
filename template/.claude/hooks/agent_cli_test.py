@@ -651,6 +651,63 @@ def test_inturn_quota_resume_and_transient() -> None:
                                                                              "cache_read_input_tokens": 100}}}]), 105)
 
 
+def test_fork_conversation_and_turn() -> None:
+    import sqlite3
+    agy, claude = agent_cli.get("agy"), agent_cli.get("claude")
+    base = agent_cli.Cli()
+    check("base Cli does not fork", (base.can_fork("x"), base.fork_conversation("x")), (False, None))
+    check("claude forks via --resume and --fork-session on the turn",
+          (claude.can_fork("s1"), claude.can_fork(""), claude.fork_conversation("s1"),
+           claude.fork_turn("work #5", "s1", 90)),
+          (True, False, None,
+           ["-p", "work #5", "--resume", "s1", "--fork-session", "--output-format", "stream-json", "--verbose"]))
+    root = pathlib.Path(tempfile.mkdtemp(prefix="agy-fork-"))
+    old = os.environ.get("AGY_CONVERSATIONS_DIR")
+    os.environ["AGY_CONVERSATIONS_DIR"] = str(root)
+    try:
+        check("missing agy db cannot fork", (agy.can_fork("missing"), agy.fork_conversation("missing")), (False, None))
+        c = sqlite3.connect(root / "src-1.db")
+        c.execute("pragma journal_mode=WAL")
+        c.execute("create table trajectory_meta (trajectory_id text, cascade_id text, title text)")
+        c.execute("insert into trajectory_meta values ('src-1', 'src-1', 'seed')")
+        c.execute("create table gen_metadata (idx integer primary key, data blob, size integer)")
+        usage = _pb([(1, 999), (2, 250), (3, 30), (5, 100), (9, 8), (10, 1)])
+        c.execute("insert into gen_metadata values (0, ?, 0)", (_pb([(1, _pb([(3, 999), (4, usage)]))]),))
+        c.execute("create table steps (idx integer primary key, step_type integer, status integer, "
+                  "step_payload blob, error_details blob)")
+        quota = b"\x12API error: RESOURCE_EXHAUSTED (code 429): TPM quota exhausted."
+        c.execute("insert into steps values (1, 17, 3, ?, NULL)", (quota,))
+        c.commit()
+        c.close()
+        check("agy db exists: can_fork", agy.can_fork("src-1"), True)
+        forked = agy.fork_conversation("src-1")
+        check("fork_conversation returns a new UUID and writes its db",
+              (bool(forked), forked != "src-1", (root / f"{forked}.db").is_file()), (True, True, True))
+        fc = sqlite3.connect(root / f"{forked}.db")
+        meta = fc.execute("select trajectory_id, cascade_id, title from trajectory_meta").fetchone()
+        fc.execute("update trajectory_meta set title = 'changed'")
+        fc.commit()
+        fc.close()
+        sc = sqlite3.connect(root / "src-1.db")
+        src_meta = sc.execute("select trajectory_id, cascade_id, title from trajectory_meta").fetchone()
+        sc.close()
+        check("trajectory_meta has the new UUID and the source db is untouched",
+              (meta, src_meta), ((forked, forked, "seed"), ("src-1", "src-1", "seed")))
+        check("usage_of and inturn_quota work on the forked db",
+              (agy.usage_of(forked), agy.inturn_quota(forked)),
+              ({"input": 250, "output": 30, "thinking": 8, "cache_read": 100}, (1, 1)))
+        check("agy fork_turn resumes the forked id", agy.fork_turn("go", forked, 60)[-2:], ["--conversation", forked])
+        (root / "corrupt.db").write_bytes(b"not a sqlite database")
+        check("corrupt db returns None and leaves no temp file",
+              (agy.fork_conversation("corrupt"), list(root.glob(".*.tmp"))), (None, []))
+    finally:
+        if old is None:
+            os.environ.pop("AGY_CONVERSATIONS_DIR", None)
+        else:
+            os.environ["AGY_CONVERSATIONS_DIR"] = old
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

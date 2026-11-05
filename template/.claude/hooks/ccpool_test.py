@@ -6415,6 +6415,166 @@ def test_end_to_end_with_fake_github() -> None:
         print(out[-3000:])
 
 
+def test_session_forking_seeds_and_fans_out() -> None:
+    """[pool] fork: the first worker to open a PR in an area (or in the repo) saves a seed
+    conversation; parallel area slots, lent workers, no-area workers and busy authors fork from it."""
+    restore = with_env({"POOL_FORK": "", "CCROLE_WORKER_CLI": "claude"})
+    try:
+        check("POOL_FORK defaults to on", ccpool.Config.from_env().fork, True)
+        os.environ["POOL_FORK"] = "0"
+        check("POOL_FORK=0 turns it off", ccpool.Config.from_env().fork, False)
+        os.environ.pop("POOL_FORK", None)
+
+        h = Rig(state([iss(n, ["stage:triage", "P1"]) for n in (1, 2, 3, 4, 5, 6)]),
+                areas=AREAS, fork=True, area_conversations=3, area_second_at=3, area_lend_at=4, area_refresh=2)
+        h.pool.track_areas = lambda st: None
+        b = h.pool.book
+        b.issue_area = {1: "cards", 2: "cards", 3: "cards", 4: "cards", 5: "cards", 6: ""}
+        b.issue_files = {}
+
+        # Before a seed exists, only slot 0 opens for cards when fewer than area_second_at wait.
+        w1 = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,),
+                                                {"area": "cards", "slot": 0}), 1)
+        w1.dir.mkdir(parents=True)
+        (w1.dir / "session.jsonl").write_text("")
+        (w1.dir / "claim.out").write_text("claimed\n")
+        w1.conversation = lambda: "c-seed-1"
+        w1.left_pr = False
+        h.pool.record_conv(w1)
+        check("a worker that ended without a PR saves no seed", (b.area_seeds, b.repo_seed), ({}, {}))
+
+        w1.left_pr = True
+        h.pool.record_conv(w1)
+        check("the first worker to open a PR saves the area seed and the repo seed",
+              (b.area_seeds["cards"]["conv"], b.area_seeds["cards"]["uses"], b.repo_seed["conv"]),
+              ("c-seed-1", 0, "c-seed-1"))
+        again = ccpool.Pool(h.pool.cfg, fetcher=state, spawn=False)
+        check("seeds persist in owners.json across restarts",
+              (again.book.area_seeds["cards"]["conv"], again.book.repo_seed["conv"]), ("c-seed-1", "c-seed-1"))
+
+        # With the seed saved, all 3 area slots open in parallel without waiting for k * area_second_at,
+        # the 4th cards issue overflows (lent) with the same fork, and the no-area issue forks repo_seed.
+        h.st = state([iss(n, ["stage:triage", "P1"]) for n in (2, 3, 4, 5, 6)])
+        started = {u.number: u for u in h.step()}
+        check("parallel area slots, lent overflow and no-area worker all fork from the seed",
+              {n: (u.info.get("area"), u.info.get("slot"), u.info.get("lent"), u.info.get("fork"), u.info.get("resume"))
+               for n, u in started.items()},
+              {2: ("cards", 0, None, "c-seed-1", None),
+               3: ("cards", 1, None, "c-seed-1", None),
+               4: ("cards", 2, None, "c-seed-1", None),
+               5: (None, None, "cards", "c-seed-1", None),
+               6: (None, None, None, "c-seed-1", None)})
+        check("each forked worker counts toward the seed's uses", b.area_seeds["cards"]["uses"], 4)
+        area_p = ccpool.area_text(started[2], h.pool.cfg)
+        check("area prompt explains the session was forked from the area seed",
+              "forked you from the area's seed conversation" in area_p, True)
+
+        # Once uses >= area_refresh (2), the next wave starts one fresh refresh session with notes,
+        # while the remaining slots continue forking from the seed until the refresh session lands a PR.
+        for u in started.values():
+            h.finish(u.key)
+        h.st = state([iss(10, ["stage:triage", "P1"]), iss(11, ["stage:triage", "P1"])])
+        b.issue_area = {10: "cards", 11: "cards"}
+        wave2 = {u.number: u for u in h.step()}
+        check("after area_refresh uses, one slot runs a fresh refresh session while others still fork",
+              {n: (u.info.get("slot"), u.info.get("refresh"), u.info.get("fork")) for n, u in wave2.items()},
+              {10: (0, True, None), 11: (1, False, "c-seed-1")})
+        w10 = next(w for w in h.pool.sessions.values() if w.unit.number == 10)
+        w10.dir.mkdir(parents=True, exist_ok=True)
+        (w10.dir / "session.jsonl").write_text("")
+        (w10.dir / "claim.out").write_text("claimed\n")
+        w10.conversation = lambda: "c-seed-2"
+        w10.left_pr = True
+        h.pool.record_conv(w10)
+        check("when the refresh worker opens a PR, its conversation becomes the new seed with uses reset",
+              (b.area_seeds["cards"]["conv"], b.area_seeds["cards"]["uses"]), ("c-seed-2", 0))
+
+        # Busy-author forking for resolve and guard-fix.
+        conflicting = state([iss(20, ["stage:pr", "P1"]), iss(21, ["stage:pr", "P1"])],
+                            prs=[pr(40, 20, head="c" * 40, mergeable="CONFLICTING"),
+                                 pr(41, 21, head="d" * 40, mergeable="MERGEABLE")])
+        hb = Rig(conflicting, fork=True, author_resolve=True, author_guard=True,
+                 timeouts={"worker": "60m", "merger": "45m", "tester": "60m"})
+        hb.pool.book.convs[20] = {"conv": "s-busy-20", "cli": "claude", "area": "cards", "slot": 0, "files": ["src/a.py"]}
+        hb.pool.book.convs[21] = {"conv": "s-busy-21", "cli": "claude", "area": "cards", "slot": 1, "files": ["src/b.py"]}
+        hb.pool.book.running["wrk:99"] = ccpool.Unit("worker", "implement", "wrk:99@x", "wrk:99", 99, (4,),
+                                                     {"area": "cards", "slot": 0, "resume": "s-busy-20"})
+        hb.pool.book.running["wrk:98"] = ccpool.Unit("worker", "implement", "wrk:98@x", "wrk:98", 98, (4,),
+                                                     {"area": "cards", "slot": 1, "resume": "s-busy-21"})
+        hb.pool.book.rebase_failed[40] = "c" * 40
+        hb.pool.book.guard_fix[41] = {"head": "d" * 40, "issue": 21, "failing": ["tests/accept/test_accept_1.py::t"],
+                                      "out": "FAILED", "base": "a" * 40}
+        due = {u.number: u for u in hb.step()}
+        check("busy author with fork=True: resolve and guard-fix fork the author conversation instead of merger/wait",
+              {n: (u.role, u.kind, u.info.get("resume"), u.info.get("fork"), u.info.get("area"), u.info.get("slot"))
+               for n, u in due.items()},
+              {40: ("worker", "resolve", None, "s-busy-20", None, None),
+               41: ("worker", "guard-fix", None, "s-busy-21", None, None)})
+    finally:
+        restore()
+
+    # Agy SQLite fork in Session.session(): dedicated seed copy, usage_base subtraction, and prompt note.
+    import sqlite3
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-agy-fork-"))
+    conv_dir = d / "convs"
+    conv_dir.mkdir()
+    restore_agy = with_env({"AGY_CONVERSATIONS_DIR": str(conv_dir), "CCROLE_WORKER_CLI": "agy"})
+    try:
+        c = sqlite3.connect(conv_dir / "agy-parent.db")
+        c.execute("create table trajectory_meta (trajectory_id text, cascade_id text)")
+        c.execute("insert into trajectory_meta values ('agy-parent', 'agy-parent')")
+        c.execute("create table gen_metadata (idx integer primary key, data blob, size integer)")
+        # 500 input, 40 output in parent seed.
+        import agent_cli_test
+        usage_pb = agent_cli_test._pb([(1, 999), (2, 500), (3, 40), (5, 200), (9, 10), (10, 1)])
+        c.execute("insert into gen_metadata values (0, ?, 0)",
+                  (agent_cli_test._pb([(1, agent_cli_test._pb([(3, 999), (4, usage_pb)]))]),))
+        c.commit()
+        c.close()
+
+        agy_wrap = d / "ccrole"
+        agy_wrap.write_text(FAKE_AGY_WRAP)
+        agy_wrap.chmod(0o755)
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", ccrole=str(agy_wrap), render="cat", fork=True,
+                                         timeouts={"worker": "60m", "merger": "45m"}, worker_wrap_s=0, stall_s=0),
+                           fetcher=state, spawn=False)
+        # Seed snapshot on agy creates a dedicated copy so later resumes of the issue do not mutate the seed.
+        sw = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,), {"area": "live", "slot": 0}), 1)
+        sw.dir.mkdir(parents=True)
+        (sw.dir / "session.jsonl").write_text("")
+        (sw.dir / "claim.out").write_text("claimed\n")
+        sw.conversation = lambda: "agy-parent"
+        sw.left_pr = True
+        pool.record_conv(sw)
+        seed_id = pool.book.area_seeds["live"]["conv"]
+        check("agy seed snapshot is a dedicated copy of the worker's db",
+              (bool(seed_id), seed_id != "agy-parent", (conv_dir / f"{seed_id}.db").is_file()), (True, True, True))
+
+        # Running a forked session copies the seed DB to a fresh conversation ID and subtracts parent usage.
+        fw = ccpool.Session(pool, ccpool.Unit("worker", "resolve", "own:40@x", "mrg:40", 40, (0,),
+                                              {"issue": 2, "fork": seed_id, "timeout": "45m"}), 2)
+        fw.dir.mkdir(parents=True)
+        rc, _, _ = fw.session("resolve PR 40", dict(os.environ, CCROLE_WORKER_CLI="agy"))
+        calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+        forked_id = fw.forked_conv
+        check("forked agy session launches with --conversation <new_forked_id>",
+              (rc, bool(forked_id), forked_id not in ("agy-parent", seed_id), calls[0][-2:]),
+              (0, True, True, ["--conversation", forked_id]))
+        # Simulate the child adding 120 input and 15 output tokens to its forked DB.
+        fc = sqlite3.connect(conv_dir / f"{forked_id}.db")
+        child_pb = agent_cli_test._pb([(1, 999), (2, 120), (3, 15), (5, 50), (9, 5), (10, 1)])
+        fc.execute("insert into gen_metadata values (1, ?, 0)",
+                   (agent_cli_test._pb([(1, agent_cli_test._pb([(3, 999), (4, child_pb)]))]),))
+        fc.commit()
+        fc.close()
+        check("session_usage subtracts parent seed tokens and reports only the child's delta",
+              fw.session_usage(),
+              {"input": 120, "output": 15, "thinking": 5, "cache_read": 50, "turns": 1, "cost_usd": None})
+    finally:
+        restore_agy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

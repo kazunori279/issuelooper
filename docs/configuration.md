@@ -182,6 +182,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] train_wait_s` | `POOL_TRAIN_WAIT_S` | `0` | Seconds to wait after the first queued PR for more PRs to join the train (`0` starts immediately). |
 | `[pool] tester_port_base` | `TST_PORT` | `8021`–`8099` (by path hash) | First port assigned to tester sessions (each tester steps by `100`). |
 | `[pool] run_dir` | `ISSUELOOPER_RUN` | `".issuelooper/run"` | Directory for supervisor logs, PID files, and session logs (must be git-ignored). |
+| `[pool] fork` | `POOL_FORK` | `true` | Save the first PR-opening worker conversation per area (and repo-wide) as a seed checkpoint and fork parallel workers, overflow workers, and busy authors from it. |
 | `[pool] author_resolve` | `POOL_AUTHOR_RESOLVE` | `false` | Resume the PR author's conversation to resolve rebase conflicts or red rebases before falling back to a merger. |
 | `[pool] author_resolve_max` | `POOL_AUTHOR_RESOLVE_MAX` | `2` | Maximum author conflict-resolution attempts before handing to a merger. |
 | `[pool] author_guard` | `POOL_AUTHOR_GUARD` | `false` | Resume the PR author's conversation when a merge-train acceptance guard fails because of that PR. |

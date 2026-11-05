@@ -494,6 +494,7 @@ class Config:
     # by its author's conversation, resumed, instead of a merger; the merger stays for a PR
     # with no recorded conversation, a CLI that cannot resume it, or after author_resolve_max
     # author sessions without a merge.
+    fork: bool = False
     author_resolve: bool = False
     author_resolve_max: int = 2
     # When the train's acceptance guard fails because of a PR (main alone passes those
@@ -721,6 +722,7 @@ class Config:
             orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
             unclaimable_retry_s=float(e("POOL_UNCLAIMABLE_RETRY_S", "") or 240),
             merger_max=env_int("POOL_MERGER_MAX", 3),
+            fork=env_flag("POOL_FORK", True),
             author_resolve=env_flag("POOL_AUTHOR_RESOLVE"),
             author_resolve_max=env_int("POOL_AUTHOR_RESOLVE_MAX", 2),
             author_guard=env_flag("POOL_AUTHOR_GUARD"),
@@ -1117,6 +1119,31 @@ def conv_resumable(rec: dict | None, role: str = "worker") -> str:
     return rec["conv"] if rec.get("cli") == cli.name and cli.can_resume(rec["conv"]) else ""
 
 
+def conv_forkable(rec: dict | None, role: str = "worker") -> str:
+    """The conversation id in a record, when the role's CLI is the one that ran it and can
+    fork a new session from it now; else ''."""
+    if not rec or not rec.get("conv"):
+        return ""
+    try:
+        cli = agent_cli.for_role(role)
+    except ValueError:
+        return ""
+    return rec["conv"] if rec.get("cli") == cli.name and cli.can_fork(rec["conv"]) else ""
+
+
+def author_conv_or_fork(rec: dict | None, busy: set, cfg: "Config") -> dict:
+    """Resume the author's conversation when it is free; when it is busy and POOL_FORK is
+    on, fork from it in a conversation of its own (holding no area slot)."""
+    conv = conv_resumable(rec)
+    if conv and not {conv, ((rec or {}).get("area"), (rec or {}).get("slot"))} & busy:
+        return {"resume": conv, "cli": (rec or {}).get("cli"), "area": (rec or {}).get("area"),
+                "slot": (rec or {}).get("slot")}
+    fconv = conv_forkable(rec) if cfg.fork else ""
+    if fconv:
+        return {"resume": None, "fork": fconv, "cli": (rec or {}).get("cli"), "area": None, "slot": None}
+    return {}
+
+
 def holding(book: "Book", cfg: "Config", now: float, units) -> list:
     """The units that hold a conversation, an area slot or a hot file: the running ones and
     the planned ones that are due (a planned unit whose key is done holds nothing)."""
@@ -1211,6 +1238,8 @@ class Book:
         self.issue_files: dict[int, list] = {}
         self.area_cache: dict[int, tuple] = {}
         self.area_slots: dict[str, list] = {}
+        self.area_seeds: dict[str, dict] = {}
+        self.repo_seed: dict = {}
         # Waits for an area ([areas]): issue -> {"why": "hot" | "area", "area", "files"} as the
         # last plan found them; issue -> (when it started waiting, that record); area ->
         # seconds waited, by why ("<area>:hot", "<area>:area"; "-:hot" for no area).
@@ -1370,8 +1399,9 @@ def plan(
         n = i["number"]
         free = (cfg.global_cap - sum(1 for u in book.running.values() if u.role != "auto")
                 - sum(1 for u in units if u.role != "auto" and not book.why_not(u, cfg, now))) if cfg.global_cap else 0
-        where = place_in_area(n, book, cfg, holding(book, cfg, now, units), queue, now=now, pr_of=pr_of,
-                              free=free) if cfg.areas else {}
+        where = (place_in_area(n, book, cfg, holding(book, cfg, now, units), queue, now=now, pr_of=pr_of,
+                               free=free) if cfg.areas else
+                 ({"fork": conv_forkable(book.repo_seed)} if cfg.fork and conv_forkable(book.repo_seed) else {}))
         if where is None:
             continue  # its area's conversations are busy, or its hot file is being worked on
         info = {"title": i["title"], **where}
@@ -1382,13 +1412,19 @@ def plan(
             conv = conv_resumable(book.convs.get(n))
             if conv and conv not in busy_convs(holding(book, cfg, now, units)):
                 info["resume"] = conv
+                info.pop("fork", None)
+            elif cfg.fork and conv_forkable(book.convs.get(n)):
+                info["fork"] = conv_forkable(book.convs.get(n))
         if cfg.hub_at and deps[n] >= cfg.hub_at:
             info["hub"] = deps[n]
             info["timeout"] = f"{int(seconds(cfg.timeouts.get('worker') or '45m') * cfg.hub_timeout)}s"
             conv = conv_resumable(book.convs.get(n))
-            if not info.get("resume") and not info.get("area") and conv and conv not in busy_convs(
-                    holding(book, cfg, now, units)):
-                info["resume"] = conv  # its last worker knows what failed
+            if not info.get("resume") and not info.get("area"):
+                if conv and conv not in busy_convs(holding(book, cfg, now, units)):
+                    info["resume"] = conv  # its last worker knows what failed
+                    info.pop("fork", None)
+                elif cfg.fork and conv_forkable(book.convs.get(n)):
+                    info["fork"] = conv_forkable(book.convs.get(n))
         units.append(Unit("worker", "implement", f"wrk:{n}@{i['updated']}", f"wrk:{n}", n, (4, *claim_rank(i)), info))
 
     open_by = {i["number"]: i for i in st["open"]}
@@ -1491,16 +1527,17 @@ def plan(
             gf = None
         if gf:
             rec = book.convs.get(n) or {}
-            conv = conv_resumable(rec)
-            if book.guard_runs[pr["number"]] >= cfg.author_guard_max or not conv:
+            ac = author_conv_or_fork(rec, busy_convs(holding(book, cfg, now, units)), cfg)
+            if book.guard_runs[pr["number"]] >= cfg.author_guard_max or not (
+                conv_resumable(rec) or (cfg.fork and conv_forkable(rec))
+            ):
                 units.append(Unit("auto", "guardback", f"guardback:{pr['number']}@{pr['head'][:12]}", f"mrg:{pr['number']}",
                                   pr["number"], (0, pr["number"]), {**info, **gf}))
-            elif not {conv, (rec.get("area"), rec.get("slot"))} & busy_convs(holding(book, cfg, now, units)):
+            elif ac:
                 units.append(Unit("worker", "guard-fix",
                                   f"gfx:{pr['number']}@{pr['head'][:12]}#{book.guard_runs[pr['number']]}",
                                   f"mrg:{pr['number']}", pr["number"], (0, pr["number"]),
-                                  {**info, **gf, "resume": conv, "cli": rec.get("cli"), "area": rec.get("area"),
-                                   "slot": rec.get("slot"), "timeout": cfg.timeouts.get("worker")}))
+                                  {**info, **gf, **ac, "timeout": cfg.timeouts.get("worker")}))
             continue
         state = pr["mergeable"]
         if state == "UNKNOWN":
@@ -1571,20 +1608,17 @@ def plan(
                 )
             )
         elif (cfg.author_resolve and book.author_runs[pr["number"]] < cfg.author_resolve_max
-              and conv_resumable(book.convs.get(n))
-              and not {conv_resumable(book.convs.get(n)),
-                       ((book.convs.get(n) or {}).get("area"), (book.convs.get(n) or {}).get("slot"))}
-              & busy_convs(holding(book, cfg, now, units))):
+              and author_conv_or_fork(book.convs.get(n), busy_convs(holding(book, cfg, now, units)), cfg)):
             # The author knows the change: its conversation is resumed with the conflict
-            # (the worker owns its issue end to end). A merger re-reads the issue, the PR and
-            # main from scratch.
+            # (or forked when busy and POOL_FORK is on). A merger re-reads the issue, the PR
+            # and main from scratch.
             rec = book.convs[n]
+            ac = author_conv_or_fork(rec, busy_convs(holding(book, cfg, now, units)), cfg)
             hard = book.hard_conflicts.get(pr["number"]) or []
             units.append(
                 Unit("worker", "resolve", f"own:{pr['number']}@{pr['head'][:12]}@{main[:12]}", f"mrg:{pr['number']}",
                      pr["number"], (0, pr["number"]),
-                     {**info, "resume": rec["conv"], "cli": rec.get("cli"), "area": rec.get("area"),
-                      "slot": rec.get("slot"), "files": rec.get("files") or [],
+                     {**info, **ac, "files": rec.get("files") or [],
                       "conflicts": sorted(hard[-1][1]) if hard else [],
                       "hot": [f for f in rec.get("files") or [] if config.is_hot(f, cfg.areas)] if cfg.area_hot_lock else [],
                       "red": book.rebase_failed.get(pr["number"]) == pr["head"],
@@ -1724,16 +1758,33 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
         book.waits_now[n] = {"why": "hot", "area": area, "files": sorted(held)}
         return None
     if not area:
-        return {"hot": sorted(hot)} if hot else {}
+        out = {"hot": sorted(hot)} if hot else {}
+        if cfg.fork and conv_forkable(book.repo_seed):
+            out["fork"] = conv_forkable(book.repo_seed)
+        return out
     mine = [u for u in active if u.info.get("area") == area]
     busy = {u.info.get("slot") for u in mine} | {s for x in busy_convs(active) if isinstance(x, tuple) and x[0] == area
                                                 for s in [x[1]]}
     slots = book.area_slots.get(area) or []
+    seed_rec = book.area_seeds.get(area) or {}
+    seed_conv = ((conv_forkable(seed_rec)
+                  or next((conv_forkable(s) for s in slots if conv_forkable(s)), "")
+                  or conv_forkable(book.repo_seed)) if cfg.fork else "")
+    seed_refresh = bool(conv_forkable(seed_rec)) and (
+        (cfg.area_refresh > 0 and seed_rec.get("uses", 0) >= cfg.area_refresh)
+        or (cfg.area_refresh_tokens and seed_rec.get("tokens", 0) >= cfg.area_refresh_tokens)
+    )
     for k in range(max(1, cfg.area_conversations)):
         if k in busy:
             continue
-        if k and queue[area] < k * max(1, cfg.area_second_at):
+        if k and not (cfg.fork and seed_conv) and queue[area] < k * max(1, cfg.area_second_at):
             break
+        if cfg.fork and seed_conv:
+            if seed_refresh and not any(u.info.get("refresh") for u in mine):
+                return {"area": area, "slot": k, "resume": None, "files": sorted(files), "hot": sorted(hot),
+                        "notes": area_notes(area, k), "fresh": True, "refresh": True}
+            return {"area": area, "slot": k, "resume": None, "fork": seed_conv, "files": sorted(files),
+                    "hot": sorted(hot), "notes": area_notes(area, k), "fresh": False, "refresh": False}
         slot = slots[k] if k < len(slots) else {}
         refresh = bool(slot) and (slot.get("issues", 0) >= cfg.area_refresh > 0 or
                                   (cfg.area_refresh_tokens and slot.get("tokens", 0) >= cfg.area_refresh_tokens))
@@ -1743,7 +1794,10 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
         return {"area": area, "slot": k, "resume": conv or None, "files": sorted(files), "hot": sorted(hot),
                 "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh}
     if (cfg.area_lend_at and queue[area] >= cfg.area_lend_at) or (cfg.area_lend_free and free > 0):
-        return {"lent": area, "files": sorted(files), "hot": sorted(hot)}
+        out = {"lent": area, "files": sorted(files), "hot": sorted(hot)}
+        if cfg.fork and seed_conv:
+            out["fork"] = seed_conv
+        return out
     book.waits_now[n] = {"why": "area", "area": area, "files": []}
     return None
 
@@ -2107,7 +2161,10 @@ def area_text(u: Unit, cfg: "Config") -> str:
     a = next((x for x in cfg.areas if x["name"] == area), {"paths": []})
     notes = u.info.get("notes") or area_notes(area, u.info.get("slot") or 0)
     text = (f"\nYou are the conversation for the app's `{area}` area ({', '.join(a['paths'])}). "
-            + ("The supervisor resumed you with its next issue: you keep what you learned on the earlier ones. "
+            + ("The supervisor forked you from the area's seed conversation: you keep what it learned about "
+               "the repository and this area. Your earlier worktree is gone; start a new one at the path below.\n"
+               if u.info.get("fork") else
+               "The supervisor resumed you with its next issue: you keep what you learned on the earlier ones. "
                "Your earlier worktree is gone; start a new one at the path below.\n"
                if not u.info.get("fresh") else "This is a fresh conversation for the area.\n"))
     if u.info.get("fresh"):
@@ -2850,6 +2907,9 @@ class Session(threading.Thread):
         self.quota_time = 0.0  # seconds its clocks stood still for quota (CLI retries and pool pauses)
         self.quota_base = -1  # a resumed conversation's newest quota step before this session
         self.usage_base: dict | None = None  # and its recorded usage (agy) before this session
+        self.forked_from: str | None = None
+        self.forked_conv: str | None = None
+        self.fork_counted = False
         self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
         self._stream: dict | None = None  # events(): what of session.jsonl was read and parsed
         self._stream_lock = threading.Lock()  # events() runs in the session's thread and the pool's
@@ -2909,9 +2969,10 @@ class Session(threading.Thread):
         # supervisor enforces the rest.
         # A unit that continues a recorded conversation (the issue's author) resumes it.
         first = self.unit.info.get("resume")
-        cmd = base + (cli.resume(prompt, first, hard - start + cfg.retry_pause_max_s) if first
-                      else cli.first_turn(prompt, hard - start + cfg.retry_pause_max_s))
+        fork_src = self.unit.info.get("fork") if not first else None
+        limit = hard - start + cfg.retry_pause_max_s
         if first:
+            cmd = base + cli.resume(prompt, first, limit)
             with open(self.dir / "resumes.log", "a") as rl:
                 rl.write(f"{time.time():.0f} started in conversation {first} ({self.unit.kind})\n")
             # What the conversation already holds: this session's usage and quota retries are
@@ -2921,6 +2982,30 @@ class Session(threading.Thread):
             self.quota_base = self.quota_idx
             if hasattr(cli, "recorded_usage"):
                 self.usage_base = cli.recorded_usage(first)
+        elif fork_src and cli.name == "agy":
+            forked = cli.fork_conversation(fork_src)
+            if forked:
+                self.forked_from = fork_src
+                self.forked_conv = forked
+                _, self.quota_idx = cli.inturn_quota(forked, -1)
+                self.quota_base = self.quota_idx
+                self.usage_base = cli.usage_of(forked)
+                cmd = base + cli.fork_turn(prompt, forked, limit)
+                with open(self.dir / "resumes.log", "a") as rl:
+                    rl.write(f"{time.time():.0f} forked conversation {forked} from {fork_src} ({self.unit.kind})\n")
+                self.pool.log("session_forked", session=self.seq, role=role, unit=self.unit.key,
+                              source=fork_src, conversation=forked)
+            else:
+                cmd = base + cli.first_turn(prompt, limit)
+        elif fork_src and cli.can_fork(fork_src):
+            self.forked_from = fork_src
+            cmd = base + cli.fork_turn(prompt, fork_src, limit)
+            with open(self.dir / "resumes.log", "a") as rl:
+                rl.write(f"{time.time():.0f} forked from conversation {fork_src} ({self.unit.kind})\n")
+            self.pool.log("session_forked", session=self.seq, role=role, unit=self.unit.key,
+                          source=fork_src, conversation="")
+        else:
+            cmd = base + cli.first_turn(prompt, limit)
         with open(self.dir / "wrapper.err", "w") as err:
             # Under the pool's lock, after a look at stopping: stop() either sees this
             # process and kills it, or it is never started. A worker still claiming its
@@ -3263,7 +3348,7 @@ class Session(threading.Thread):
 
     def conversation(self):
         """The session (conversation) id in this session's stream, or None."""
-        return self.cli.session_id(self.events())
+        return self.cli.session_id(self.events()) or self.forked_conv
 
     def stall_after(self, cfg: "Config") -> float:
         """Seconds of model silence that count as a stall for this session's model:
@@ -3536,6 +3621,13 @@ class Session(threading.Thread):
             if u.info.get("area") or u.info.get("hot"):
                 pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
                 prompt += "\n" + area_text(u, cfg)
+            if u.info.get("fork"):
+                prompt += (
+                    "\nThis session is forked from an earlier worker conversation that already explored this "
+                    f"repository, {PROJECT} and spec/. Reuse what is already in your conversation history "
+                    "instead of re-reading unchanged files; check your worktree with git status and go straight "
+                    f"to reproducing #{n} with a failing test.\n"
+                )
             if u.info.get("hub"):
                 prompt += (f"\n#{n} is a hub: {u.info['hub']} open issues wait on it, so you have {self.timeout()} "
                            "instead of the usual limit."
@@ -4883,7 +4975,19 @@ class Pool:
             if u.kind in ("accept", "own-accept"):
                 for x in u.info["issues"]:
                     b.accept_held[x["n"]] = u.key
+            fork_counted = False
+            if u.kind == "implement" and u.info.get("fork"):
+                fconv = u.info["fork"]
+                area_k = u.info.get("area") or u.info.get("lent") or ""
+                aseed = b.area_seeds.get(area_k)
+                if aseed and aseed.get("conv") == fconv:
+                    aseed["uses"] = aseed.get("uses", 0) + 1
+                    fork_counted = True
+                elif b.repo_seed.get("conv") == fconv:
+                    b.repo_seed["uses"] = b.repo_seed.get("uses", 0) + 1
+                    fork_counted = True
             w = Session(self, u, self.seq)
+            w.fork_counted = fork_counted
             self.sessions[u.family] = w
         self.log("start", session=self.seq, role=u.role, unit=u.key)
         if self.spawn_workers:
@@ -5079,28 +5183,60 @@ class Pool:
             # own: it holds no area slot. Inheriting the last record's slot made the author look
             # busy whenever another issue used that slot, and run 14's PRs 114 and 126 went to
             # a merger seconds after their authors ended.
-            if u.kind == "implement":
+            if u.kind == "implement" or u.info.get("fork"):
                 area, slot = u.info.get("area"), u.info.get("slot")
             else:
                 area, slot = u.info.get("area", prev.get("area")), u.info.get("slot", prev.get("slot"))
             self.book.convs[n] = {"conv": conv, "cli": w.cli.name, "t": round(self.clock(), 1), "seq": w.seq,
                                   "area": area, "slot": slot, "files": w.branch_files or prev.get("files") or []}
             area, k = u.info.get("area"), u.info.get("slot")
-            if u.kind == "implement" and area and k is not None and (w.dir / "claim.out").exists():
-                slots = self.book.area_slots.setdefault(area, [])
-                while len(slots) <= k:
-                    slots.append({})
-                old = slots[k]
-                resumed = bool(u.info.get("resume")) and old.get("conv") == u.info.get("resume")
-                slots[k] = {"conv": conv, "cli": w.cli.name, "issues": (old.get("issues", 0) if resumed else 0) + 1,
-                            "notes": u.info.get("notes") or area_notes(area, k), "t": round(self.clock(), 1),
-                            "tokens": w.cli.context_tokens(w.events())}
-                self.log("area_conversation", area=area, slot=k, conversation=conv, issues=slots[k]["issues"],
-                         tokens=slots[k]["tokens"], resumed=resumed)
+            claimed = (w.dir / "claim.out").exists()
+            if u.kind == "implement" and claimed:
+                tokens = w.cli.context_tokens(w.events())
+                if area and k is not None:
+                    slots = self.book.area_slots.setdefault(area, [])
+                    while len(slots) <= k:
+                        slots.append({})
+                    old = slots[k]
+                    resumed = bool(u.info.get("resume")) and old.get("conv") == u.info.get("resume")
+                    slots[k] = {"conv": conv, "cli": w.cli.name, "issues": (old.get("issues", 0) if resumed else 0) + 1,
+                                "notes": u.info.get("notes") or area_notes(area, k), "t": round(self.clock(), 1),
+                                "tokens": tokens}
+                    self.log("area_conversation", area=area, slot=k, conversation=conv, issues=slots[k]["issues"],
+                             tokens=tokens, resumed=resumed)
+                if u.info.get("fork") and not getattr(w, "fork_counted", False):
+                    fconv = u.info["fork"]
+                    area_k = area or u.info.get("lent") or ""
+                    aseed = self.book.area_seeds.get(area_k)
+                    if aseed and aseed.get("conv") == fconv:
+                        aseed["uses"] = aseed.get("uses", 0) + 1
+                    elif self.book.repo_seed.get("conv") == fconv:
+                        self.book.repo_seed["uses"] = self.book.repo_seed.get("uses", 0) + 1
+                    w.fork_counted = True
+                if w.left_pr and self.cfg.fork and not (self.cfg.area_refresh_tokens and tokens >= self.cfg.area_refresh_tokens):
+                    if area:
+                        cur = self.book.area_seeds.get(area) or {}
+                        if not conv_forkable(cur) or (
+                            not u.info.get("fork") and (
+                                (self.cfg.area_refresh > 0 and cur.get("uses", 0) >= self.cfg.area_refresh)
+                                or (self.cfg.area_refresh_tokens and cur.get("tokens", 0) >= self.cfg.area_refresh_tokens)
+                            )
+                        ):
+                            seed_id = (w.cli.fork_conversation(conv) if w.cli.name == "agy" else None) or conv
+                            self.book.area_seeds[area] = {"conv": seed_id, "cli": w.cli.name, "uses": 0,
+                                                          "tokens": tokens, "t": round(self.clock(), 1), "issue": n}
+                            self.log("seed_saved", scope=area, conversation=seed_id, from_conversation=conv,
+                                     issue=n, tokens=tokens)
+                    if not conv_forkable(self.book.repo_seed):
+                        seed_id = (w.cli.fork_conversation(conv) if w.cli.name == "agy" else None) or conv
+                        self.book.repo_seed = {"conv": seed_id, "cli": w.cli.name, "uses": 0,
+                                               "tokens": tokens, "t": round(self.clock(), 1), "issue": n}
+                        self.log("seed_saved", scope="repo", conversation=seed_id, from_conversation=conv,
+                                 issue=n, tokens=tokens)
         self.save_owners()
 
     OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
-             "area_wait_s")
+             "area_seeds", "repo_seed", "area_wait_s")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""

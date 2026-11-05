@@ -229,6 +229,9 @@ train_wait_s = 0             # POOL_TRAIN_WAIT_S: wait up to this long after the
                              # 0 = a train starts as soon as the main lane is free
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
+fork = true                  # POOL_FORK: the first worker to open a PR in an area (or in the repository with no area)
+                             # saves a seed conversation checkpoint; later workers, parallel area slots, overflow
+                             # workers and busy authors fork from it (agy SQLite copy, claude --fork-session)
 author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after the supervisor's rebase (or whose rebase
                              # is red) is resolved by its author's conversation, resumed (agy --conversation, claude
                              # --resume), instead of a merger session; the merger stays the fallback (no recorded

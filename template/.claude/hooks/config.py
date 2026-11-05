@@ -127,6 +127,7 @@ KEYS = {
     ("pool", "tester_port_base"): "TST_PORT",
     ("pool", "run_dir"): "ISSUELOOPER_RUN",
     ("pool", "prune_other_roots"): "POOL_PRUNE_OTHER_ROOTS",
+    ("pool", "fork"): "POOL_FORK",
     ("pool", "author_resolve"): "POOL_AUTHOR_RESOLVE",
     ("pool", "hub_at"): "POOL_HUB_AT",
     ("pool", "hub_timeout"): "POOL_HUB_TIMEOUT",

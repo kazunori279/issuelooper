@@ -36,6 +36,7 @@ import re
 import sqlite3
 import sys
 import time
+import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT = "agy"
@@ -112,6 +113,21 @@ class Cli:
     def can_resume(self, session_id: str | None) -> bool:
         """Whether a later process can resume this conversation (its record is there)."""
         return bool(session_id)
+
+    def can_fork(self, session_id: str | None) -> bool:
+        """Whether a new session can fork from this conversation's record without locking it."""
+        return False
+
+    def fork_conversation(self, session_id: str) -> str | None:
+        """Copy this conversation's record under a new id and return it (None when the CLI
+        forks by flag on the turn instead, or when the copy fails)."""
+        return None
+
+    def fork_turn(self, prompt: str, session_id: str, timeout_s: float) -> list[str]:
+        raise NotImplementedError
+
+    def usage_of(self, session_id: str | None) -> dict | None:
+        return None
 
     def inturn_quota(self, session_id: str | None, after: int = -1) -> tuple[int, int]:
         """(quota errors the CLI retried inside the turn, in steps after index `after`;
@@ -237,9 +253,53 @@ class Agy(Cli):
     def db(cls, conv: str | None) -> pathlib.Path | None:
         return cls.conversations() / f"{conv}.db" if conv else None
 
+    _db = db
+
     def can_resume(self, session_id):
         db = self.db(session_id)
         return bool(db and db.exists())
+
+    def can_fork(self, session_id):
+        return self.can_resume(session_id)
+
+    def fork_conversation(self, session_id: str) -> str | None:
+        src = self._db(session_id)
+        if not src or not src.is_file():
+            return None
+        new_id = str(uuid.uuid4())
+        dst = self.conversations() / f"{new_id}.db"
+        tmp = self.conversations() / f".{new_id}.db.tmp"
+        src_con = dst_con = None
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=5)
+            dst_con = sqlite3.connect(tmp, timeout=5)
+            src_con.backup(dst_con)
+            has_meta = dst_con.execute(
+                "select 1 from sqlite_master where type = 'table' and name = 'trajectory_meta'"
+            ).fetchone()
+            if has_meta:
+                dst_con.execute(
+                    "update trajectory_meta set trajectory_id = ?, cascade_id = ?",
+                    (new_id, new_id),
+                )
+            dst_con.commit()
+            dst_con.close()
+            dst_con = None
+            src_con.close()
+            src_con = None
+            tmp.replace(dst)
+            return new_id
+        except (OSError, sqlite3.Error):
+            for c in (dst_con, src_con):
+                if c is not None:
+                    try:
+                        c.close()
+                    except sqlite3.Error:
+                        pass
+            for p in (tmp, pathlib.Path(f"{tmp}-wal"), pathlib.Path(f"{tmp}-shm")):
+                p.unlink(missing_ok=True)
+            return None
 
     # agy's step type for a model call it failed and retries (the stream's error_message):
     # the stream carries no text, the record's payload does ("API error (attempt 3):
@@ -297,6 +357,9 @@ class Agy(Cli):
     def resume(self, prompt, session_id, timeout_s):
         return self.first_turn(prompt, timeout_s) + ["--conversation", session_id]
 
+    def fork_turn(self, prompt, session_id, timeout_s):
+        return self.resume(prompt, session_id, timeout_s)
+
     def is_init(self, e):
         return e.get("event") == "init"
 
@@ -353,6 +416,8 @@ class Agy(Cli):
         except (sqlite3.Error, ValueError, IndexError, TypeError):
             return None
         return out
+
+    usage_of = recorded_usage
 
     def last_tool(self, events):
         # A running tool shows as an ACTIVE step, which read() leaves out.
@@ -506,12 +571,27 @@ class Claude(Cli):
     def first_turn(self, prompt, timeout_s):
         return ["-p", prompt, "--output-format", "stream-json", "--verbose"]
 
+    def can_fork(self, session_id):
+        return bool(session_id)
+
     def resume(self, prompt, session_id, timeout_s):
         return [
             "-p",
             prompt,
             "--resume",
             session_id,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+
+    def fork_turn(self, prompt, session_id, timeout_s):
+        return [
+            "-p",
+            prompt,
+            "--resume",
+            session_id,
+            "--fork-session",
             "--output-format",
             "stream-json",
             "--verbose",

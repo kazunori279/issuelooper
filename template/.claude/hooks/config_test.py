@@ -60,6 +60,7 @@ production_paths = ["src/", "static/"]
 [env]
 POOL_POLL_S = "30"
 [pool]
+fork = true
 nonsense = 1
 """
 
@@ -83,6 +84,7 @@ with tempfile.TemporaryDirectory() as d:
     check("devcheck", (values.get("POOL_DEVCHECK"), values.get("DEVCHECK_PATHS"), values.get("DEVCHECK_LABELS")),
           ("1", "src/,static/", "owner-request,needs:live"))
     check("env passthrough", values.get("POOL_POLL_S"), "30")
+    check("pool fork", values.get("POOL_FORK"), "1")
     check("unknown", unknown, ["pool.nonsense"])
 
     # The environment wins over the file.
