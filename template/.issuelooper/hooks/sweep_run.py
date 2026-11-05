@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run the project's whole check suite and total what it holds, in the sweep format.
 
-    python3 .claude/hooks/sweep_run.py                # the sweep
-    python3 .claude/hooks/sweep_run.py --before 44    # ... with the arrow
+    python3 .issuelooper/hooks/sweep_run.py                # the sweep
+    python3 .issuelooper/hooks/sweep_run.py --before 44    # ... with the arrow
 
 Workers and the merger run it through `sweep_locked.py`, which takes a sweep slot
 first. The suite is $SWEEP_COMMAND (default `make verify`), run with `bash -c` at

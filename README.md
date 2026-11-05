@@ -94,7 +94,7 @@ Start the workspace and the loop:
 cd textstats-demo
 herdr --session textstats-demo
 # Inside the herdr pane that opens:
-.claude/hooks/issuelooper start
+.issuelooper/hooks/issuelooper start
 ```
 
 Over the next 15–30 minutes, four workers claim the issues in priority order, write
@@ -115,14 +115,14 @@ ISSUELOOPER_CONFIG_OK=1 git commit -am "Configure issuelooper" && git push
 gh issue create --title "..." --body "..."
 herdr --session your-repo
 # Inside the herdr pane:
-.claude/hooks/issuelooper start
+.issuelooper/hooks/issuelooper start
 ```
 
 Everything project-specific lives in four files under `.issuelooper/`:
 
 - **`config.toml`**: agent CLI and model per role, sweep and deploy commands, merge
   train, acceptance mode (`"gate"`, `"after"`, or `"off"`), and pool concurrency.
-  Validate anytime with `python3 .claude/hooks/config.py check`.
+  Validate anytime with `python3 .issuelooper/hooks/config.py check`.
 - **`project.md`**: concise commands and paths agents cannot guess (worktree setup, how
   to run one test file, how to start the app on a port, where credentials live).
 - **`review_rules.md`**: project-specific rules enforced by the diff reviewer on top of
@@ -155,13 +155,13 @@ While the loop runs, you interact with it in four ways:
    | A redo | Reopen the issue and comment what is still wrong. The next worker reads the newest comments first. |
 
 2. **Steer the queue in the Monitor pane.** Type directly into the monitor pane (or run
-   `.claude/hooks/issuelooper say "Make #12 P0 and hold #15"` from another terminal).
+   `.issuelooper/hooks/issuelooper say "Make #12 P0 and hold #15"` from another terminal).
    The supervisor sends `Pool update:` messages to the monitor when the queue changes
    and waits while you are typing. Keep deep code research out of the monitor so it
    stays free for queue updates.
 3. **Research and draft issues in an Aide pane.** Aides (`CC_ROLE=aide`) explore code,
    debug, and file new issues (`stage:triage`, signed `<!-- aide -->`), without touching
-   stage labels or merges. Run `.claude/hooks/issuelooper aide` to open more aides.
+   stage labels or merges. Run `.issuelooper/hooks/issuelooper aide` to open more aides.
 4. **Answer `stage:owner` questions.** When a worker hits a product ambiguity, fails 3
    times, fails acceptance twice, or lacks a live dependency, the monitor parks the
    issue at `stage:owner` with a concrete question. Check waiting items with
@@ -173,10 +173,10 @@ While the loop runs, you interact with it in four ways:
 | To see or do | Command / location |
 |---|---|
 | Live health, running agents, queue, UX scores, events | `http://127.0.0.1:8780/`, `issuelooper watch`, or `issuelooper status` |
-| What the supervisor would start next | `.claude/hooks/issuelooper plan` |
+| What the supervisor would start next | `.issuelooper/hooks/issuelooper plan` |
 | One session's prompt and transcript | `.issuelooper/run/pool/<seq>-<role>-<unit>/` (`prompt.txt`, `session.log`) |
-| Pause the loop (keeps aides open, saves WIP branches) | `.claude/hooks/issuelooper stop` |
-| Stop everything and prune 2-day-stale scratch dirs | `.claude/hooks/issuelooper stop --all` |
+| Pause the loop (keeps aides open, saves WIP branches) | `.issuelooper/hooks/issuelooper stop` |
+| Stop everything and prune 2-day-stale scratch dirs | `.issuelooper/hooks/issuelooper stop --all` |
 
 ## Where to go next
 

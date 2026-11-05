@@ -52,7 +52,7 @@ herdr --session textstats-demo
 Inside the `herdr` pane that opens:
 
 ```bash
-.claude/hooks/issuelooper start
+.issuelooper/hooks/issuelooper start
 ```
 
 A `herdr` tab named `issuelooper` opens with the monitor (top left), an aide (right), and the terminal status view (bottom left). The web dashboard is served at <http://127.0.0.1:8780/>.
@@ -74,7 +74,7 @@ A `herdr` tab named `issuelooper` opens with the monitor (top left), an aide (ri
 ## 5. Stop and clean up
 
 ```bash
-.claude/hooks/issuelooper stop --all
+.issuelooper/hooks/issuelooper stop --all
 ```
 
 Running `issuelooper start` again picks up where it left off. When you are done with the demo repository, delete it with `gh repo delete <you>/textstats-demo` and remove the local `./textstats-demo` directory.

@@ -159,7 +159,7 @@ try:
     rg.PATHS = ()
     check("whole repo: any file", rg.is_prod("lib/x.py"), True)
     check("whole repo: not docs", rg.is_prod("docs/x.py"), False)
-    check("whole repo: not framework", rg.is_prod(".claude/hooks/x.py"), False)
+    check("whole repo: not framework", (rg.is_prod(".issuelooper/hooks/x.py"), rg.is_prod(".claude/hooks/x.py")), (False, False))
     rg.PATHS = keep
 
     # --- rules ----------------------------------------------------------------------

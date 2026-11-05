@@ -13,7 +13,7 @@ Everything project-specific in an `issuelooper` repository lives under `.issuelo
 `install.sh` copies the framework into `<repo-dir>`, creates the required GitHub labels, sets `core.hooksPath` to `.githooks`, and stages only the files it manages:
 
 - **Safe file handling:** other files under `.claude/`, `.agents/`, `.githooks/`, and `.issuelooper/` (tracked or untracked) are left untouched. Untracked `CLAUDE.md` or `.gitignore` files that `install.sh` appends to are left unstaged. If a target path already holds a file that did not come from an earlier install, `install.sh` lists the conflict and exits without writing; pass `--force` to overwrite.
-- **Upgrading (`--upgrade`):** replaces the framework hooks and skills under `.claude/` and `.agents/` while keeping your existing `.issuelooper/` configuration files.
+- **Upgrading (`--upgrade`):** replaces the framework hooks and skills under `.issuelooper/hooks/` and `.issuelooper/skills/` (and updates the `.claude/` and `.agents/` adapter files and symlinks, migrating any older `.issuelooper/hooks/` install) while keeping your existing `.issuelooper/` configuration files.
 - **Existing git hooks:** `.githooks/pre-commit` and `.githooks/pre-push` prevent agent sessions from editing `.claude/` or `.issuelooper/` (unless `ISSUELOOPER_CONFIG_OK=1` is set in the owner's commit command) and block pushes that would empty an issue branch or force-push `main`. If your repository already uses git hooks (such as Husky or `.git/hooks`), `install.sh` stops and names them:
   - `--chain-hooks` sets `core.hooksPath` to `.githooks` and records the previous hook directory in `git config issuelooper.chainedHooksPath` so `.githooks` runs your existing hooks after its own checks (other clones should run the same command or set that git config key).
   - `--keep-hooks` leaves `core.hooksPath` unchanged so you can invoke `.githooks/pre-commit` and `.githooks/pre-push` from your own hooks.
@@ -24,7 +24,7 @@ Everything project-specific in an `issuelooper` repository lives under `.issuelo
 
 | File | Purpose | How to write a good one |
 |---|---|---|
-| **`config.toml`** | All supervisor, sweep, review, acceptance, and agent settings. Each key maps to an environment variable; an exported environment variable always wins over `config.toml`. | Start with `[agents]`, `[sweep] command`, and `[pool] max_sessions`. Run `python3 .claude/hooks/config.py check` to verify syntax and detect unknown keys. |
+| **`config.toml`** | All supervisor, sweep, review, acceptance, and agent settings. Each key maps to an environment variable; an exported environment variable always wins over `config.toml`. | Start with `[agents]`, `[sweep] command`, and `[pool] max_sessions`. Run `python3 .issuelooper/hooks/config.py check` to verify syntax and detect unknown keys. |
 | **`project.md`** | Concise repository facts that every agent session reads after `issuelooper-shared`. | Keep it to concrete commands and paths, not long prose: how to initialize a fresh `git worktree` (for example `uv sync --frozen -q`), where unit vs browser tests live (`tests/<suite>/test_issue_<N>.py`), how to run one test file, how to start the app on a given port with databases/logs under `$ISSUELOOPER_TMP`, how to link `.env` using full paths (`ln -sf "$SHARED_REPO_PATH/.env" "$WT/.env"`), and which shared files need small hunks. |
 | **`review_rules.md`** | Project-specific rules sent to the LLM diff reviewer (`review_gate.py`) alongside its two built-in checks (no fabricated user-visible data, no test-gaming logic). | State plain, testable rules with what to reject and what to do instead, plus 1–2 short reject/pass code examples. Document legitimate narrow exceptions (such as a demo mode). HTML comments are stripped before sending. Add an optional ```` ```prescan ```` block with regexes (one per line) to flag matching added lines as hints for the reviewer. |
 | **`monitor_kickoff.md`** | *(Optional)* The initial prompt sent to the monitor when `issuelooper start` launches. | Use it to state initial milestone ordering, seed-backlog priorities, or policies the monitor should follow when triaging. If absent, the monitor runs a standard triage pass over the open queue. |
@@ -112,7 +112,7 @@ Configures post-merge acceptance (`"gate"`, `"after"`, or `"off"`), the shared w
 | `[deploy] timeout_s` | `POOL_DEPLOY_TIMEOUT_S` | `300` | Timeout in seconds for the deploy command. |
 | `[live] enabled` | `POOL_LIVE` | `false` | Require post-merge live checks on `needs:live` issues. |
 | `[live] required_files` | `POOL_REQUIRED_FILES` | `[".env"]` (when live is on) | Files that must exist in the shared checkout before any live check starts; missing files are flagged on the dashboard and to the monitor. |
-| `[devcheck] enabled` | `POOL_DEVCHECK` | `false` | Require workers to run `.claude/hooks/devcheck.py` against real services before opening a PR (enforced by Gate 7). |
+| `[devcheck] enabled` | `POOL_DEVCHECK` | `false` | Require workers to run `.issuelooper/hooks/devcheck.py` against real services before opening a PR (enforced by Gate 7). |
 | `[devcheck] start` | `DEVCHECK_START` | `""` | Foreground command starting the app on `$DEVCHECK_PORT` with scratch data in `$ISSUELOOPER_TMP`. |
 | `[devcheck] ready_path` | `DEVCHECK_READY_PATH` | `"/"` | HTTP path polled until it responds with status `< 500`. |
 | `[devcheck] command` | `DEVCHECK_COMMAND` | `""` | End-to-end smoke command run against `$DEVCHECK_URL` before the worker's own replay scripts (keep this script under `[guard] protected_paths`). |
@@ -202,7 +202,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 
 ## 4. CLI commands and observability
 
-### `.claude/hooks/issuelooper` subcommands
+### `.issuelooper/hooks/issuelooper` subcommands
 
 | Command | What it does |
 |---|---|
@@ -219,10 +219,10 @@ Routes issues to persistent area conversations and serializes work on hot files.
 ### `config.py` helper commands
 
 ```bash
-python3 .claude/hooks/config.py check      # Validate .issuelooper/config.toml and list unrecognized keys
-python3 .claude/hooks/config.py env        # Print resolved `export NAME=value` lines for the shell
-python3 .claude/hooks/config.py get NAME   # Print a single resolved environment variable
-python3 .claude/hooks/config.py tmp        # Print this repository's $ISSUELOOPER_TMP directory
+python3 .issuelooper/hooks/config.py check      # Validate .issuelooper/config.toml and list unrecognized keys
+python3 .issuelooper/hooks/config.py env        # Print resolved `export NAME=value` lines for the shell
+python3 .issuelooper/hooks/config.py get NAME   # Print a single resolved environment variable
+python3 .issuelooper/hooks/config.py tmp        # Print this repository's $ISSUELOOPER_TMP directory
 ```
 
 ### Running headless without `herdr`
@@ -234,7 +234,7 @@ For remote servers or CI environments without `herdr`, set in `.issuelooper/conf
 host = "broker"
 ```
 
-Then run `.claude/hooks/issuelooper start` from any shell. Communicate with the headless monitor using `.claude/hooks/issuelooper say "..." --wait`, and open an interactive aide in any terminal with `.claude/hooks/ccrole.sh aide`.
+Then run `.issuelooper/hooks/issuelooper start` from any shell. Communicate with the headless monitor using `.issuelooper/hooks/issuelooper say "..." --wait`, and open an interactive aide in any terminal with `.issuelooper/hooks/ccrole.sh aide`.
 
 ### Where logs and records live
 
@@ -255,13 +255,14 @@ The web dashboard (`http://127.0.0.1:8780/`) and `issuelooper watch` read exclus
 ```text
 install.sh                     Installer and upgrader for target repositories
 template/                      Files copied into a target repository by install.sh
-  .claude/hooks/               Supervisor (ccpool.py), role_guard.py, claim.py, sweep_run.py,
+  .issuelooper/hooks/          Supervisor (ccpool.py), role_guard.py, claim.py, sweep_run.py,
                                devcheck.py, review_gate.py, herdr_link.py, broker.py,
                                dash_model.py, dashboard.py, issuelooper CLI, and *_test.py
-  .claude/skills/issuelooper-* Role instructions read by monitor, worker, merger, tester, aide
-  .agents/                     Matching hooks, skills, and rules for the agy CLI
-  .githooks/                   pre-commit and pre-push hooks protecting .claude/ and main
+  .issuelooper/skills/         Role instructions read by monitor, worker, merger, tester, aide
   .issuelooper/                Starter templates for config.toml, project.md, review_rules.md
+  .claude/                     Claude Code settings.json and skill symlinks
+  .agents/                     agy hooks.json, skills.json, rules, and skill symlinks
+  .githooks/                   pre-commit and pre-push hooks protecting .issuelooper/, .claude/ and main
   docs/agent-framework.md      Short overview read by agents inside an installed repo
 examples/                      Runnable sample projects (hello-world, live-ai-concierge) and create.sh
 docs/                          Architecture guide, configuration reference, and macOS validation
@@ -270,5 +271,5 @@ docs/                          Architecture guide, configuration reference, and 
 To run the framework's own test suite from the `issuelooper` repository root:
 
 ```bash
-for t in template/.claude/hooks/*_test.py; do python3 "$t" || exit; done
+for t in template/.issuelooper/hooks/*_test.py; do python3 "$t" || exit; done
 ```

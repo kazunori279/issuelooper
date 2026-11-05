@@ -29,7 +29,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SHARED_REPO_PATH:-$(cd "$HERE/../.." && pwd)}"
 export SHARED_REPO_PATH="$ROOT"
-# Python would write .claude/hooks/__pycache__/ into the shared checkout, and the merge
+# Python would write .issuelooper/hooks/__pycache__/ into the shared checkout, and the merge
 # gate refuses to merge from a checkout that is not clean. Every process started from
 # here inherits this.
 export PYTHONDONTWRITEBYTECODE=1
@@ -107,7 +107,7 @@ prerequisites() {
     command -v herdr >/dev/null 2>&1 || { warn "herdr is not on PATH (or set [monitor] host = \"broker\")"; bad=1; }
     [ "${HERDR_ENV:-}" = 1 ] || {
       warn "run \`issuelooper start\` from a herdr pane: \`herdr --session $(basename "$ROOT")\`, then"
-      warn "  .claude/hooks/issuelooper start"
+      warn "  .issuelooper/hooks/issuelooper start"
       warn "(or set [monitor] host = \"broker\" in .issuelooper/config.toml for a headless monitor)"
       bad=1
     }
@@ -230,7 +230,7 @@ cmd_start() {
 }
 
 cmd_aide() {
-  [ "$HOST" = herdr ] || die "aides need herdr; with host = \"broker\" run \`.claude/hooks/ccrole.sh aide\` in a terminal"
+  [ "$HOST" = herdr ] || die "aides need herdr; with host = \"broker\" run \`.issuelooper/hooks/ccrole.sh aide\` in a terminal"
   [ -f "$HERDR_REC" ] || die "the loop is not running in herdr; \`issuelooper start\` first"
   local aides n last pane name e envs=()
   aides="$(rec aides)"

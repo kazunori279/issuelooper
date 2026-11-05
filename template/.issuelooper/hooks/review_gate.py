@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Review gate: a second model reads a pull request before it is merged.
 
-    python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr N
+    python3 "$SHARED_REPO_PATH/.issuelooper/hooks/review_gate.py" --pr N
 
 The judge (judge.py) reads the PR's diff once, with no tools, and answers pass or
 reject. It looks for what tests and sweeps do not catch: data that is made up and

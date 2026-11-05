@@ -58,7 +58,7 @@ tester's acceptance check, not on the merge); keep it so.
 
 ```bash
 git push --force-with-lease origin "HEAD:<headRefName>"
-python3 .claude/hooks/sweep_locked.py --update-pr $P     # rewrites Sweep SHA and the green line in the body
+python3 .issuelooper/hooks/sweep_locked.py --update-pr $P     # rewrites Sweep SHA and the green line in the body
 gh pr view $P --json headRefOid -q .headRefOid            # must equal git rev-parse HEAD
 ```
 
@@ -69,7 +69,7 @@ merges.
 
 When the body has a `- **Live check:** <sha>` line naming another sha than your
 new head, check it again before you stop, after the sweep:
-`python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr $P`. Gate 7
+`python3 .issuelooper/hooks/devcheck.py --rerun <that sha> --update-pr $P`. Gate 7
 refuses a head whose change moved since its check, and resolving a conflict moves
 it even when the behavior stays the same (main's side of the removed lines
 changes); do not judge it, rerun it. A failed rerun is a hand-back (step 7).
@@ -103,7 +103,7 @@ git merge-base --is-ancestor origin/main HEAD || git rebase origin/main
 ## 5. Review
 
 ```bash
-python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr $P
+python3 "$SHARED_REPO_PATH/.issuelooper/hooks/review_gate.py" --pr $P
 ```
 
 Exit 0: go on. Exit 1: it rejected the PR and already handed it back (PR comment,

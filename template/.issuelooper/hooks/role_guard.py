@@ -116,7 +116,8 @@ GIT_FRAMEWORK_PATHS = re.compile(
 )
 NO_VERIFY = re.compile(r"\bgit\b[^|;&]*\b(?:commit|push)\b[^|;&]*--no-verify\b")
 
-ROLE_DIR = pathlib.Path.home() / ".claude" / "cc-role"
+ROLE_DIR = pathlib.Path.home() / ".issuelooper" / "cc-role"
+LEGACY_ROLE_DIR = pathlib.Path.home() / ".claude" / "cc-role"
 HEARTBEAT_FILE = pathlib.Path(
     os.environ.get("ROLE_GUARD_HEARTBEAT_FILE", "") or config.scratch_root() / "guard.last"
 )
@@ -455,11 +456,12 @@ def resolve_role(session_id: str) -> str:
     if role:
         return role
     if session_id:
-        f = ROLE_DIR / session_id
-        try:
-            return f.read_text().strip().lower()
-        except OSError:
-            pass
+        for d in (ROLE_DIR, LEGACY_ROLE_DIR):
+            f = d / session_id
+            try:
+                return f.read_text().strip().lower()
+            except OSError:
+                pass
     return ""
 
 
@@ -1542,8 +1544,8 @@ SWEEP_WAIVER = re.compile(
 
 # The sweep runner, vendored with the framework. A PR head that has it can be
 # swept, so its body must carry the sweep's `green:` line or a sweep waiver.
-SWEEP_RUNNER = ".claude/hooks/sweep_run.py"
-SWEEP_HOW = "`python3 .claude/hooks/sweep_locked.py` in your worktree"
+SWEEP_RUNNER = ".issuelooper/hooks/sweep_run.py"
+SWEEP_HOW = "`python3 .issuelooper/hooks/sweep_locked.py` in your worktree"
 
 
 def merge_train_on() -> bool:
@@ -2094,7 +2096,7 @@ def check_pr_merge(command: str) -> None:
                         f"{target}'s sweep record for `{head_sha[:7]}` is from an affected sweep (only the "
                         "tests the change touches). With the merge train off, nothing checks the whole suite "
                         "before the merge, so Gate 2 needs a full sweep.\n\n"
-                        f"Run `python3 .claude/hooks/sweep_locked.py --full --update-pr <N>` at the head."
+                        f"Run `python3 .issuelooper/hooks/sweep_locked.py --full --update-pr <N>` at the head."
                     )
                 rec_areas = record.get("areas") or {}
                 stated_areas = {s: int(n) for s, n in pairs}
@@ -2258,7 +2260,7 @@ DEVCHECK_WAIVER = re.compile(
 )
 DEVCHECK_HOW = (
     "Commit, then in your worktree run\n\n"
-    "    python3 .claude/hooks/devcheck.py --script <your replay of the issue's steps> --update-pr <N>\n\n"
+    "    python3 .issuelooper/hooks/devcheck.py --script <your replay of the issue's steps> --update-pr <N>\n\n"
     "It starts the app from your branch in the real environment, runs the project's "
     "smoke and your script against it, and writes `- **Live check:** <sha> pass` into "
     "the body when they pass. See `.issuelooper/project.md` for how the app runs."
@@ -2414,7 +2416,7 @@ def devcheck_gate(
                 f"Gate 7 (live check): the live check ran at `{rec_sha[:12]}`, and the head "
                 f"`{head_sha[:12]}` changes something else: a rebase or a later commit "
                 "changed what this branch does since the check.\n\nCheck the head again; "
-                "`python3 .claude/hooks/devcheck.py --rerun "
+                "`python3 .issuelooper/hooks/devcheck.py --rerun "
                 f"{rec_sha[:12]} --update-pr <N>` replays the scripts recorded then."
             )
 
@@ -2480,11 +2482,11 @@ FAIL_BEFORE_HOW = (
     "    - **Fail-before:** waived - loop/process\n"
     "    - **Fail-before:** waived - docs only\n"
     "    - **Fail-before:** waived - owner ruling\n\n"
-    "See the merge gates in .claude/skills/issuelooper-shared/SKILL.md."
+    "See the merge gates in .issuelooper/skills/issuelooper-shared/SKILL.md."
 )
 
 
-# Gate 5, the review gate. `.claude/hooks/review_gate.py --pr N` has a second
+# Gate 5, the review gate. `.issuelooper/hooks/review_gate.py --pr N` has a second
 # model read the diff and writes its verdict for the PR's head sha to
 # $REVIEW_DIR/<sha>.json (config.record_dirs). pass, skipped (no production file)
 # and override (the owner's) let the merge go ahead; anything else does not.
@@ -2539,7 +2541,7 @@ def review_gate_check(pr: str, head_sha: str, target: str) -> None:
         "Before a merge, a second model reads the diff for what tests do not catch "
         "(made-up data shown as real, code that exists to pass tests, and this "
         "project's review rules). Run\n\n"
-        f'    python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr {n}\n\n'
+        f'    python3 "$SHARED_REPO_PATH/.issuelooper/hooks/review_gate.py" --pr {n}\n\n'
         "on the head you are merging (again after every rebase or push). Exit 0: merge. "
         "Exit 1: it rejected the PR and handed it back; stop. Exit 2: GitHub could not be "
         "read; run it again."
@@ -2672,7 +2674,7 @@ def worker_label_check(command: str, added: set[str], removed: set[str]) -> None
             f"This moves {', '.join(sorted(stage))}, and this worker session has no "
             f"readable claim (${CLAIM_FILE_ENV}).\n\n"
             "A worker moves stage labels only on the issue the supervisor claimed for it. "
-            "Claims are made by `.claude/hooks/claim.py claim` through ccpool.py, "
+            "Claims are made by `.issuelooper/hooks/claim.py claim` through ccpool.py, "
             "before the session starts; to give one up, run `claim.py release`."
         )
     other = [t for t in dict.fromkeys(targets) if t != mine]
@@ -2893,8 +2895,8 @@ def main(raw: str) -> None:
             "The roles are worker, merger, tester, monitor and aide; which one you are "
             "decides what you may label and how your comments are signed. Do not pick a "
             "role from a skill. Ask the owner which one this session is, then either "
-            "relaunch with `.claude/hooks/ccrole.sh <role>` or have them run "
-            f"`.claude/hooks/ccrole.sh assign {session_id or '<session-id>'} <role>`.\n\n"
+            "relaunch with `.issuelooper/hooks/ccrole.sh <role>` or have them run "
+            f"`.issuelooper/hooks/ccrole.sh assign {session_id or '<session-id>'} <role>`.\n\n"
             "Reads are unaffected: you can keep investigating and report what you found."
         )
 

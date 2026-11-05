@@ -2100,7 +2100,7 @@ End in one of two states:
    cleared. Last line of your reply: WORKER-DONE pr #<number>
 2. You could not finish: commit what you have on {branch} (the supervisor pushes it for
    the next worker), say on #{n} what blocked you and what is left, then run
-   python3 .claude/hooks/claim.py release {n} --token {token} --reason "<one line>"
+   python3 .issuelooper/hooks/claim.py release {n} --token {token} --reason "<one line>"
    (add --to stage:owner when it needs the owner's decision). Last line: WORKER-RELEASED
 
 The supervisor merges your PR once the merge gates and a review gate pass. The review
@@ -2125,9 +2125,9 @@ resolving it is yours. The merge stays the supervisor's: the guard refuses `gh p
 from a merger session, and any write to a PR but #{pr}.
 1. Rebase onto origin/main in {scratch(f"mrg-{pr}-wt")} and resolve the conflicts so that both this
    change and what landed on main survive ({PROJECT} says how to set up a worktree).
-   Then run `python3 .claude/hooks/sweep_locked.py --update-pr {pr}` there and push with
+   Then run `python3 .issuelooper/hooks/sweep_locked.py --update-pr {pr}` there and push with
    --force-with-lease. If the PR body has a `Live check:` line naming another sha than your
-   new head, also run `python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr {pr}`
+   new head, also run `python3 .issuelooper/hooks/devcheck.py --rerun <that sha> --update-pr {pr}`
    there after the sweep (merge gate 7 refuses a head whose change moved since its check, and
    resolving a conflict moves it; the supervisor replays it too, but that costs a merge round).
 2. Catch up with main, which moved while you worked: once the sweep is green,
@@ -2137,7 +2137,7 @@ from a merger session, and any write to a PR but #{pr}.
    gates, and checks it merged with the current main). Conflicts: resolve them as in step 1,
    sweep, push, and catch up again; three rounds at most, then go on with what you pushed.
 3. Run the review gate on the new head:
-   `python3 "$SHARED_REPO_PATH/.claude/hooks/review_gate.py" --pr {pr}`. Exit 1: it rejected
+   `python3 "$SHARED_REPO_PATH/.issuelooper/hooks/review_gate.py" --pr {pr}`. Exit 1: it rejected
    the PR and already handed it back (or sent it to the owner); stop. Exit 2: run it again.
 4. Stop there, with #{n} still at stage:pr: do not merge. The supervisor merges the new
    head on its next poll, after checking it merged with the current main and running the
@@ -2202,9 +2202,9 @@ Your earlier worktree is gone. Follow the issuelooper-merger skill's steps for t
    git -C "$SHARED_REPO_PATH" worktree add -B {branch} {wt} origin/{branch}; set it up as {PROJECT} says.
    git rebase origin/main there, and resolve every conflict so both your change and what landed on main
    survive: never drop main's side to make yours apply.
-2. python3 .claude/hooks/sweep_locked.py --update-pr {pr} in the worktree, and fix what fails. If the PR body's
+2. python3 .issuelooper/hooks/sweep_locked.py --update-pr {pr} in the worktree, and fix what fails. If the PR body's
    `Live check:` line names another sha than your new head, also
-   python3 .claude/hooks/devcheck.py --rerun <that sha> --update-pr {pr}. Then
+   python3 .issuelooper/hooks/devcheck.py --rerun <that sha> --update-pr {pr}. Then
    git push --force-with-lease origin HEAD:{branch}.
 3. Catch up with main: git fetch -q origin main; if git merge-base --is-ancestor origin/main HEAD fails, rebase
    again (a clean rebase is pushed without a new sweep). Three rounds at most.
@@ -2290,7 +2290,7 @@ making its own fresh state, not by deleting its assertions.
 
 Steps: git -C "$SHARED_REPO_PATH" fetch -q origin main {branch}; git -C "$SHARED_REPO_PATH" worktree add -B {branch} {wt}
 origin/{branch}; set it up as {PROJECT} says; rebase onto origin/main; run the failing guards
-({guard_cmd or "the project's accept guard"} {ids}); fix; python3 .claude/hooks/sweep_locked.py --update-pr {pr}; run the
+({guard_cmd or "the project's accept guard"} {ids}); fix; python3 .issuelooper/hooks/sweep_locked.py --update-pr {pr}; run the
 guards again; git push --force-with-lease origin HEAD:{branch}. Stop with #{n} at stage:pr: do not merge or move a label.
 Last line: GUARD-FIXED, or GUARD-STUCK <why>.
 Budget: hard wall-clock timeout of {timeout}."""

@@ -24,7 +24,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# No .claude/hooks/__pycache__/ in the shared checkout: the merge gate needs it clean.
+# No .issuelooper/hooks/__pycache__/ in the shared checkout: the merge gate needs it clean.
 export PYTHONDONTWRITEBYTECODE=1
 [ -f "$HERE/config.py" ] && eval "$(python3 "$HERE/config.py" env 2>/dev/null || true)"
 # This repository's scratch directory (config.py: one per repository, under /tmp).
@@ -40,7 +40,7 @@ export GIT_EDITOR="${GIT_EDITOR:-true}" GIT_SEQUENCE_EDITOR="${GIT_SEQUENCE_EDIT
   GCM_INTERACTIVE="${GCM_INTERACTIVE:-never}" GH_PROMPT_DISABLED="${GH_PROMPT_DISABLED:-1}" \
   PAGER="${PAGER:-cat}" GIT_PAGER="${GIT_PAGER:-cat}" GH_PAGER="${GH_PAGER:-cat}"
 
-ROLE_DIR="$HOME/.claude/cc-role"
+ROLE_DIR="$HOME/.issuelooper/cc-role"
 VALID="monitor merger tester reviewer aide worker"
 
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }

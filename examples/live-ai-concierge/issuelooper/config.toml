@@ -3,7 +3,7 @@
 # credentials, with every role on one model.
 #
 # Each key sets the environment variable named beside it, unless that variable is
-# already exported (the environment wins). `python3 .claude/hooks/config.py check`
+# already exported (the environment wins). `python3 .issuelooper/hooks/config.py check`
 # lists what this file sets and any key it does not recognize.
 
 [agents]
@@ -56,7 +56,7 @@ enabled = true               # POOL_LIVE: the post-merge check of a needs:live i
 
 [devcheck]
 enabled = true               # POOL_DEVCHECK: before the PR, a worker runs the app from its branch in live mode and
-                             # uses it (.claude/hooks/devcheck.py); merge gate 7 asks for the record
+                             # uses it (.issuelooper/hooks/devcheck.py); merge gate 7 asks for the record
 start = 'ln -sf "$SHARED_REPO_PATH/.env" .env && SESSIONS_DB=$ISSUELOOPER_TMP/devcheck-$DEVCHECK_PORT.db exec uv run concierge --port $DEVCHECK_PORT'
                              # DEVCHECK_START: live mode (no CONCIERGE_SCRIPT); the app loads .env, linked from the
                              # shared checkout (git ignores it, so the tree stays clean); sessions in scratch

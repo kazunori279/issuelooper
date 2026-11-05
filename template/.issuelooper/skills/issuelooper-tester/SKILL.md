@@ -232,7 +232,7 @@ request size limit and fails. Make the sheets (twelve screenshots per sheet, eac
 with its file name), then open every sheet, in order:
 
 ```bash
-python3 "$SHARED_REPO_PATH/.claude/hooks/ux_sheet.py" "$SHARED_REPO_PATH/.ux/<sha12>"
+python3 "$SHARED_REPO_PATH/.issuelooper/hooks/ux_sheet.py" "$SHARED_REPO_PATH/.ux/<sha12>"
 ```
 
 (It renders the sheets with Playwright; run it with the project's Python

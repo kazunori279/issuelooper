@@ -26,7 +26,7 @@
   <circle cx="38" cy="37" r="5" fill="#94a3b8"/>
   <circle cx="54" cy="37" r="5" fill="#94a3b8"/>
   <circle cx="70" cy="37" r="5" fill="#94a3b8"/>
-  <text x="90" y="41" class="mono win-title">herdr tab: "issuelooper" (.claude/hooks/issuelooper start)</text>
+  <text x="90" y="41" class="mono win-title">herdr tab: "issuelooper" (.issuelooper/hooks/issuelooper start)</text>
 
   <!-- Top-left pane: Monitor -->
   <rect x="32" y="66" width="264" height="174" rx="8" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.2"/>

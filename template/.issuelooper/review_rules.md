@@ -1,7 +1,7 @@
 # Review rules
 
 <!--
-The review gate (.claude/hooks/review_gate.py) sends this file to the reviewer
+The review gate (.issuelooper/hooks/review_gate.py) sends this file to the reviewer
 model with every pull request it checks. Without any rules the reviewer rejects
 two kinds of change in production code (REVIEW_PATHS): data that is made up and
 shown to users as real, and code that exists to pass tests or evaluators.

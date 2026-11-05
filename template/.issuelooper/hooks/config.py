@@ -380,7 +380,7 @@ def baseline_tests(root: str | pathlib.Path | None = None) -> list[str]:
     """The owner's baseline tests, which no pull request deletes or folds away, as paths or
     globs (path_matches): [guard] baseline_tests (GUARD_BASELINE_TESTS; "off" for none), else
     the test files (tests/**/test_*.py) at the commit that installed issuelooper (the first
-    to add .claude/hooks/ccpool.py). A test consolidation chore once deleted part of the
+    to add .issuelooper/hooks/ccpool.py or .claude/hooks/ccpool.py). A test consolidation chore once deleted part of the
     owner's tests unreviewed."""
     raw = os.environ.get("GUARD_BASELINE_TESTS")
     where = str(root or os.environ.get("SHARED_REPO_PATH") or ".")
@@ -392,7 +392,7 @@ def baseline_tests(root: str | pathlib.Path | None = None) -> list[str]:
         if raw.strip().lower() in ("off", "none", "0"):
             return []
         return [g.strip() for g in raw.split(",") if g.strip()]
-    first = [c for c in git("log", "--diff-filter=A", "--format=%H", "--", ".claude/hooks/ccpool.py") if c]
+    first = [c for c in git("log", "--diff-filter=A", "--format=%H", "--", ".issuelooper/hooks/ccpool.py", ".claude/hooks/ccpool.py") if c]
     if not first:
         return []
     return sorted(f for f in git("ls-tree", "-r", "--name-only", first[-1], "--", "tests")

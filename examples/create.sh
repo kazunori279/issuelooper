@@ -76,5 +76,5 @@ Ready: https://github.com/$slug ($dir)
 Next, as examples/$sample/README.md describes:
   cd $dir
   herdr --session ${slug#*/}          # then, in a herdr pane:
-  .claude/hooks/issuelooper start
+  .issuelooper/hooks/issuelooper start
 EOF

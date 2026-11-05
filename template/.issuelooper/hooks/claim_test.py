@@ -624,7 +624,7 @@ def test_stale_sweep() -> None:
 SWEEP = HERE / "sweep_locked.py"
 SHA = "a" * 40
 
-# Stands in for the worktree's .claude/hooks/sweep_run.py: one second of work,
+# Stands in for the worktree's .issuelooper/hooks/sweep_run.py: one second of work,
 # with its start and end written down so overlaps can be measured.
 FAKE_RUNNER = """import time
 spans = {spans!r}
@@ -641,7 +641,7 @@ open(spans, "a").write(f"end {{time.time()}}\\n")
 def make_worktree(tmp: pathlib.Path) -> pathlib.Path:
     wt = tmp / "wt"
     subprocess.run(["git", "init", "-q", str(wt)], check=True)
-    hooks = wt / ".claude" / "hooks"
+    hooks = wt / ".issuelooper" / "hooks"
     hooks.mkdir(parents=True)
     (hooks / "sweep_run.py").write_text(FAKE_RUNNER.format(spans=str(tmp / "spans"), sha=SHA))
     return wt
@@ -743,7 +743,7 @@ def test_sweep_refuses_the_shared_checkout() -> None:
 def test_sweep_needs_the_runner() -> None:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
-    (wt / ".claude" / "hooks" / "sweep_run.py").unlink()
+    (wt / ".issuelooper" / "hooks" / "sweep_run.py").unlink()
     res = subprocess.run(
         [sys.executable, str(SWEEP)], cwd=wt, env=sweep_env(tmp, tmp / "lock"),
         capture_output=True, text=True,
@@ -787,7 +787,7 @@ def test_a_commit_with_a_green_record_is_not_swept_again() -> None:
     twice; the supervisor re-sweeping because the PR body's Sweep SHA was stale)."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
-    (wt / ".gitignore").write_text(".claude/\n")
+    (wt / ".gitignore").write_text(".issuelooper/\n")
     for cmd in (["add", ".gitignore"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]):
         subprocess.run(["git", "-C", str(wt), *cmd], check=True, capture_output=True)
     head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
@@ -822,7 +822,7 @@ def test_a_record_written_while_waiting_for_the_slot_is_reused() -> None:
     waited behind another sweep of the same commit ran the suite again after it was green."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
-    (wt / ".gitignore").write_text(".claude/\n")
+    (wt / ".gitignore").write_text(".issuelooper/\n")
     for cmd in (["add", ".gitignore"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]):
         subprocess.run(["git", "-C", str(wt), *cmd], check=True, capture_output=True)
     head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
@@ -883,7 +883,7 @@ def test_an_agent_sweep_formats_first() -> None:
     """Many red sweeps were lint-only (ruff format), each costing an agent turn."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
-    (wt / ".gitignore").write_text(".claude/\n")
+    (wt / ".gitignore").write_text(".issuelooper/\n")
     (wt / "a.py").write_text("x=1\n")
     for cmd in (["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]):
         subprocess.run(["git", "-C", str(wt), *cmd], check=True, capture_output=True)
@@ -914,7 +914,7 @@ def test_with_the_merge_train_a_pr_sweep_is_affected_only() -> None:
     only the affected tests; the main check and the train's check run everything."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sweep-test-"))
     wt = make_worktree(tmp)
-    (wt / ".claude" / "hooks" / "sweep_run.py").write_text(
+    (wt / ".issuelooper" / "hooks" / "sweep_run.py").write_text(
         f"import sys\nopen({str(tmp / 'argv')!r}, 'w').write(' '.join(sys.argv[1:]))\nprint('1 green: tests 1')\n")
     env = dict(sweep_env(tmp, tmp / "lock"), SWEEP_AFFECTED="echo {tests}", POOL_MERGE_TRAIN="1")
     env.pop("SWEEP_CALLER", None)

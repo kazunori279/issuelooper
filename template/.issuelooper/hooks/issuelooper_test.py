@@ -77,13 +77,12 @@ def git(*args, cwd):
 def setup():
     d = pathlib.Path(tempfile.mkdtemp(prefix="issuelooper-test-"))
     repo = d / "repo"
-    (repo / ".claude").mkdir(parents=True)
+    (repo / ".issuelooper").mkdir(parents=True)
     shutil.copytree(
         HERE,
-        repo / ".claude" / "hooks",
+        repo / ".issuelooper" / "hooks",
         ignore=shutil.ignore_patterns("__pycache__", "*_test.py"),
     )
-    (repo / ".issuelooper").mkdir()
     (repo / ".issuelooper" / "config.toml").write_text(
         '[agents]\ncli = "agy"\n\n[monitor]\nhost = "broker"\n\n[env]\nPOOL_POLL_S = "1"\n'
     )
@@ -125,7 +124,7 @@ def setup():
 
 def run(repo, env, *args, timeout=120):
     return subprocess.run(
-        [str(repo / ".claude" / "hooks" / "issuelooper"), *args],
+        [str(repo / ".issuelooper" / "hooks" / "issuelooper"), *args],
         cwd=repo,
         env=env,
         capture_output=True,

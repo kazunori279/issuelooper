@@ -2412,9 +2412,9 @@ def test_main_check_reports_a_red_main() -> None:
             if v is not None:
                 os.environ[k] = v
     work, g = git_repo(d / "repo")
-    (work / ".claude/hooks").mkdir(parents=True)
+    (work / ".issuelooper/hooks").mkdir(parents=True)
     for f in ("sweep_run.py", "config.py"):
-        (work / ".claude/hooks" / f).write_text((HERE / f).read_text())
+        (work / ".issuelooper/hooks" / f).write_text((HERE / f).read_text())
     g("add", "-f", ".")
     g("commit", "-qm", "base")
     g("push", "-q", "origin", "HEAD:main")
@@ -5678,7 +5678,7 @@ def test_worker_prompt_carries_the_issue_and_a_file_map() -> None:
     work, g = git_repo(pathlib.Path(tempfile.mkdtemp(prefix="ccpool-map-")))
     for path, body in (("src/settings.js", "a\nconst b = 'forget-history';\n"),
                        ("docs/REQUIREMENTS.md", "R-SET-7 Forget my history\n"),
-                       (".claude/hooks/x.py", "forget-history\n")):  # the framework's own files
+                       (".issuelooper/hooks/x.py", "forget-history\n")):  # the framework's own files
         (work / path).parent.mkdir(parents=True, exist_ok=True)
         (work / path).write_text(body)
     g("add", "-f", ".")

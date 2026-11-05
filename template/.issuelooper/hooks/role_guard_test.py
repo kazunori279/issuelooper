@@ -35,7 +35,7 @@ if "IL_TEST_TMP" not in os.environ:
 tempfile.tempdir = os.environ["IL_TEST_TMP"]
 
 GUARD = pathlib.Path(__file__).with_name("role_guard.py")
-RUNNER = ".claude/hooks/sweep_run.py"
+RUNNER = ".issuelooper/hooks/sweep_run.py"
 
 CLAUDE, AGY = "claude", "agy"
 
@@ -1815,7 +1815,7 @@ def test_pr_create_gates() -> None:
 
 
 def test_sweep_line_required_when_the_runner_is_in_the_tree() -> None:
-    """A head that carries .claude/hooks/sweep_run.py could have been swept, so its
+    """A head that carries .issuelooper/hooks/sweep_run.py could have been swept, so its
     body needs the sweep's green line (or a waiver), and the line needs its record.
     The areas are whatever the sweep reported; none are assumed."""
     commit = make_commit({RUNNER: "# runner\n", "src.py": "x = 1\n"})

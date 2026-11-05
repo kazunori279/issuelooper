@@ -2,7 +2,7 @@
 """Cases for sweep_run.py. Run it: `python3 sweep_run_test.py`.
 
 Each case copies sweep_run.py (and config.py) into a fresh git repository under
-.claude/hooks/, commits, and runs it with a fake $SWEEP_COMMAND that prints what
+.issuelooper/hooks/, commits, and runs it with a fake $SWEEP_COMMAND that prints what
 make and pytest would. That is the layout a vendored install has, and it is how
 the runner finds the root it sweeps.
 """
@@ -56,14 +56,14 @@ def make_repo(config_toml: str = "") -> pathlib.Path:
     git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "user.name", "Tester")
     git(repo, "config", "user.email", "test@example.com")
-    hooks = repo / ".claude" / "hooks"
+    hooks = repo / ".issuelooper" / "hooks"
     hooks.mkdir(parents=True)
     for name in ("sweep_run.py", "config.py"):
         shutil.copy(HERE / name, hooks / name)
     shutil.copytree(HERE / "pytest_plugins", hooks / "pytest_plugins",
                     ignore=shutil.ignore_patterns("__pycache__"))
     if config_toml:
-        (repo / ".issuelooper").mkdir()
+        (repo / ".issuelooper").mkdir(exist_ok=True)
         (repo / ".issuelooper" / "config.toml").write_text(config_toml)
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "init")
@@ -83,7 +83,7 @@ def sweep(repo: pathlib.Path, command: str | None, *args: str, **env_extra: str)
         env["SWEEP_COMMAND"] = command
     env.update(env_extra)
     done = subprocess.run(
-        [sys.executable, str(repo / ".claude" / "hooks" / "sweep_run.py"), *args],
+        [sys.executable, str(repo / ".issuelooper" / "hooks" / "sweep_run.py"), *args],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -234,7 +234,7 @@ def test_every_run_is_recorded() -> None:
     records = pathlib.Path(tempfile.mkdtemp(prefix="sweep-run-records-"))
     env = {k: v for k, v in os.environ.items() if k not in ("SWEEP_COMMAND", "SHARED_REPO_PATH")}
     env.update(SWEEP_RECORD_DIR=str(records), SWEEP_COMMAND="echo 'uv run pytest -q tests/unit'; sleep 30")
-    proc = subprocess.Popen([sys.executable, str(repo / ".claude" / "hooks" / "sweep_run.py")], cwd=repo, env=env,
+    proc = subprocess.Popen([sys.executable, str(repo / ".issuelooper" / "hooks" / "sweep_run.py")], cwd=repo, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
     time.sleep(2)  # the suite is running
     os.killpg(proc.pid, signal.SIGTERM)
@@ -419,8 +419,8 @@ def test_no_bytecode_beside_the_hooks() -> None:
     repo = make_repo()
     sweep(repo, TWO_SUITES)
     check(
-        "running the sweep leaves no __pycache__ in .claude/hooks",
-        (repo / ".claude" / "hooks" / "__pycache__").exists(),
+        "running the sweep leaves no __pycache__ in .issuelooper/hooks",
+        (repo / ".issuelooper" / "hooks" / "__pycache__").exists(),
         False,
     )
 

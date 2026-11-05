@@ -69,8 +69,9 @@ class InstallTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         result = self.install(alias, "--no-commit")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((repo / ".claude/hooks/role_guard.py").is_file())
+        self.assertTrue((repo / ".issuelooper/hooks/role_guard.py").is_file())
         self.assertTrue((repo / ".agents/skills/issuelooper-worker/SKILL.md").is_file())
+        self.assertTrue((repo / ".claude/skills/issuelooper-worker/SKILL.md").is_file())
 
     def test_stages_only_what_it_writes(self):
         repo = self.repo()
@@ -86,8 +87,9 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(set(private) <= self.untracked(repo))
         for path, text in private.items():
             self.assertEqual((repo / path).read_text(), text)
-        self.assertTrue({".claude/hooks/ccpool.py", ".claude/skills/issuelooper-worker/SKILL.md",
-                         ".agents/skills/issuelooper-worker", ".githooks/pre-commit", ".githooks/_chain",
+        self.assertTrue({".issuelooper/hooks/ccpool.py", ".issuelooper/skills/issuelooper-worker/SKILL.md",
+                         ".claude/skills/issuelooper-worker", ".agents/skills/issuelooper-worker",
+                         ".githooks/pre-commit", ".githooks/_chain",
                          ".issuelooper/config.toml", ".claude/settings.json", ".gitignore", "CLAUDE.md"} <= staged)
         self.assertFalse(any(p.endswith("_test.py") for p in staged))
 
@@ -98,7 +100,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         committed = set(git(repo2, "ls-files").split())
         self.assertNotIn(".claude/private-notes.txt", committed)
-        self.assertIn(".claude/hooks/ccpool.py", committed)
+        self.assertIn(".issuelooper/hooks/ccpool.py", committed)
 
     def test_upgrade_stages_only_what_it_writes(self):
         repo = self.repo()
@@ -107,13 +109,13 @@ class InstallTest(unittest.TestCase):
         (repo / ".issuelooper/config.toml").write_text("# the owner's settings\n")
         git(repo, "add", ".issuelooper/config.toml")
         git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "configure")
-        hook = repo / ".claude/hooks/claim.py"
+        hook = repo / ".issuelooper/hooks/claim.py"
         hook.write_text(hook.read_text() + "# an old version\n")
-        git(repo, "add", ".claude/hooks/claim.py")
+        git(repo, "add", ".issuelooper/hooks/claim.py")
         git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "old framework")
         result = self.install(repo, "--upgrade", "--no-commit")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.staged(repo), {".claude/hooks/claim.py"})
+        self.assertEqual(self.staged(repo), {".issuelooper/hooks/claim.py"})
         self.assertIn(".claude/private-notes.txt", self.untracked(repo))
         self.assertEqual((repo / ".issuelooper/config.toml").read_text(), "# the owner's settings\n")
 
@@ -122,17 +124,17 @@ class InstallTest(unittest.TestCase):
         # plugin in it.
         repo = self.repo()
         self.assertEqual(self.install(repo).returncode, 0)
-        self.assertIn(".claude/hooks/pytest_plugins/sweep_junit.py", git(repo, "ls-files").split())
-        plugin = repo / ".claude/hooks/pytest_plugins/sweep_junit.py"
+        self.assertIn(".issuelooper/hooks/pytest_plugins/sweep_junit.py", git(repo, "ls-files").split())
+        plugin = repo / ".issuelooper/hooks/pytest_plugins/sweep_junit.py"
         plugin.write_text(plugin.read_text() + "# an old version\n")
-        git(repo, "add", ".claude/hooks/pytest_plugins/sweep_junit.py")
+        git(repo, "add", ".issuelooper/hooks/pytest_plugins/sweep_junit.py")
         git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "old framework")
-        mine = repo / ".claude/hooks/pytest_plugins/local_only.py"
+        mine = repo / ".issuelooper/hooks/pytest_plugins/local_only.py"
         mine.write_text("# the project's own plugin\n")
         result = self.install(repo, "--upgrade", "--no-commit")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.staged(repo), {".claude/hooks/pytest_plugins/sweep_junit.py"})
-        self.assertIn(".claude/hooks/pytest_plugins/local_only.py", self.untracked(repo))
+        self.assertEqual(self.staged(repo), {".issuelooper/hooks/pytest_plugins/sweep_junit.py"})
+        self.assertIn(".issuelooper/hooks/pytest_plugins/local_only.py", self.untracked(repo))
         self.assertEqual(mine.read_text(), "# the project's own plugin\n")
         self.assertNotIn("an old version", plugin.read_text())
         git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "upgrade")
@@ -141,8 +143,8 @@ class InstallTest(unittest.TestCase):
         result = self.install(repo, "--upgrade")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(git(repo, "show", "--name-only", "--format=", "HEAD").split(),
-                         [".claude/hooks/pytest_plugins/sweep_junit.py"])
-        self.assertIn(".claude/hooks/pytest_plugins/local_only.py", self.untracked(repo))
+                         [".issuelooper/hooks/pytest_plugins/sweep_junit.py"])
+        self.assertIn(".issuelooper/hooks/pytest_plugins/local_only.py", self.untracked(repo))
         self.assertEqual(mine.read_text(), "# the project's own plugin\n")
 
     def test_an_upgrade_with_nothing_new_succeeds(self):
@@ -156,25 +158,25 @@ class InstallTest(unittest.TestCase):
 
     def test_conflicts_are_reported_before_writing(self):
         repo = self.repo()
-        (repo / ".claude/hooks").mkdir(parents=True)
-        (repo / ".claude/hooks/claim.py").write_text("# my own claim script\n")
+        (repo / ".issuelooper/hooks").mkdir(parents=True)
+        (repo / ".issuelooper/hooks/claim.py").write_text("# my own claim script\n")
         result = self.install(repo, "--no-commit")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(".claude/hooks/claim.py", result.stderr)
+        self.assertIn(".issuelooper/hooks/claim.py", result.stderr)
         self.assertIn("nothing was written", result.stderr)
-        self.assertEqual((repo / ".claude/hooks/claim.py").read_text(), "# my own claim script\n")
-        self.assertFalse((repo / ".claude/hooks/ccpool.py").exists())
+        self.assertEqual((repo / ".issuelooper/hooks/claim.py").read_text(), "# my own claim script\n")
+        self.assertFalse((repo / ".issuelooper/hooks/ccpool.py").exists())
         result = self.install(repo, "--no-commit", "--force")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotEqual((repo / ".claude/hooks/claim.py").read_text(), "# my own claim script\n")
+        self.assertNotEqual((repo / ".issuelooper/hooks/claim.py").read_text(), "# my own claim script\n")
 
         repo2 = self.repo("repo2")
         self.assertEqual(self.install(repo2).returncode, 0)
-        notes = repo2 / ".claude/skills/issuelooper-worker/my-notes.md"
+        notes = repo2 / ".issuelooper/skills/issuelooper-worker/my-notes.md"
         notes.write_text("mine\n")
         result = self.install(repo2, "--upgrade", "--no-commit")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(".claude/skills/issuelooper-worker/my-notes.md", result.stderr)
+        self.assertIn(".issuelooper/skills/issuelooper-worker/my-notes.md", result.stderr)
         self.assertEqual(notes.read_text(), "mine\n")
 
     def hooks_dir(self, repo, where):
@@ -206,8 +208,8 @@ class InstallTest(unittest.TestCase):
         self.assertIn(".githooks/commit-msg", git(repo, "ls-files"))
         # issuelooper's own check still refuses first, and then the project's hook does not run.
         (self.base / "pre-commit.ran").unlink()
-        (repo / ".claude/hooks/x.txt").write_text("x\n")
-        git(repo, "add", ".claude/hooks/x.txt")
+        (repo / ".claude/x.txt").write_text("x\n")
+        git(repo, "add", ".claude/x.txt")
         refused = subprocess.run(["git", "-C", str(repo), "commit", "-qm", "x"], capture_output=True, text=True,
                                  env={k: v for k, v in self.env.items() if k != "ISSUELOOPER_CONFIG_OK"})
         self.assertNotEqual(refused.returncode, 0)
@@ -270,7 +272,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".husky")
         self.assertIn(".githooks/pre-commit and .githooks/pre-push", result.stdout)
         # A session's start (ccrole.sh) must not take core.hooksPath back.
-        subprocess.run(["bash", str(repo / ".claude/hooks/ccrole.sh"), "assign", "x"], cwd=repo,
+        subprocess.run(["bash", str(repo / ".issuelooper/hooks/ccrole.sh"), "assign", "x"], cwd=repo,
                        capture_output=True, text=True, env=self.env)
         self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".husky")
 
@@ -279,6 +281,53 @@ class InstallTest(unittest.TestCase):
         result = self.install(repo, "--no-commit")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(git(repo, "config", "core.hooksPath").strip(), ".githooks")
+
+    def test_upgrade_migrates_old_claude_hooks_and_skills_layout(self):
+        repo = self.repo()
+        (repo / ".claude/hooks/pytest_plugins").mkdir(parents=True)
+        (repo / ".claude/hooks/ccpool.py").write_text("# old ccpool\n")
+        (repo / ".claude/hooks/claim.py").write_text("# old claim\n")
+        (repo / ".claude/hooks/pytest_plugins/sweep_junit.py").write_text("# old plugin\n")
+        for d in (ROOT / "template/.issuelooper/skills").glob("issuelooper-*"):
+            shutil.copytree(d, repo / ".claude/skills" / d.name)
+            (repo / ".agents/skills").mkdir(parents=True, exist_ok=True)
+            (repo / ".agents/skills" / d.name).symlink_to(f"../../.claude/skills/{d.name}")
+        (repo / ".claude/settings.json").write_text(
+            '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", '
+            '"command": "python3 \\"$(git rev-parse --show-toplevel)/.claude/hooks/role_guard.py\\""}]}]}}\n')
+        (repo / ".agents/hooks.json").write_text(
+            '{"role_guard": {"PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", '
+            '"command": "python3 \\"$(git rev-parse --show-toplevel)/.claude/hooks/role_guard.py\\"", "timeout": 10}]}]}}\n')
+        (repo / ".agents/skills.json").write_text('{"entries": [{"path": ".claude/skills"}]}\n')
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "old layout install")
+        # Untracked user file in .claude/hooks/ must survive untouched and unstaged.
+        (repo / ".claude/hooks/my_custom.sh").write_text("#!/bin/sh\n")
+        # Without --upgrade, install.sh recognizes the old install.
+        refused = self.install(repo)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--upgrade", refused.stderr)
+        # With --upgrade, it migrates hooks & skills to .issuelooper/ and stages deletions of old tracked files.
+        result = self.install(repo, "--upgrade")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tracked = set(git(repo, "ls-files").split())
+        self.assertNotIn(".claude/hooks/ccpool.py", tracked)
+        self.assertNotIn(".claude/hooks/claim.py", tracked)
+        self.assertNotIn(".claude/hooks/pytest_plugins/sweep_junit.py", tracked)
+        self.assertIn(".issuelooper/hooks/ccpool.py", tracked)
+        self.assertIn(".issuelooper/skills/issuelooper-worker/SKILL.md", tracked)
+        self.assertTrue((repo / ".claude/skills/issuelooper-worker").is_symlink())
+        self.assertEqual(os.readlink(repo / ".claude/skills/issuelooper-worker"),
+                         "../../.issuelooper/skills/issuelooper-worker")
+        self.assertEqual(os.readlink(repo / ".agents/skills/issuelooper-worker"),
+                         "../../.issuelooper/skills/issuelooper-worker")
+        self.assertIn("/.issuelooper/hooks/role_guard.py", (repo / ".claude/settings.json").read_text())
+        self.assertNotIn("/.claude/hooks/role_guard.py", (repo / ".claude/settings.json").read_text())
+        self.assertIn("/.issuelooper/hooks/role_guard.py", (repo / ".agents/hooks.json").read_text())
+        self.assertIn('".issuelooper/skills"', (repo / ".agents/skills.json").read_text())
+        self.assertNotIn('".claude/skills"', (repo / ".agents/skills.json").read_text())
+        self.assertTrue((repo / ".claude/hooks/my_custom.sh").is_file())
+        self.assertIn(".claude/hooks/my_custom.sh", self.untracked(repo))
 
 
 if __name__ == "__main__":

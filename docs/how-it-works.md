@@ -60,7 +60,7 @@ When a PR modifies files under `[review] production_paths` (such as `["src/"]`),
 
 Test suites usually run against test doubles (a scripted model or fake backend), so a branch can pass `make verify` and still fail when started against real services. With `[devcheck] enabled = true`:
 
-1. After committing, the worker runs `.claude/hooks/devcheck.py`.
+1. After committing, the worker runs `.issuelooper/hooks/devcheck.py`.
 2. `devcheck.py` acquires one of `[devcheck] slots` (default 2), starts the application from the worktree in the real environment on its own port (`[devcheck] port_base + slot`), waits for `[devcheck] ready_path` to answer with HTTP status `< 500`, runs the project smoke command (`[devcheck] command`), and then runs the worker's issue-replay script.
 3. Because real-environment checks take longer, enabling `[devcheck]` raises the default worker timeout from 45 minutes to 60 minutes.
 4. **Rebase reuse and replay:** if a later rebase only moves the branch onto a newer `main` without changing what the branch does (its change key is unchanged), the existing `devcheck` record stays valid. If conflict resolution alters the branch's change key, the supervisor automatically replays the recorded check on the new head (`devcheck.py --rerun`) and hands the PR back only if the replay fails.

@@ -20,4 +20,4 @@ Start with [`hello-world`](hello-world/) to watch the full loop on a small codeb
 - `create.sh`: creates and seeds a sample repository.
 - `seed_issues.py`: files a markdown backlog file as GitHub issues (`create.sh` calls it automatically; re-run it directly to resume an interrupted filing).
 
-When you are finished with a sample, stop the loop (`.claude/hooks/issuelooper stop --all`) and delete the GitHub repository if you no longer need it (`gh repo delete <you>/<new-repo>`).
+When you are finished with a sample, stop the loop (`.issuelooper/hooks/issuelooper stop --all`) and delete the GitHub repository if you no longer need it (`gh repo delete <you>/<new-repo>`).

@@ -53,7 +53,7 @@ Edit `concierge/.env` (git-ignored) and set `GOOGLE_CLOUD_PROJECT` (plus `GOOGLE
 cd concierge
 herdr --session concierge
 # Inside the herdr pane:
-.claude/hooks/issuelooper start
+.issuelooper/hooks/issuelooper start
 ```
 
 The monitor, an aide, and the status view open in the `issuelooper` tab, and the web dashboard starts at <http://127.0.0.1:8780/>.
@@ -81,7 +81,7 @@ The loop runs unattended, and your input steers it further:
 ## 5. Stop
 
 ```bash
-.claude/hooks/issuelooper stop --all
+.issuelooper/hooks/issuelooper stop --all
 ```
 
 This stops the supervisor, running agent sessions, dashboard, and panes. To stop the deployed background servers on `:8000` and `:8001` as well, run:

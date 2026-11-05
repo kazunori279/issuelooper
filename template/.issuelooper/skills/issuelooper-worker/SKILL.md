@@ -158,7 +158,7 @@ the commit in step 5, with your replay script written to run against
 `$DEVCHECK_URL` and save its screenshots under `$DEVCHECK_OUT`:
 
 ```bash
-python3 .claude/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-$K-$N-live.py
+python3 .issuelooper/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-$K-$N-live.py
 ```
 
 It takes a slot, starts the app from your worktree in the real environment on its
@@ -198,7 +198,7 @@ rejects both, and a reject costs you a round trip.
 git add <the project paths you changed>     # never .claude/, .agents/ or .issuelooper/
 git commit -q -m "<what changed and why> (#$N)"
 git fetch -q origin main && git rebase origin/main
-python3 .claude/hooks/sweep_locked.py
+python3 .issuelooper/hooks/sweep_locked.py
 ```
 
 The sweep must print `git: <sha> (clean)`, the `green:` line and
@@ -214,7 +214,7 @@ Then the live check (step 4), at the same commit.
 ## 6. Push, open the PR, move the issue
 
 ```bash
-python3 .claude/hooks/claim.py check $N --token $T     # exit 4: another session holds it; stop, no PR
+python3 .issuelooper/hooks/claim.py check $N --token $T     # exit 4: another session holds it; stop, no PR
 git push --force -u origin "HEAD:issue-$N"
 gh pr create --base main --head "issue-$N" --title "<the symptom, short> (#$N)" --body-file $ISSUELOOPER_TMP/wrk-$K-$N-pr.md
 gh issue edit $N --add-label stage:pr --remove-label stage:doing,stage:triage,stage:ready,stage:owner
@@ -250,9 +250,9 @@ settle*.
 **Updating a PR that came back** (your prompt names it): push the branch
 (`--force-with-lease`; only a finished rebase, never in the same command as a
 `git rebase` unless `&&` joins them: a stopped rebase pushes origin/main and
-GitHub closes the PR), run `python3 .claude/hooks/sweep_locked.py --update-pr <PR>`
+GitHub closes the PR), run `python3 .issuelooper/hooks/sweep_locked.py --update-pr <PR>`
 instead of the plain sweep (it rewrites Sweep SHA and the green line in the
-body), and with `[devcheck]` on `python3 .claude/hooks/devcheck.py --script <...> --update-pr <PR>`
+body), and with `[devcheck]` on `python3 .issuelooper/hooks/devcheck.py --script <...> --update-pr <PR>`
 (it rewrites the Live check line), fix the body if a gate named something in it,
 and move the issue to `stage:pr` as above. Never open a second PR. A review-gate
 rejection that asks for something the issue or the spec contradicts is answered, not
@@ -270,8 +270,8 @@ worker). Say once on the issue what blocked you and what is left
 `<!-- worker -->`), then give the claim back:
 
 ```bash
-python3 .claude/hooks/claim.py release $N --token $T --reason "<one line>"                  # back to the pool
-python3 .claude/hooks/claim.py release $N --token $T --reason "<one line>" --to stage:owner # needs a decision
+python3 .issuelooper/hooks/claim.py release $N --token $T --reason "<one line>"                  # back to the pool
+python3 .issuelooper/hooks/claim.py release $N --token $T --reason "<one line>" --to stage:owner # needs a decision
 ```
 
 - The acceptance contradicts the spec or an existing test: `--to stage:owner`.

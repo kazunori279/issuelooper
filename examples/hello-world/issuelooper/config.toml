@@ -1,7 +1,7 @@
 # issuelooper settings for the hello-world sample (textstats, a small Python CLI).
 #
 # Each key sets the environment variable named beside it, unless that variable is
-# already exported (the environment wins). `python3 .claude/hooks/config.py check`
+# already exported (the environment wins). `python3 .issuelooper/hooks/config.py check`
 # lists what this file sets and any key it does not recognize.
 
 [agents]

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the sweep (`sweep_run.py`) in this worktree while holding a sweep slot.
 
-    python3 .claude/hooks/sweep_locked.py                  # from the worktree root
-    python3 .claude/hooks/sweep_locked.py --update-pr 41   # ... then fix PR #41's body
-    python3 .claude/hooks/sweep_locked.py --lane main      # its own lock, not a slot
+    python3 .issuelooper/hooks/sweep_locked.py                  # from the worktree root
+    python3 .issuelooper/hooks/sweep_locked.py --update-pr 41   # ... then fix PR #41's body
+    python3 .issuelooper/hooks/sweep_locked.py --lane main      # its own lock, not a slot
 
 One implementation of the sweep lock, shared by every worker, the merger's
 rebases and the supervisor's re-sweeps: `flock` on an open file that is never
@@ -70,7 +70,7 @@ import config  # noqa: E402
 
 config.apply()
 
-RUNNER = ".claude/hooks/sweep_run.py"
+RUNNER = ".issuelooper/hooks/sweep_run.py"
 LOCK = os.environ.get("SWEEP_LOCK", "/tmp/issuelooper-sweep.lock")
 # The slots are the machine's, shared by every loop on it (unlike the scratch files under
 # $ISSUELOOPER_TMP): they share out its cores, and a lock file left behind holds nothing.

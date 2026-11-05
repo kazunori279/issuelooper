@@ -1,7 +1,7 @@
 # issuelooper settings for this repository.
 #
 # Each key sets the environment variable named beside it, unless that variable is
-# already exported (the environment wins). `python3 .claude/hooks/config.py check`
+# already exported (the environment wins). `python3 .issuelooper/hooks/config.py check`
 # lists what this file sets and any key it does not recognize.
 
 [agents]
@@ -133,7 +133,7 @@ enabled = false              # POOL_LIVE: needs:live issues get a tester's live 
 
 [devcheck]
 enabled = false              # POOL_DEVCHECK: before the PR, a worker runs the app from its branch the way it runs
-                             # for users (real services, credentials) and uses it (.claude/hooks/devcheck.py);
+                             # for users (real services, credentials) and uses it (.issuelooper/hooks/devcheck.py);
                              # merge gate 7 refuses a PR in scope without a passing record for its change
 start = ""                   # DEVCHECK_START: starts the app in the real environment on $DEVCHECK_PORT, in the
                              # foreground, from a worktree; keep what it writes (databases, logs) in $ISSUELOOPER_TMP

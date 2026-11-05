@@ -49,7 +49,7 @@ through a real sound server, playback can stall and the status stays `speaking`.
 
 ## Live check
 
-`[devcheck]` is on: before the PR, `python3 .claude/hooks/devcheck.py --script <path>`
+`[devcheck]` is on: before the PR, `python3 .issuelooper/hooks/devcheck.py --script <path>`
 starts the app from your worktree in live mode (the real Gemini Live model, with
 the shared checkout's `.env` linked in) on `$DEVCHECK_URL` and runs your script with
 `uv run python`. Write it like the screenshot script above, against

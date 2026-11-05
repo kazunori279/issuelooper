@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Check this worktree's head end to end, the way it runs for users, before the PR.
 
-    python3 .claude/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-3-12-live.py
-    python3 .claude/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-3-12-live.py --update-pr 41
-    python3 .claude/hooks/devcheck.py --rerun <sha> --update-pr 41    # after a rebase that changed the diff
+    python3 .issuelooper/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-3-12-live.py
+    python3 .issuelooper/hooks/devcheck.py --script $ISSUELOOPER_TMP/wrk-3-12-live.py --update-pr 41
+    python3 .issuelooper/hooks/devcheck.py --rerun <sha> --update-pr 41    # after a rebase that changed the diff
 
 A developer's last step before a pull request: start the app from the branch in the
 real environment (real models, real services, the project's credentials) and use it.
@@ -71,7 +71,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(HERE))
 import config  # noqa: E402
 
-SELF = ".claude/hooks/devcheck.py"
+SELF = ".issuelooper/hooks/devcheck.py"
 # Any `Live check:` field, bold or not (`Live check:`, `**Live check:**`, `**Live check**:`),
 # in any case: a worker's plain one was left in place beside a new bold one, and gate 7
 # read the stale sha (PR #75). The colon makes it a field: prose about a live check stays.

@@ -65,7 +65,7 @@ All 14 framework test files passed on macOS after the fixes. Run the suite from
 the repository root:
 
 ```bash
-for t in template/.claude/hooks/*_test.py; do python3 "$t" || exit; done
+for t in template/.issuelooper/hooks/*_test.py; do python3 "$t" || exit; done
 ```
 
 Both sample environments installed with `uv sync --frozen`. `make verify` passed

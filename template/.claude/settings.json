@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/role_guard.py\""
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.issuelooper/hooks/role_guard.py\""
           }
         ]
       }

@@ -13,11 +13,12 @@
 #                           alone (run .githooks/pre-commit and pre-push from your hooks)
 #
 # What it writes into <repo-dir>, and the only files it stages:
-#   .claude/hooks/                 the supervisor, guard, sweep, review gate and launcher
-#   .claude/skills/issuelooper-*   what each role's agent reads
+#   .issuelooper/hooks/            the supervisor, guard, sweep, review gate and launcher
+#   .issuelooper/skills/issuelooper-*  what each role's agent reads
+#   .claude/skills/issuelooper-*   symlinks to .issuelooper/skills/ for Claude Code
 #   .claude/settings.json          the role_guard hook for Claude Code (merged)
 #   .agents/                       the same hook, skills and rules for agy (merged)
-#   .githooks/                     protect .claude/ and main (only files that are absent)
+#   .githooks/                     protect .issuelooper/, .claude/ and main (only if absent)
 #   .issuelooper/                  config.toml, project.md, review_rules.md (only if absent)
 #   docs/agent-framework.md, a section in CLAUDE.md, .gitignore entries
 # Other files under those directories, tracked or not, are neither changed nor staged.
@@ -51,7 +52,7 @@ git -C "$REPO" rev-parse --show-toplevel >/dev/null 2>&1 || die "$REPO is not a 
 git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet || die "$REPO has uncommitted changes"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "python3 3.11 or later is required"
 command -v gh >/dev/null || die "the GitHub CLI (gh) is required"
-if [ -e "$REPO/.claude/hooks/ccpool.py" ] && [ "$upgrade" = 0 ]; then
+if { [ -e "$REPO/.issuelooper/hooks/ccpool.py" ] || [ -e "$REPO/.claude/hooks/ccpool.py" ]; } && [ "$upgrade" = 0 ]; then
   die "$REPO already has issuelooper; run with --upgrade to replace the framework files"
 fi
 
@@ -101,30 +102,49 @@ claim_path() {  # <template file or ""> <path in REPO>
 hook_files=()
 while IFS= read -r rel; do
   rel="${rel#./}"
-  hook_files+=("$TPL/.claude/hooks/$rel")
-  claim_path "$TPL/.claude/hooks/$rel" ".claude/hooks/$rel"
-done < <(cd "$TPL/.claude/hooks" && find . \( -name __pycache__ -o -name .ruff_cache \) -prune -o \
+  hook_files+=("$TPL/.issuelooper/hooks/$rel")
+  claim_path "$TPL/.issuelooper/hooks/$rel" ".issuelooper/hooks/$rel"
+  if [ "$upgrade" = 1 ] && { [ -e "$REPO/.claude/hooks/$rel" ] || [ -L "$REPO/.claude/hooks/$rel" ]; } && tracked ".claude/hooks/$rel"; then
+    managed+=(".claude/hooks/$rel")
+  fi
+done < <(cd "$TPL/.issuelooper/hooks" && find . \( -name __pycache__ -o -name .ruff_cache \) -prune -o \
   -type f ! -name '*_test.py' ! -name '*.pyc' -print | LC_ALL=C sort)
-for d in "$TPL"/.claude/skills/issuelooper-*; do
+for d in "$TPL"/.issuelooper/skills/issuelooper-*; do
   name="$(basename "$d")"
   while IFS= read -r f; do
-    claim_path "$f" ".claude/skills/$name/${f#"$d"/}"
+    claim_path "$f" ".issuelooper/skills/$name/${f#"$d"/}"
   done < <(find "$d" -type f)
   # The directory is replaced whole: a file in it the template does not have is lost.
-  if [ -d "$REPO/.claude/skills/$name" ]; then
+  if [ -d "$REPO/.issuelooper/skills/$name" ] && [ ! -L "$REPO/.issuelooper/skills/$name" ]; then
     while IFS= read -r f; do
-      rel=".claude/skills/$name/${f#"$REPO/.claude/skills/$name"/}"
-      [ -e "$d/${f#"$REPO/.claude/skills/$name"/}" ] && continue
+      rel=".issuelooper/skills/$name/${f#"$REPO/.issuelooper/skills/$name"/}"
+      [ -e "$d/${f#"$REPO/.issuelooper/skills/$name"/}" ] && continue
       if [ "$upgrade" = 0 ] || ! tracked "$rel"; then conflicts+=("$rel"); fi
       managed+=("$rel")  # an earlier install's file the template dropped: staged as deleted
-    done < <(find "$REPO/.claude/skills/$name" -type f)
+    done < <(find "$REPO/.issuelooper/skills/$name" -type f)
   fi
-  link=".agents/skills/$name"
-  if [ -e "$REPO/$link" ] || [ -L "$REPO/$link" ]; then
-    if [ "$(readlink "$REPO/$link" || true)" != "../../.claude/skills/$name" ] \
-      && { [ "$upgrade" = 0 ] || ! tracked "$link"; }; then conflicts+=("$link"); fi
+  if [ -d "$REPO/.claude/skills/$name" ] && [ ! -L "$REPO/.claude/skills/$name" ]; then
+    if [ "$upgrade" = 0 ]; then
+      conflicts+=(".claude/skills/$name")
+    else
+      while IFS= read -r f; do
+        rel=".claude/skills/$name/${f#"$REPO/.claude/skills/$name"/}"
+        if ! tracked "$rel"; then conflicts+=("$rel"); fi
+      done < <(find "$REPO/.claude/skills/$name" -type f)
+    fi
   fi
-  managed+=("$link")
+  for link in ".agents/skills/$name" ".claude/skills/$name"; do
+    if [ -e "$REPO/$link" ] || [ -L "$REPO/$link" ]; then
+      target="$(readlink "$REPO/$link" || true)"
+      if [ "$target" != "../../.issuelooper/skills/$name" ] \
+        && ! { [ "$upgrade" = 1 ] && [ "$target" = "../../.claude/skills/$name" ]; } \
+        && ! { [ "$upgrade" = 1 ] && [ "$link" = ".claude/skills/$name" ] && [ -d "$REPO/$link" ] && [ ! -L "$REPO/$link" ]; } \
+        && { [ "$upgrade" = 0 ] || ! tracked "$link"; }; then
+        conflicts+=("$link")
+      fi
+    fi
+    managed+=("$link")
+  done
 done
 claim_path "$TPL/.agents/rules/issuelooper.md" ".agents/rules/issuelooper.md"
 claim_path "$TPL/docs/agent-framework.md" "docs/agent-framework.md"
@@ -135,16 +155,24 @@ $(printf '    %s\n' "${conflicts[@]}")
 fi
 
 # --- framework files (replaced on upgrade) -----------------------------------------
-mkdir -p "$REPO/.claude/hooks" "$REPO/.claude/skills" "$REPO/.agents/rules" "$REPO/.agents/skills" "$REPO/docs"
+mkdir -p "$REPO/.issuelooper/hooks" "$REPO/.issuelooper/skills" "$REPO/.claude/skills" "$REPO/.agents/rules" "$REPO/.agents/skills" "$REPO/docs"
 for f in "${hook_files[@]}"; do
-  rel="${f#"$TPL/.claude/hooks/"}"
-  mkdir -p "$(dirname "$REPO/.claude/hooks/$rel")"
-  cp -a "$f" "$REPO/.claude/hooks/$rel"
+  rel="${f#"$TPL/.issuelooper/hooks/"}"
+  mkdir -p "$(dirname "$REPO/.issuelooper/hooks/$rel")"
+  cp -a "$f" "$REPO/.issuelooper/hooks/$rel"
+  if [ "$upgrade" = 1 ] && { [ -e "$REPO/.claude/hooks/$rel" ] || [ -L "$REPO/.claude/hooks/$rel" ]; } && tracked ".claude/hooks/$rel"; then
+    rm -f "$REPO/.claude/hooks/$rel"
+  fi
 done
-for d in "$TPL"/.claude/skills/issuelooper-*; do
-  rm -rf "$REPO/.claude/skills/$(basename "$d")"
-  cp -a "$d" "$REPO/.claude/skills/"
-  ln -sfn "../../.claude/skills/$(basename "$d")" "$REPO/.agents/skills/$(basename "$d")"
+if [ "$upgrade" = 1 ]; then
+  rmdir "$REPO/.claude/hooks/pytest_plugins" "$REPO/.claude/hooks" 2>/dev/null || true
+fi
+for d in "$TPL"/.issuelooper/skills/issuelooper-*; do
+  name="$(basename "$d")"
+  rm -rf "$REPO/.issuelooper/skills/$name" "$REPO/.claude/skills/$name" "$REPO/.agents/skills/$name"
+  cp -a "$d" "$REPO/.issuelooper/skills/"
+  ln -sfn "../../.issuelooper/skills/$name" "$REPO/.agents/skills/$name"
+  ln -sfn "../../.issuelooper/skills/$name" "$REPO/.claude/skills/$name"
 done
 cp "$TPL/.agents/rules/issuelooper.md" "$REPO/.agents/rules/issuelooper.md"
 cp "$TPL/docs/agent-framework.md" "$REPO/docs/agent-framework.md"
@@ -154,10 +182,17 @@ python3 - "$TPL" "$REPO" <<'PY'
 import json, pathlib, sys
 tpl, repo = map(pathlib.Path, sys.argv[1:3])
 
+OLD_CMD = 'python3 "$(git rev-parse --show-toplevel)/.claude/hooks/role_guard.py"'
+NEW_CMD = 'python3 "$(git rev-parse --show-toplevel)/.issuelooper/hooks/role_guard.py"'
+
 def merge_hooks(dst, src):
     """Add each hook entry of src to dst unless an entry with the same command exists."""
     for event, entries in src.items():
         have = dst.setdefault(event, [])
+        for e in have:
+            for h in e.get("hooks", []):
+                if h.get("command") == OLD_CMD:
+                    h["command"] = NEW_CMD
         commands = {h.get("command") for e in have for h in e.get("hooks", [])}
         for e in entries:
             if not any(h.get("command") in commands for h in e.get("hooks", [])):
@@ -182,9 +217,14 @@ p.write_text(json.dumps(cur, indent=2) + "\n")
 p = repo / ".agents/skills.json"
 cur = load(p)
 entries = cur.setdefault("entries", [])
-for e in load(tpl / ".agents/skills.json")["entries"]:
-    if e not in entries:
-        entries.append(e)
+for e in entries:
+    if isinstance(e, dict) and e.get("path") == ".claude/skills":
+        e["path"] = ".issuelooper/skills"
+dedup = []
+for e in entries + load(tpl / ".agents/skills.json")["entries"]:
+    if e not in dedup:
+        dedup.append(e)
+cur["entries"] = dedup
 p.write_text(json.dumps(cur, indent=2) + "\n")
 PY
 managed+=(".claude/settings.json" ".agents/hooks.json" ".agents/skills.json")
@@ -306,5 +346,5 @@ Next:
   1. Edit .issuelooper/config.toml (agent CLI, sweep command, deploy, live, UX)
      and .issuelooper/project.md (how to set up, test and run the app).
   2. Commit with ISSUELOOPER_CONFIG_OK=1 (the pre-commit hook protects these files) and push.
-  3. File issues, then start the loop:   .claude/hooks/issuelooper start
+  3. File issues, then start the loop:   .issuelooper/hooks/issuelooper start
 EOF

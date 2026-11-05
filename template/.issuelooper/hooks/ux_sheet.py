@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contact sheets for the tester's UX run: many screenshots in a few small images.
 
-    python3 "$SHARED_REPO_PATH/.claude/hooks/ux_sheet.py" DIR [--per 12] [--out OUT]
+    python3 "$SHARED_REPO_PATH/.issuelooper/hooks/ux_sheet.py" DIR [--per 12] [--out OUT]
             [--captions FILE.json]
 
 Reads every .png/.jpg under DIR (sorted by path), and writes OUT/sheet-01.jpg, ...

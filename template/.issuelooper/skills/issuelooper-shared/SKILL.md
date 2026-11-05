@@ -30,7 +30,7 @@ facts about this repository) and the skill for your role:
 
 ## How the loop runs
 
-One supervisor per repository, `.claude/hooks/ccpool.py`, reads GitHub every few
+One supervisor per repository, `.issuelooper/hooks/ccpool.py`, reads GitHub every few
 seconds and starts a fresh session for each unit of work the moment it appears.
 Finish your unit and stop; nothing waits on a timer.
 
@@ -84,7 +84,7 @@ The supervisor's log is `$POOL_LOGDIR/pool.jsonl`, its current view
 
 ## The sweep
 
-`python3 .claude/hooks/sweep_locked.py`, run inside a worktree, waits for a sweep
+`python3 .issuelooper/hooks/sweep_locked.py`, run inside a worktree, waits for a sweep
 slot, runs the project's whole check suite (`sweep.command` in
 `.issuelooper/config.toml`) and prints `git: <sha> (clean)`, a `green:` line
 such as `47 green: unit 23 · e2e 24`, and `sweep record: <path>`. The record,
@@ -93,7 +93,7 @@ the PR's head. Any later commit or rebase needs a new sweep.
 
 ## The live check
 
-With `[devcheck]` on, `python3 .claude/hooks/devcheck.py --script <path>`, run
+With `[devcheck]` on, `python3 .issuelooper/hooks/devcheck.py --script <path>`, run
 inside a worktree after the commit, starts the app from the branch the way it runs
 for users (real services, the project's credentials) on its own port, runs the
 project's smoke (`devcheck.command`) and the given scripts against it, stops it
@@ -158,7 +158,7 @@ marker is the only record of who spoke. The guard refuses an unsigned write.
 - Write files only in your own worktree or scratch paths under `$ISSUELOOPER_TMP`,
   this repository's scratch directory (the tester also writes under `.ux/`, which
   git ignores). If it is unset, set it first:
-  `export ISSUELOOPER_TMP=$(python3 "$SHARED_REPO_PATH/.claude/hooks/config.py" tmp); mkdir -p "$ISSUELOOPER_TMP"`.
+  `export ISSUELOOPER_TMP=$(python3 "$SHARED_REPO_PATH/.issuelooper/hooks/config.py" tmp); mkdir -p "$ISSUELOOPER_TMP"`.
   Name your own paths in full when you remove, move or link files
   (`rm -f "$WT/.env"`, not `rm -f .env`): a command with no `cd`, or after a `cd`
   that failed, runs in the shared checkout. Never edit
