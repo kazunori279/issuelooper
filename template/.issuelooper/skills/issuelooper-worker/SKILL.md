@@ -85,8 +85,11 @@ approach. Read the way a careful engineer with a short budget does:
 - Start from the file list in your prompt; search only when it does not lead you
   there, and search narrowly (`grep -n <name>` in the files or directory you
   expect, not `grep -rn` over the repository).
-- Read each file once, whole or in the ranges you need, and keep what you learned
-  in your notes. Do not reread a file you have read unless you changed it.
+- Read line ranges and grep results, not whole files: everything you read stays in
+  your context and is sent again with each later step. When your prompt names a
+  symbol index, look names up there (`grep -n <name> <index>`) before you open a
+  file. Keep what you learned in your notes, and do not reread a range you have
+  read unless you changed it.
 - Check `git status` and `git log` when you need them for a decision (before a
   commit, after a rebase), not as a habit between steps.
 - To try a behavior, write the failing test and run it; do not probe with a string

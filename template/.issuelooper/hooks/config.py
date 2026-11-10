@@ -131,6 +131,7 @@ KEYS = {
     ("pool", "area_notes"): "POOL_AREA_NOTES",
     ("pool", "notes_max_chars"): "POOL_NOTES_MAX_CHARS",
     ("pool", "notes_stale_lines"): "POOL_NOTES_STALE_LINES",
+    ("pool", "symbol_index"): "POOL_SYMBOL_INDEX",
     ("pool", "author_resolve"): "POOL_AUTHOR_RESOLVE",
     ("pool", "hub_at"): "POOL_HUB_AT",
     ("pool", "hub_timeout"): "POOL_HUB_TIMEOUT",

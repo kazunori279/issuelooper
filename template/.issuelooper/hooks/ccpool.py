@@ -556,6 +556,11 @@ class Config:
     area_notes: bool = False
     notes_max_chars: int = 24000
     notes_stale_lines: int = 200
+    # A symbol index of origin/main (POOL_SYMBOL_INDEX): functions, classes and selectors with
+    # file:line, made without a model and cached per main sha, named in the worker's prompt with
+    # the lines for its issue's files. Research read a median of 22 whole files before the first
+    # edit, and each stayed in the context for the rest of the session.
+    symbol_index: bool = False
     area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
     # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
     area_lend_free: bool = True
@@ -767,6 +772,7 @@ class Config:
             area_notes=env_flag("POOL_AREA_NOTES"),
             notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 24000),
             notes_stale_lines=env_int("POOL_NOTES_STALE_LINES", 200),
+            symbol_index=env_flag("POOL_SYMBOL_INDEX"),
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
@@ -2115,6 +2121,143 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
         rows.append(f"{path} ({n} lines): "
                     + ", ".join(f"{t}@{ln}" for t, ln in sorted(names.items(), key=lambda x: x[1])))
     return "\n".join(rows)
+
+
+# The symbol index (POOL_SYMBOL_INDEX): which tracked files, and what in them.
+INDEX_KINDS = {".py": "py", ".js": "js", ".mjs": "js", ".cjs": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
+               ".html": "html", ".htm": "html", ".css": "css"}
+INDEX_SKIP = re.compile(r"(?:^|/)(?:node_modules|vendor|vendored|third_party|dist|build|\.issuelooper|\.claude|"
+                        r"\.agents|\.githooks)/|\.min\.(?:js|css)$")
+INDEX_FILE_MAX = 400_000  # bytes: a larger source file is generated or vendored
+INDEX_MAX_CHARS = 400_000  # the index file; tests go first when it is over, then the tail
+INDEX_EXCERPT = 40  # lines of it quoted in the prompt for the issue's files
+INDEX_LOCK = threading.Lock()
+JS_NAME = r"[A-Za-z_$][\w$]*"
+JS_DEFS = (
+    (re.compile(rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*({JS_NAME})"), "function"),
+    (re.compile(rf"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+({JS_NAME})"), "class"),
+    (re.compile(rf"^\s*(?:export\s+)?(?:const|let|var)\s+({JS_NAME})\s*=\s*(?:async\s+)?"
+                rf"(?:\([^)]*\)|{JS_NAME})\s*=>"), "function"),
+    (re.compile(rf"^\s*(?:export\s+)?(?:const|let|var)\s+({JS_NAME})\s*=\s*(?:async\s+)?function\b"), "function"),
+    (re.compile(rf"^\s*export\s+(?:const|let|var|interface|type|enum)\s+({JS_NAME})"), "export"),
+)
+JS_METHOD = re.compile(rf"^\s+(?:static\s+)?(?:async\s+)?(?:get\s+|set\s+)?({JS_NAME})\s*\([^)]*\)\s*\{{")
+JS_NOT_METHODS = {"if", "for", "while", "switch", "catch", "function", "return", "with", "else"}
+CSS_RULE = re.compile(r"^([.#][A-Za-z][\w-]*)[^{;]*\{")
+HTML_ID = re.compile(r"""\bid=["']([\w-]+)["']""")
+
+
+def symbols(path: str, text: str) -> list[tuple[int, str]]:
+    """(line, "kind name") for the definitions in one file: Python by its syntax tree (top
+    level and one level into classes), JS/TS by line patterns, CSS by id and class rules,
+    HTML by element ids and the JS in it."""
+    kind = INDEX_KINDS.get(os.path.splitext(path)[1].lower())
+    out: list[tuple[int, str]] = []
+    if kind == "py":
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.append((node.lineno, f"def {node.name}"))
+            elif isinstance(node, ast.ClassDef):
+                out.append((node.lineno, f"class {node.name}"))
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        out.append((sub.lineno, f"def {node.name}.{sub.name}"))
+        return out
+    for k, line in enumerate(text.splitlines(), 1):
+        if kind in ("js", "html"):
+            for pattern, what in JS_DEFS:
+                m = pattern.match(line)
+                if m:
+                    out.append((k, f"{what} {m.group(1)}"))
+                    break
+            else:
+                m = JS_METHOD.match(line) if kind == "js" else None
+                if m and m.group(1) not in JS_NOT_METHODS:
+                    out.append((k, f"method {m.group(1)}"))
+        if kind == "html":
+            out += [(k, f"id #{x}") for x in HTML_ID.findall(line)]
+        elif kind == "css":
+            m = CSS_RULE.match(line)
+            if m:
+                out.append((k, f"css {line.split('{')[0].strip()[:80]}"))
+    return out
+
+
+def build_index(root: pathlib.Path, sha: str) -> str:
+    """The symbol index of commit sha: a header, then `path:line: kind name` per definition."""
+    r = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "-l", sha], capture_output=True, text=True,
+                       timeout=60)
+    blobs = []
+    for ln in r.stdout.splitlines():
+        meta, _, path = ln.partition("\t")
+        parts = meta.split()
+        if (len(parts) == 4 and parts[1] == "blob" and parts[3].isdigit() and int(parts[3]) <= INDEX_FILE_MAX
+                and os.path.splitext(path)[1].lower() in INDEX_KINDS and not INDEX_SKIP.search(path)):
+            blobs.append((path, parts[2]))
+    data = b""
+    if blobs:
+        data = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], capture_output=True, timeout=120,
+                              input="".join(f"{b}\n" for _, b in blobs).encode()).stdout
+    rows: list[tuple[bool, str]] = []
+    at = 0
+    for path, _ in blobs:
+        end = data.find(b"\n", at)
+        if end < 0:
+            break
+        head = data[at:end].split()
+        size = int(head[2]) if len(head) == 3 and head[2].isdigit() else 0
+        text = data[end + 1:end + 1 + size].decode("utf-8", "replace")
+        at = end + 1 + size + 1
+        rows += [(is_test(path), f"{path}:{k}: {what}") for k, what in symbols(path, text)]
+    head = (f"# Symbol index of origin/main at {sha[:12]}: `path:line: kind name` for the functions, classes,\n"
+            "# methods, ids and CSS rules in the tracked source files (made without a model). grep it for a name.\n")
+    lines = [x for t, x in rows if not t]
+    tests = [x for t, x in rows if t]
+    body = "\n".join(lines + tests)
+    if len(body) > INDEX_MAX_CHARS:
+        body = "\n".join(lines)[:INDEX_MAX_CHARS].rsplit("\n", 1)[0] + "\n# (cut at the size limit; test files left out)"
+    return head + body + "\n"
+
+
+def symbol_index(root: pathlib.Path, sha: str, keep: int = 4) -> str:
+    """The symbol index of commit sha, under scratch (index/<sha>.txt): made once per sha,
+    so a new one when main moves; the newest few others are kept for running workers."""
+    d = pathlib.Path(scratch("index"))
+    path = d / f"{sha}.txt"
+    with INDEX_LOCK:
+        if path.exists():
+            return str(path)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f".{sha}.{os.getpid()}.tmp"
+        tmp.write_text(build_index(root, sha))
+        tmp.replace(path)
+        old = sorted((p for p in d.glob("*.txt") if p != path), key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in old[keep:]:
+            p.unlink(missing_ok=True)
+    return str(path)
+
+
+def index_text(path: str, files: list[str], globs: list[str]) -> str:
+    """The prompt's note on the symbol index, with its lines for the issue's files (or its area's)."""
+    try:
+        rows = pathlib.Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    want = [ln for ln in rows if not ln.startswith("#")
+            and (ln.split(":", 1)[0] in files or any(config.path_matches(ln.split(":", 1)[0], g) for g in globs))]
+    out = (f"\nA symbol index of origin/main is at {path}: one line per function, class, method, id or CSS rule, "
+           "`path:line: kind name`. Look a name up there (grep -n <name> on it) before you open a file, then read "
+           "only the line ranges you need (sed -n 'A,Bp' <file>, or your read tool with an offset and a limit) and "
+           "grep results, not whole files: everything you read is sent again with each later step of this "
+           "session.\n")
+    if want:
+        out += ("Its lines for the files your issue concerns:\n" + "\n".join("    " + ln for ln in want[:INDEX_EXCERPT])
+                + (f"\n    ... ({len(want) - INDEX_EXCERPT} more)" if len(want) > INDEX_EXCERPT else "") + "\n")
+    return out
 
 
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
@@ -3730,6 +3873,8 @@ class Session(threading.Thread):
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
                                    bool(cfg.accept_guard), cfg.accept_mode)
+            if cfg.symbol_index:
+                prompt += "\n" + self.index_prompt(files)
             knowledge = self.notes_prompt("implement") if cfg.area_notes else ""
             if u.info.get("area") or u.info.get("hot") or knowledge:
                 pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
@@ -3856,6 +4001,24 @@ class Session(threading.Thread):
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip()
         return ""
+
+    def index_prompt(self, files_text: str = "") -> str:
+        """index_text for this worker (POOL_SYMBOL_INDEX): the index of the current origin/main,
+        with its lines for the issue's files (the file map's, else the area's paths)."""
+        root = repo_root()
+        sha = subprocess.run(["git", "-C", str(root), "rev-parse", "origin/main"], capture_output=True, text=True,
+                             timeout=30).stdout.strip()
+        if not sha:
+            return ""
+        try:
+            path = symbol_index(root, sha)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.pool.log("index_error", sha=sha[:12], error=str(exc)[:200])
+            return ""
+        files = list(self.unit.info.get("files") or []) + [ln.split(" (", 1)[0] for ln in files_text.splitlines()]
+        area = notes_key(self.unit)
+        globs = next((a.get("paths") or [] for a in self.pool.cfg.areas if a["name"] == area), []) if area else []
+        return index_text(path, files, globs)
 
     def notes_prompt(self, stage: str) -> str:
         """notes_text for this worker, remembering which notes it keeps and how their file

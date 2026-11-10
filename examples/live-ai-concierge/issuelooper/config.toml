@@ -197,6 +197,8 @@ area_notes = true            # POOL_AREA_NOTES: one notes file per area, updated
                              # and given to the next workers there (forked workers resent ~100k inherited tokens)
 notes_max_chars = 24000      # POOL_NOTES_MAX_CHARS
 notes_stale_lines = 200      # POOL_NOTES_STALE_LINES
+symbol_index = true          # POOL_SYMBOL_INDEX: workers look names up in an index of main and read line ranges
+                             # (research read a median of 22 whole files before the first edit)
 author_resolve = true        # POOL_AUTHOR_RESOLVE: the author's conversation resolves its PR's conflicts; a merger only
                              # when it cannot (a merger re-reads the issue, the PR and main from scratch)
 author_guard = true          # POOL_AUTHOR_GUARD: a change that makes an older guard stale is fixed by its author, not handed back

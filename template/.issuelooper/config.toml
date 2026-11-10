@@ -237,6 +237,9 @@ area_notes = false           # POOL_AREA_NOTES: one notes file per area ($ISSUEL
                              # in their prompt. It goes stale when the files it names change by notes_stale_lines lines
 notes_max_chars = 24000      # POOL_NOTES_MAX_CHARS: notes longer than this are stale and get rebuilt
 notes_stale_lines = 200      # POOL_NOTES_STALE_LINES
+symbol_index = false         # POOL_SYMBOL_INDEX: a symbol index of origin/main (functions, classes, ids, CSS rules with
+                             # file:line; Python, JS/TS, HTML, CSS; no model), cached per main sha, named in the worker's
+                             # prompt with its lines for the issue's files, so workers read line ranges, not whole files
 author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after the supervisor's rebase (or whose rebase
                              # is red) is resolved by its author's conversation, resumed (agy --conversation, claude
                              # --resume), instead of a merger session; the merger stays the fallback (no recorded

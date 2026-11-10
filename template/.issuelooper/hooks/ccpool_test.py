@@ -2834,6 +2834,67 @@ def test_area_notes_are_kept_per_area_and_go_stale() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_symbol_index_per_main_commit() -> None:
+    """POOL_SYMBOL_INDEX: research read a median of 22 whole files before the first edit, each
+    one sent again with every later call; the index lets a worker read line ranges instead."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-index-"))
+    restore = with_env({"SHARED_REPO_PATH": str(d / "work")})
+    try:
+        work, g = git_repo(d)
+        (work / "src" / "js").mkdir(parents=True)
+        (work / "src" / "app.py").write_text(
+            "import os\n\n\ndef handle(req):\n    return req\n\n\nclass Store:\n    def get(self, k):\n"
+            "        return k\n\n    async def put(self, k):\n        pass\n")
+        (work / "src" / "js" / "map.js").write_text(
+            "export function drawMap(el) {\n  return el;\n}\nconst zoom = (z) => z * 2;\n"
+            "export class MapCard {\n  render(x) {\n    if (x) {\n      return x;\n    }\n  }\n}\n")
+        (work / "src" / "js" / "vendor").mkdir()
+        (work / "src" / "js" / "vendor" / "lib.js").write_text("function vendored() {}\n")
+        (work / "README.md").write_text("def not_code():\n")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        g("push", "-q", "origin", "HEAD:main")
+        g("fetch", "-q", "origin")
+        sha = g("rev-parse", "origin/main")
+        path = ccpool.symbol_index(work, sha)
+        rows = [x for x in pathlib.Path(path).read_text().splitlines() if not x.startswith("#")]
+        check("Python by its syntax tree and JS by its patterns, with file:line; vendored and non-source files left out",
+              rows, ["src/app.py:4: def handle", "src/app.py:8: class Store", "src/app.py:9: def Store.get",
+                     "src/app.py:12: def Store.put", "src/js/map.js:1: function drawMap", "src/js/map.js:4: function zoom",
+                     "src/js/map.js:5: class MapCard", "src/js/map.js:6: method render"])
+        check("cached under scratch by the main sha", path, f"{SCRATCH}/index/{sha}.txt")
+        real, built = ccpool.build_index, []
+        ccpool.build_index = lambda root, s: (built.append(s), real(root, s))[1]
+        try:
+            again = ccpool.symbol_index(work, sha)
+            check("the same main sha: the cached index, not built again", (again, built), (path, []))
+            (work / "src" / "app.py").write_text("def other():\n    pass\n")
+            g("commit", "-qam", "next")
+            g("push", "-q", "origin", "HEAD:main")
+            g("fetch", "-q", "origin")
+            new = g("rev-parse", "origin/main")
+            check("main moved: a new index for the new sha", (ccpool.symbol_index(work, new) != path, built), (True, [new]))
+        finally:
+            ccpool.build_index = real
+        h = Rig(state(), symbol_index=True, areas=AREAS)
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,),
+                                               {"area": "cards", "files": ["src/app.py"]}), 1)
+        text = w.index_prompt("src/js/map.js (11 lines): drawMap@1")
+        check("the prompt names the index of the current main, says to read line ranges, and quotes the lines for "
+              "the issue's files",
+              (f"{SCRATCH}/index/{new}.txt" in text, "line ranges" in text, "src/app.py:1: def other" in text,
+               "src/js/map.js:1: function drawMap" in text), (True, True, True, True))
+        check("CSS rules and HTML ids, with the functions in a page's script",
+              (ccpool.symbols("a.css", ".card, .tile {\n  color: red;\n}\n#main .x {\n"),
+               ccpool.symbols("a.html", '<div id="feed">\n<script>\nfunction boot() {}\n</script>\n')),
+              ([(1, "css .card, .tile"), (4, "css #main .x")], [(1, "id #feed"), (3, "function boot")]))
+        check("POOL_SYMBOL_INDEX defaults to off", ccpool.Config.from_env().symbol_index, False)
+    finally:
+        restore()
+        shutil.rmtree(pathlib.Path(SCRATCH, "index"), ignore_errors=True)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 CONCIERGE_AREAS = [
     {"name": "live", "paths": ["src/concierge/main.py", "src/concierge/static/js/audio.js"], "hot": ["src/concierge/main.py"],
      "words": ["live mode", "voice", "microphone"], "ids": ["R-RUN", "R-CONV"]},
