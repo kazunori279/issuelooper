@@ -177,7 +177,7 @@ When `[accept] guard` is set (for example `uv run pytest -q tests/accept`), the 
 
 ## 5. Keeping a worker in one conversation & scaling parallelism
 
-Starting a brand-new agent session for every conflict, guard failure, or related issue discards the mental model the previous agent built. Four optional mechanisms (all enabled in the `live-ai-concierge` sample) keep work in warm conversations while scaling across `[pool] max_sessions`:
+Starting a brand-new agent session for every conflict, guard failure, or related issue discards the mental model the previous agent built. Several optional mechanisms (all but `[pool] fork` enabled in the `live-ai-concierge` sample) keep work in warm conversations, or hand what was learned to a fresh one, while scaling across `[pool] max_sessions`:
 
 ### Author conflict resolution (`[pool] author_resolve`)
 
@@ -185,7 +185,11 @@ The supervisor records the agent conversation ID for each issue in `.issuelooper
 
 ### Seed checkpoint forking (`[pool] fork`)
 
-When `[pool] fork = true` (the default), the first worker to open a PR in each area (and the first in the repository overall) saves a dedicated snapshot of its conversation as a seed checkpoint (`area_seeds` and `repo_seed` in `owners.json`). Later workers, parallel area slots, overflow (`lent`) workers, and conflict or guard-fix sessions whose author conversation is currently busy fork from that checkpoint (`agy` copies the SQLite conversation database to a new UUID; `claude` runs `--resume <id> --fork-session`). Because forked sessions already hold the initial exploration of `.issuelooper/project.md`, `spec/`, and the area's modules, workers skip redundant file discovery and share a warm prompt-cache prefix while running in parallel without locking a single conversation.
+When `[pool] fork = true` (off by default), the first worker to open a PR in each area (and the first in the repository overall) saves a dedicated snapshot of its conversation as a seed checkpoint (`area_seeds` and `repo_seed` in `owners.json`). Later workers, parallel area slots, overflow (`lent`) workers, and conflict or guard-fix sessions whose author conversation is currently busy fork from that checkpoint (`agy` copies the SQLite conversation database to a new UUID; `claude` runs `--resume <id> --fork-session`). Because forked sessions already hold the initial exploration of `.issuelooper/project.md`, `spec/`, and the area's modules, workers skip redundant file discovery and share a warm prompt-cache prefix while running in parallel without locking a single conversation. Forking pays only while the seed's context is small and the cache is warm: on a long run with a saturated model quota, forks started at ~107k inherited tokens, their first call missed the cache, and they cost more than cold workers for the same quality. Area notes and `[pool] continue_max_tokens` carry what was learned without the transcript.
+
+### Continuing an area conversation while it is small (`[pool] continue_max_tokens`)
+
+With `[pool] continue_max_tokens` set (60000 in the concierge sample), an area conversation goes on with the area's next claimable issue (resumed, its cache warm) only while its last issue ended with its PR open and its context (the newest model call's prompt, recorded per slot in `owners.json`) is under that many tokens. Otherwise the next issue in that slot starts a fresh conversation with the area notes (`fresh_why` on its `start` line in `pool.jsonl`). `[areas] refresh_after` still caps the issues per conversation. A continued issue skips the research stage, since its area's context is loaded already; a fresh one runs it. With `[pool] fork` on, forking from the seed still comes first.
 
 ### Research, then implementation (`[pool] research_brief`)
 

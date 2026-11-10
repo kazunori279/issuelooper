@@ -557,6 +557,12 @@ class Config:
     # works an issue that names an area's hot file. A PR once waited hours on live.py.
     area_refresh: int = 6
     area_refresh_tokens: int = 0
+    # An area conversation goes on with the area's next issue only while its last issue ended
+    # with the PR open and its context (the newest call's prompt) is under this many tokens;
+    # otherwise the next issue starts fresh, with the area notes (0 = off: area_refresh and
+    # area_refresh_tokens alone decide). Forked workers that started from ~107k inherited
+    # tokens cost more than cold ones; a small warm context is what pays.
+    continue_max_tokens: int = 0
     area_conversations: int = 3
     area_second_at: int = 3
     area_hot_lock: bool = True
@@ -764,7 +770,7 @@ class Config:
             orphan_pr_min=env_int("POOL_ORPHAN_PR_MIN", 10),
             unclaimable_retry_s=float(e("POOL_UNCLAIMABLE_RETRY_S", "") or 240),
             merger_max=env_int("POOL_MERGER_MAX", 3),
-            fork=env_flag("POOL_FORK", True),
+            fork=env_flag("POOL_FORK"),
             author_resolve=env_flag("POOL_AUTHOR_RESOLVE"),
             author_resolve_max=env_int("POOL_AUTHOR_RESOLVE_MAX", 2),
             author_guard=env_flag("POOL_AUTHOR_GUARD"),
@@ -785,6 +791,7 @@ class Config:
             areas=config.areas(),
             area_refresh=env_int("POOL_AREA_REFRESH", 6),
             area_refresh_tokens=env_int("POOL_AREA_REFRESH_TOKENS", 0),
+            continue_max_tokens=env_int("POOL_CONTINUE_MAX_TOKENS", 0),
             area_conversations=env_int("POOL_AREA_CONVERSATIONS", 3),
             area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
@@ -1865,6 +1872,22 @@ def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: 
     return held
 
 
+def continue_refused(slot: dict, cfg: Config) -> str:
+    """Why an area conversation does not go on with the area's next issue under
+    POOL_CONTINUE_MAX_TOKENS ('' when it may, or when that is off): its last issue ended without
+    the PR open, or its context is not known to be under the cap."""
+    if not cfg.continue_max_tokens:
+        return ""
+    if not slot.get("pr"):
+        return "its last issue ended without a PR"
+    tokens = slot.get("tokens") or 0
+    if not tokens:
+        return "its context size is unknown"
+    if tokens >= cfg.continue_max_tokens:
+        return f"its context reached {tokens} tokens (cap {cfg.continue_max_tokens})"
+    return ""
+
+
 def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, now: float = 0.0,
                   pr_of: dict | None = None, free: int = 0) -> dict | None:
     """Where issue n's worker runs ([areas]): {} for no area, else {"area", "slot", "resume",
@@ -1919,11 +1942,13 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
         slot = slots[k] if k < len(slots) else {}
         refresh = bool(slot) and (slot.get("issues", 0) >= cfg.area_refresh > 0 or
                                   (cfg.area_refresh_tokens and slot.get("tokens", 0) >= cfg.area_refresh_tokens))
-        conv = "" if refresh else conv_resumable(slot)
+        why = continue_refused(slot, cfg) if slot and not refresh else ""
+        conv = "" if refresh or why else conv_resumable(slot)
         if conv and conv in busy_convs(active):
             continue
         return {"area": area, "slot": k, "resume": conv or None, "files": sorted(files), "hot": sorted(hot),
-                "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh}
+                "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh or bool(why),
+                **({"fresh_why": why} if why else {})}
     if (cfg.area_lend_at and queue[area] >= cfg.area_lend_at) or (cfg.area_lend_free and free > 0):
         out = {"lent": area, "files": sorted(files), "hot": sorted(hot)}
         if cfg.fork and seed_conv:
@@ -5519,7 +5544,8 @@ class Pool:
             w = Session(self, u, self.seq)
             w.fork_counted = fork_counted
             self.sessions[u.family] = w
-        self.log("start", session=self.seq, role=u.role, unit=u.key)
+        self.log("start", session=self.seq, role=u.role, unit=u.key,
+                 **({"fresh_why": u.info["fresh_why"]} if u.info.get("fresh_why") else {}))
         if self.spawn_workers:
             w.start()
         return w
@@ -5740,9 +5766,9 @@ class Pool:
                     resumed = bool(u.info.get("resume")) and old.get("conv") == u.info.get("resume")
                     slots[k] = {"conv": conv, "cli": w.cli.name, "issues": (old.get("issues", 0) if resumed else 0) + 1,
                                 "notes": u.info.get("notes") or area_notes(area, k), "t": round(self.clock(), 1),
-                                "tokens": tokens}
+                                "tokens": tokens, "pr": w.left_pr}
                     self.log("area_conversation", area=area, slot=k, conversation=conv, issues=slots[k]["issues"],
-                             tokens=tokens, resumed=resumed)
+                             tokens=tokens, resumed=resumed, pr=w.left_pr)
                 if u.info.get("fork") and not getattr(w, "fork_counted", False):
                     fconv = u.info["fork"]
                     area_k = area or u.info.get("lent") or ""

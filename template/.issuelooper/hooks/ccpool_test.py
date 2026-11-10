@@ -2895,6 +2895,52 @@ def test_a_symbol_index_per_main_commit() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_an_area_conversation_goes_on_only_while_small_and_its_pr_open() -> None:
+    """POOL_CONTINUE_MAX_TOKENS: forked workers started from ~107k inherited tokens and cost more
+    than cold ones; a warm conversation pays only while its context is small."""
+    restore = with_env({"CCROLE_WORKER_CLI": "claude", "POOL_CONTINUE_MAX_TOKENS": ""})
+    try:
+        check("POOL_CONTINUE_MAX_TOKENS defaults to 0 (off)", ccpool.Config.from_env().continue_max_tokens, 0)
+
+        def placed(slot, n=2, area="live", **cfg):
+            h = Rig(state([iss(n, ["stage:triage", "P1"])]), areas=AREAS, **{"continue_max_tokens": 60000, **cfg})
+            h.pool.track_areas = lambda st: None
+            h.pool.book.issue_area, h.pool.book.issue_files = {n: area}, {n: []}
+            h.pool.book.area_slots["live"] = [slot]
+            u = h.step()[0]
+            return u.info.get("area"), u.info.get("resume"), u.info.get("fresh_why", "")
+        base = {"conv": "s-live", "cli": "claude", "issues": 1}
+        check("its last issue ended with the PR open and 30k tokens of context: it goes on with the next one",
+              placed({**base, "pr": True, "tokens": 30000}), ("live", "s-live", ""))
+        check("over the cap: a fresh conversation (with the notes)",
+              placed({**base, "pr": True, "tokens": 80000}),
+              ("live", None, "its context reached 80000 tokens (cap 60000)"))
+        check("its last issue ended without a PR: fresh",
+              placed({**base, "pr": False, "tokens": 30000}), ("live", None, "its last issue ended without a PR"))
+        check("context size unknown: fresh", placed({**base, "pr": True}), ("live", None, "its context size is unknown"))
+        check("the next issue in another area never gets this conversation",
+              placed({**base, "pr": True, "tokens": 30000}, area="cards"), ("cards", None, ""))
+        check("off (0): the conversation goes on as before, whatever its PR or size",
+              placed({**base, "pr": False, "tokens": 90000}, continue_max_tokens=0)[1], "s-live")
+        # The slot remembers whether its session left the PR open, and its context size.
+        h = Rig(state(), areas=AREAS, continue_max_tokens=60000)
+        w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,),
+                                               {"area": "live", "slot": 0}), 1)
+        w.dir.mkdir(parents=True)
+        (w.dir / "session.jsonl").write_text("")
+        (w.dir / "claim.out").write_text("claimed\n")
+        w.conversation = lambda: "c-live"
+        w.cli = type("Fake", (), {"name": "claude", "context_tokens": lambda self, ev: 41000})()
+        w.events = lambda: []
+        w.left_pr = True
+        h.pool.record_conv(w)
+        check("record_conv keeps the PR and the context size for the slot",
+              {k: h.pool.book.area_slots["live"][0][k] for k in ("conv", "pr", "tokens")},
+              {"conv": "c-live", "pr": True, "tokens": 41000})
+    finally:
+        restore()
+
+
 CONCIERGE_AREAS = [
     {"name": "live", "paths": ["src/concierge/main.py", "src/concierge/static/js/audio.js"], "hot": ["src/concierge/main.py"],
      "words": ["live mode", "voice", "microphone"], "ids": ["R-RUN", "R-CONV"]},
@@ -6777,9 +6823,9 @@ def test_session_forking_seeds_and_fans_out() -> None:
     conversation; parallel area slots, lent workers, no-area workers and busy authors fork from it."""
     restore = with_env({"POOL_FORK": "", "CCROLE_WORKER_CLI": "claude"})
     try:
-        check("POOL_FORK defaults to on", ccpool.Config.from_env().fork, True)
-        os.environ["POOL_FORK"] = "0"
-        check("POOL_FORK=0 turns it off", ccpool.Config.from_env().fork, False)
+        check("POOL_FORK defaults to off", ccpool.Config.from_env().fork, False)
+        os.environ["POOL_FORK"] = "1"
+        check("POOL_FORK=1 turns it on", ccpool.Config.from_env().fork, True)
         os.environ.pop("POOL_FORK", None)
 
         h = Rig(state([iss(n, ["stage:triage", "P1"]) for n in (1, 2, 3, 4, 5, 6)]),

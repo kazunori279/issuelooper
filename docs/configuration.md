@@ -182,7 +182,8 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] train_wait_s` | `POOL_TRAIN_WAIT_S` | `0` | Seconds to wait after the first queued PR for more PRs to join the train (`0` starts immediately). |
 | `[pool] tester_port_base` | `TST_PORT` | `8021`–`8099` (by path hash) | First port assigned to tester sessions (each tester steps by `100`). |
 | `[pool] run_dir` | `ISSUELOOPER_RUN` | `".issuelooper/run"` | Directory for supervisor logs, PID files, and session logs (must be git-ignored). |
-| `[pool] fork` | `POOL_FORK` | `true` | Save the first PR-opening worker conversation per area (and repo-wide) as a seed checkpoint and fork parallel workers, overflow workers, and busy authors from it. |
+| `[pool] fork` | `POOL_FORK` | `false` | Save the first PR-opening worker conversation per area (and repo-wide) as a seed checkpoint and fork parallel workers, overflow workers, and busy authors from it. |
+| `[pool] continue_max_tokens` | `POOL_CONTINUE_MAX_TOKENS` | `0` | An area conversation takes the area's next issue only while its last issue ended with the PR open and its context is under this many tokens; otherwise the next issue starts fresh with the area notes (`0` disables the check). |
 | `[pool] area_notes` | `POOL_AREA_NOTES` | `false` | Keep one notes file per area (`$ISSUELOOPER_TMP/areas/<area>.md`, `_repo.md` for issues in no area): a worker updates it after its PR is open, and the next workers there get it in their prompt. |
 | `[pool] notes_max_chars` | `POOL_NOTES_MAX_CHARS` | `24000` | Notes longer than this are stale and the next worker rebuilds them. |
 | `[pool] notes_stale_lines` | `POOL_NOTES_STALE_LINES` | `200` | Notes are stale once the files they name changed by more lines than this since the commit they describe. |

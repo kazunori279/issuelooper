@@ -229,9 +229,13 @@ train_wait_s = 0             # POOL_TRAIN_WAIT_S: wait up to this long after the
                              # 0 = a train starts as soon as the main lane is free
 # tester_port_base = 8021    # TST_PORT: the first port handed to a tester; unset, one of 8021-8099 picked by
                              # the repository's path, so loops for two repositories rarely share ports
-fork = true                  # POOL_FORK: the first worker to open a PR in an area (or in the repository with no area)
+fork = false                 # POOL_FORK: the first worker to open a PR in an area (or in the repository with no area)
                              # saves a seed conversation checkpoint; later workers, parallel area slots, overflow
-                             # workers and busy authors fork from it (agy SQLite copy, claude --fork-session)
+                             # workers and busy authors fork from it (agy SQLite copy, claude --fork-session). Forks
+                             # start with the seed's whole context, and their first call misses the prompt cache
+continue_max_tokens = 0      # POOL_CONTINUE_MAX_TOKENS: an area conversation goes on with the area's next issue only
+                             # while its last issue ended with the PR open and its context is under this many tokens;
+                             # otherwise the next issue starts fresh with the area notes (0 = off)
 area_notes = false           # POOL_AREA_NOTES: one notes file per area ($ISSUELOOPER_TMP/areas/<area>.md; _repo.md for
                              # issues in no area). A worker updates it after its PR is open; the next workers there get it
                              # in their prompt. It goes stale when the files it names change by notes_stale_lines lines
