@@ -184,6 +184,7 @@ words = ["tool", "tools"]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project
 production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these skips the review
+test_removal_min = 5         # REVIEW_TEST_REMOVAL_MIN: ... unless it only removes tests (a consolidation once cut 29 unreviewed)
 fixtures = ["spec/fixtures/*.json", "ux/ux_script.json"]   # REVIEW_FIXTURES: fixture files whose values in production code are flagged for the reviewer
 
 [pool]

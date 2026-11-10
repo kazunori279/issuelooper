@@ -2140,6 +2140,11 @@ def check_pr_merge(command: str) -> None:
         # record; a reject has already been handed back to a worker).
         review_gate_check(pr, head_sha, target)
 
+        # Gate 7 for a test-only change that removes tests: reviewed, never waived.
+        removed = tests_removed_net(files, base_sha, head_sha)
+        if removed:
+            test_removal_check(removed, head_sha, target, pr)
+
         # Gate 7: a change a user can see was used in the real environment first.
         if devcheck_on():
             changed = [str(f.get("path") or "") for f in (files if isinstance(files, list) else [])
@@ -2500,6 +2505,58 @@ def review_gate_on() -> bool:
         "0",
         "false",
         "no",
+    )
+
+
+TEST_PATH = re.compile(r"(?:^|/)(?:tests?|fixtures)/|(?:^|/)(?:test_[^/]*|conftest\.py)$|_test\.[^/]+$|\.(?:test|spec)\.[^/]+$")
+
+
+def test_removal_min() -> int:
+    try:
+        return int(os.environ.get("REVIEW_TEST_REMOVAL_MIN", "5") or 0)
+    except ValueError:
+        return 5
+
+
+def tests_removed_net(files, base_sha: str, head_sha: str) -> int:
+    """For a test-only PR (every file it changes is a test), the `def test_` functions it
+    removes more than it adds, at its fork point against its head, when that is at least
+    REVIEW_TEST_REMOVAL_MIN; else 0."""
+    least = test_removal_min()
+    changed = [str(f.get("path") or "") for f in (files if isinstance(files, list) else []) if isinstance(f, dict)]
+    if not least or not changed or not head_sha or not all(TEST_PATH.search(p) for p in changed):
+        return 0
+    fork = merge_base(base_sha, head_sha) or base_sha
+    net = 0
+    for p in changed:
+        if p.endswith(".py"):
+            net += len(TEST_NAME.findall(get_file_content_at_commit(fork, p) or ""))
+            net -= len(TEST_NAME.findall(get_file_content_at_commit(head_sha, p) or ""))
+    return net if net >= least else 0
+
+
+def test_removal_check(removed: int, head_sha: str, target: str, pr: str) -> None:
+    """A test-only PR that removes tests merges only on the review gate's pass (or the owner's
+    override), never on a skip or a `Live check: waived` line: a consolidation chore once cut
+    29 e2e tests (99 asserts), the review skipped it as test-only and the live check was waived."""
+    if not review_gate_on():
+        return
+    verdict = None
+    for record_dir in config.record_dirs("review"):
+        try:
+            verdict = json.loads((record_dir / f"{head_sha.lower()}.json").read_text()).get("verdict")
+            break
+        except (OSError, ValueError, AttributeError):
+            continue
+    if verdict in ("pass", "override"):
+        return
+    block(
+        f"Gate 7 (test removal): {target} changes only tests and removes {removed} more test functions than it adds, "
+        f"and its head `{head_sha[:7]}` has no review pass (`{verdict or 'no record'}`).\n\n"
+        "Tests that go must have their behavior covered by the tests that stay, and the review gate checks that. "
+        "Run the review on this head (it reviews such a PR instead of skipping it):\n\n"
+        f'    python3 "$SHARED_REPO_PATH/.issuelooper/hooks/review_gate.py" --pr {pr or "<N>"}\n\n'
+        "A `Live check: waived` line does not stand in for it."
     )
 
 

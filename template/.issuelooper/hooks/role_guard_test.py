@@ -1446,6 +1446,43 @@ def test_merge_may_not_remove_baseline_tests() -> None:
     check("[guard] baseline_tests = off: the gate is off", verdict, "allow")
 
 
+def test_a_test_only_pr_that_removes_tests_needs_a_review_pass() -> None:
+    """A consolidation chore cut 29 e2e tests (99 asserts): the review skipped it as test-only and
+    Gate 7 waived it."""
+    tests = lambda n, prefix="issue": "".join(f"def test_{prefix}_{k}(page):\n    assert page.title()\n" for k in range(n))
+    base = make_commit({"tests/e2e/test_issue_1.py": tests(6), "tests/e2e/test_flows.py": "def test_x():\n    pass\n"})
+    body = ("<!-- worker -->\nCloses #134\n- **Sweep SHA:** {sha}\n- **Sweep:** waived - loop/process\n"
+            "- **Fail-before:** waived - loop/process\n- **Live check:** waived - no visible change\n")
+    records = pathlib.Path(tempfile.mkdtemp(prefix="role-guard-removal-"))
+
+    def verdict_for(head: str, files: list, review: str | None) -> tuple[str, str]:
+        env, _ = with_fake_gh(labels={"134": ["P2", "type:chore"]}, linked={"802": ["134"]}, prs={"802": {
+            "headRefOid": head, "baseRefOid": base, "body": body.format(sha=head[:7]), "files": files,
+            "headRefName": "issue-134"}})
+        for f in records.glob("*.json"):
+            f.unlink()
+        if review:
+            (records / f"{head}.json").write_text(json.dumps({"verdict": review}))
+        return run("gh pr merge 802 --squash", role="merger",
+                   extra_env={**env, "REVIEW_GATE": "on", "REVIEW_DIR": str(records), "POOL_DEVCHECK": "1",
+                              "GUARD_BASELINE_TESTS": "off"})
+    cut6 = make_commit({"tests/e2e/test_flows.py": "def test_x():\n    pass\n"}, parent=base)
+    files6 = [{"path": "tests/e2e/test_issue_1.py", "changeType": "DELETED"},
+              {"path": "tests/e2e/test_flows.py", "changeType": "MODIFIED"}]
+    verdict, reason = verdict_for(cut6, files6, "skipped")
+    check("a test-only PR removing 6 tests with a skipped review and a waived live check: refused",
+          (verdict, "removes 6 more test functions" in reason, "review_gate.py" in reason), ("refuse", True, True))
+    check("with the review's pass it merges", verdict_for(cut6, files6, "pass")[0], "allow")
+    cut2 = make_commit({"tests/e2e/test_issue_1.py": tests(4), "tests/e2e/test_flows.py": "def test_x():\n    pass\n"},
+                       parent=base)
+    check("removing 2 is still waived and skipped as before",
+          verdict_for(cut2, [{"path": "tests/e2e/test_issue_1.py", "changeType": "MODIFIED"}], "skipped")[0], "allow")
+    net2 = make_commit({"tests/e2e/test_flows.py": "def test_x():\n    pass\n" + tests(4, "flow")}, parent=base)
+    check("6 removed and 4 added count 2: allowed on a skip",
+          verdict_for(net2, files6, "skipped")[0], "allow")
+    shutil.rmtree(records, ignore_errors=True)
+
+
 def test_needs_live_close_requires_evidence() -> None:
     """The other end of gate 4: the issue stays open until somebody says where
     they saw the behavior."""

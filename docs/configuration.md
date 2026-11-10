@@ -172,6 +172,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[review] production_paths` | `REVIEW_PATHS` | `["src/"]` | Path prefixes reviewed by `review_gate.py`; diffs outside these paths skip Gate 5. |
 | `[review] spec_paths` | `REVIEW_SPEC_PATHS` | `["spec/"]` | Specification paths scanned so identifiers defined in the spec are not mistaken for test-specific hooks (`[]` disables). |
 | `[review] max_rejects` | `REVIEW_MAX_REJECTS` | `2` | Maximum review hand-backs before parking the issue at `stage:owner`. |
+| `[review] test_removal_min` | `REVIEW_TEST_REMOVAL_MIN` | `5` | A test-only PR that removes this many `def test_` functions more than it adds is reviewed (the reviewer names each removed test's replacement), and merges only on a review pass, never on a skip or a waived live check (`0` disables). |
 | `[review] fixtures` | `REVIEW_FIXTURES` | `[]` | Fixture file globs whose literal values are flagged if copied into production code. |
 | `[pool] max_sessions` | `POOL_MAX_WORKERS` | `8` | Maximum concurrent agent sessions across all roles (`worker`, `merger`, `tester`, `explorer`). |
 | `[pool] worker_timeout` | `POOL_TIMEOUT_WORKER` | `"45m"` (`"60m"` with `devcheck`) | Time limit per worker session before wrap-up and WIP branch rescue. |

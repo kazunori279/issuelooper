@@ -363,6 +363,30 @@ try:
                                                       "    assert subprocess.run(['ruff', 'format', '--check', '.']).returncode == 0"])])
     check("a formatter run as a test: rejected", (rg.review(7, hand=False), record("c7" * 20)["verdict"]), (1, "reject"))
 
+    # A consolidation chore cut 29 e2e tests (99 asserts) in a test-only PR the review skipped.
+    def removal(n, sha, removed, added):
+        serve(n, sha, [])
+        old = "".join(f"-def test_issue_{k}(page):\n-    assert page.title()\n" for k in range(removed))
+        new = "".join(f"+def test_flow_{k}(page):\n+    assert page.title()\n" for k in range(added))
+        (GHDIR / f"{n}.diff").write_text(
+            "diff --git a/tests/e2e/test_issue_1.py b/tests/e2e/test_issue_1.py\n--- a/tests/e2e/test_issue_1.py\n"
+            f"+++ /dev/null\n@@ -1,{2 * removed} +0,0 @@\n{old}"
+            "diff --git a/tests/e2e/test_flows.py b/tests/e2e/test_flows.py\n--- /dev/null\n+++ b/tests/e2e/test_flows.py\n"
+            f"@@ -0,0 +1,{2 * added} @@\n{new}")
+    PROMPTS.clear()
+    removal(80, "e8" * 20, 6, 0)
+    check("a test-only PR that removes 6 test functions is reviewed, not skipped",
+          (rg.review(80), record("e8" * 20)["verdict"], record("e8" * 20).get("tests_removed"), len(PROMPTS)), (0, "pass", 6, 1))
+    check("the judge is asked to name each removed test's replacement and to reject an uncovered one",
+          ("removes 6 more test functions than it adds" in PROMPTS[-1], "`tests/e2e/test_issue_1.py::test_issue_0`" in PROMPTS[-1],
+           "name in your reason the test that now covers the same behavior" in PROMPTS[-1]), (True, True, True))
+    PROMPTS.clear()
+    removal(81, "e9" * 20, 2, 0)
+    check("removing 2 is still skipped", (rg.review(81), record("e9" * 20)["verdict"], PROMPTS), (0, "skipped", []))
+    removal(82, "ea" * 20, 6, 4)
+    check("6 removed and 4 added count 2: skipped", (rg.tests_removed(rg.split_files((GHDIR / "82.diff").read_text()))[0],
+                                                      rg.review(82), record("ea" * 20)["verdict"]), (2, 0, "skipped"))
+
     # Run 10b #47: a rejection told the worker to undo a status label the issue and spec §11
     # ask for. The reviewer now sees the issue, and the author's answer gets the same head
     # reviewed again.

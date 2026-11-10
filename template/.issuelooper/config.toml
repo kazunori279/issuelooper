@@ -213,6 +213,8 @@ production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these s
 spec_paths = ["spec/"]       # REVIEW_SPEC_PATHS: where the spec is; names the diff adds that it names (test hooks,
                              # ids, keys) are listed for the reviewer as the product's, never test-specific. [] = off
 max_rejects = 2              # REVIEW_MAX_REJECTS: rejects handed back to workers; the next one waits for the owner
+test_removal_min = 5         # REVIEW_TEST_REMOVAL_MIN: a test-only PR that removes this many test functions more than it
+                             # adds is reviewed, not skipped, and merges only on a review pass (0 = off)
 # fixtures = ["tests/fixtures/**/*.json"]   # REVIEW_FIXTURES: fixture files whose values in production code are flagged for the reviewer
 
 [pool]

@@ -25,6 +25,9 @@ Settings (environment, or .issuelooper/config.toml through config.py):
                          regexes, one per line, and is not sent as rule text.
     REVIEW_MAX_REJECTS   rejects of one PR handed back to a worker, default 2; a reject
                          after that sends the issue to stage:owner instead.
+    REVIEW_TEST_REMOVAL_MIN  a test-only diff that removes this many test functions more
+                         than it adds (`def test_` lines, net) is reviewed, not skipped;
+                         the judge names each removed test's replacement. Default 5, 0 = off.
     REVIEW_MAX_ERRORS    failed reviews (the judge failed or answered nonsense) of one
                          head before its issue goes to stage:owner, default 3.
     REVIEW_DIR           where records go, default $ISSUELOOPER_TMP/review (records in
@@ -62,7 +65,8 @@ one event line. role_guard.py (Gate 5) refuses `gh pr merge` unless the record
 for the current head allows it:
 
     pass      the judge passed it, or a pass for the same diff at an earlier head (a rebase)
-    skipped   no production file changed, or the gate is off
+    skipped   no production file changed (and no test-only removal of REVIEW_TEST_REMOVAL_MIN
+              tests or more), or the gate is off
     override  the owner allowed this head: a comment on the PR, with no role marker, by
               someone with write access, with a line `review-override: <sha> <reason>`
               naming the head (claim.by_owner says who the owner is)
@@ -128,6 +132,9 @@ PROD_CHARS = int(os.environ.get("REVIEW_PROD_CHARS", "80000"))
 PROMPT_BYTES = 120_000
 MAX_REJECTS = int(os.environ.get("REVIEW_MAX_REJECTS", "2"))
 MAX_ERRORS = int(os.environ.get("REVIEW_MAX_ERRORS", "3"))
+# A test-only diff that removes this many `def test_` functions more than it adds is reviewed,
+# not skipped (0 = never): a consolidation chore once cut 29 e2e tests (99 asserts) unreviewed.
+TEST_REMOVAL_MIN = int(os.environ.get("REVIEW_TEST_REMOVAL_MIN", "5") or 0)
 LONG_FN = int(os.environ.get("REVIEW_LONG_FN", "150"))
 REFACTOR_LINES = int(os.environ.get("REVIEW_REFACTOR_LINES", "300"))
 PROMPT = pathlib.Path(os.environ.get("REVIEW_PROMPT") or HERE / "review_prompt.md")
@@ -884,6 +891,39 @@ ACCEPT_CHORE_MARK = "<!-- accept-chore -->"
 GUARD_CHANGE = re.compile(r"(?im)^[ \t>*-]*(?:\*\*)?Guard change(?:\*\*)?:.*$")
 
 
+TEST_DEF = re.compile(r"^([+-])[ \t]*(?:async[ \t]+)?def[ \t]+(test_\w+)", re.MULTILINE)
+
+
+def tests_removed(files: list[tuple[str, str]]) -> tuple[int, list[str]]:
+    """(test functions removed minus added, the removed names as `path::name`) over the
+    diff's test files. A test moved to another file is removed in one and added in the other."""
+    net, names = 0, []
+    for path, part in files:
+        if not TEST_FILE.search(path):
+            continue
+        old = re.search(r"(?m)^--- a/(.+)$", part)
+        for sign, name in TEST_DEF.findall(part):
+            if sign == "-":
+                net += 1
+                names.append(f"{old.group(1).strip() if old else path}::{name}")
+            else:
+                net -= 1
+    return net, names
+
+
+def removal_text(net: int, names: list[str]) -> str:
+    """The prompt's account of a test-only diff that removes tests ('' when it does not)."""
+    if net < TEST_REMOVAL_MIN or not TEST_REMOVAL_MIN:
+        return ""
+    shown = ", ".join(f"`{x}`" for x in names[:40]) + (f" and {len(names) - 40} more" if len(names) > 40 else "")
+    return (
+        f"This test-only diff removes {net} more test functions than it adds. Removed: {shown}.\n"
+        "Each removed test checked some behavior. For each one, name in your reason the test that now covers the same "
+        "behavior (`path::name`, in this diff or kept on main as its context shows). Reject (kind \"test\") when a "
+        "removed test's behavior, or an assertion it made, is no longer covered by any test: merging tests by flow "
+        "must not drop what they check.")
+
+
 def guard_text(guards: list[str], body: str) -> str:
     """The prompt's account of the acceptance guards a diff changes ('' when none)."""
     if not guards:
@@ -900,7 +940,7 @@ def guard_text(guards: list[str], body: str) -> str:
 
 def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", moved: int = 0, note: str = "",
                  issue_text: str = "", answer: str = "", spec: list[str] | None = None, previous: str = "",
-                 guards: str = "") -> str:
+                 guards: str = "", removed: str = "") -> str:
     """The prompt file with its <<FIELD>>s filled in one pass, so text from the
     diff or the rules file is never taken for a field."""
     values = {
@@ -910,6 +950,7 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
         "ANSWER": answer.strip() or "(none)",
         "SPEC": "\n".join(f"- {x}" for x in spec or []) or "(none found)",
         "GUARDS": guards or "(this diff changes no acceptance guard)",
+        "REMOVED": removed or "(this diff removes no tests beyond what it adds, or it changes production code)",
         "PREVIOUS": previous or "(none: this is the first review of this pull request, or the last one passed)",
         "PATHS": ", ".join(f"`{p}`" for p in PATHS) or "the repository",
         "RULES": rules.strip() or NO_RULES,
@@ -1122,11 +1163,14 @@ def review(pr: int, hand: bool = True) -> int:
     # A change to an acceptance guard outside an acceptance chore (an author updating a guard its
     # issue changes the behavior of) is reviewed against the issue and the spec, test-only or not.
     guards = [] if ACCEPT_CHORE_MARK in issue_text else [p for p, _ in files if p.startswith("tests/accept/")]
-    if not prod and not guards:  # after structure_tests: a test-only PR (an acceptance chore's) still gets that
+    net_removed, removed_names = tests_removed(files) if not prod else (0, [])
+    removed = removal_text(net_removed, removed_names)
+    if not prod and not guards and not removed:  # after structure_tests: a test-only PR (an acceptance chore's) still gets that
         return done(
             "skipped",
             reason="no production file changed",
             files=[p for p, _ in files][:20],
+            **({"tests_removed": net_removed} if net_removed > 0 else {}),
         )
     key = diff_key(diff)
     earlier = records_for(pr)
@@ -1184,6 +1228,7 @@ def review(pr: int, hand: bool = True) -> int:
         prompt = build_prompt(
             issue, info.get("title", ""), flags, longfn, dupes, text, cut, rules, moved, cut_note(gone),
             issue_text, answer, spec, previous_text(earlier), guard_text(guards, info.get("body") or ""),
+            removed,
         )
         size = len(prompt.encode())
         if size <= PROMPT_BYTES or prod_limit <= MAX_CHARS:
@@ -1202,6 +1247,7 @@ def review(pr: int, hand: bool = True) -> int:
         "cut": cut,
         "moved": moved,
         "left_out": [f"{p} ({how})" for p, how, _ in gone][:30],
+        **({"tests_removed": net_removed} if removed else {}),
     }
     by = judge_name()
     t0 = time.time()

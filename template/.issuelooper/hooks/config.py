@@ -115,6 +115,7 @@ KEYS = {
     ("review", "rules"): "REVIEW_RULES",
     ("review", "production_paths"): "REVIEW_PATHS",
     ("review", "max_rejects"): "REVIEW_MAX_REJECTS",
+    ("review", "test_removal_min"): "REVIEW_TEST_REMOVAL_MIN",
     ("review", "fixtures"): "REVIEW_FIXTURES",
     ("review", "spec_paths"): "REVIEW_SPEC_PATHS",
     ("pool", "max_sessions"): "POOL_MAX_WORKERS",
