@@ -3032,6 +3032,13 @@ def test_a_session_leaves_no_scratch_and_counts_only_its_own_usage() -> None:
     w.events = lambda: []
     check("a resumed conversation's session logs what it added", w.session_usage(),
           {"input": 100_000, "output": 50, "turns": 1, "thinking": 0, "cache_read": 20})
+    w.usage_base = {}  # a conversation the session started: its whole record, not the stream's sum
+    w.cli = type("Fake", (), {"usage": lambda self, ev: {"input": 4_208_000, "output": 190, "turns": 5},
+                              "recorded_usage": lambda self, conv: {"input": 1_031_000, "output": 38, "thinking": 18,
+                                                                    "cache_read": 3_139_000},
+                              "session_id": lambda self, ev: "c1"})()
+    check("a session that started its conversation logs agy's record of it, not summed running totals",
+          w.session_usage()["input"], 1_031_000)
 
 
 def test_a_hub_goes_first_and_is_not_parked() -> None:
@@ -5071,6 +5078,11 @@ if research:
         pathlib.Path(m.group(1)).write_text(text)
 usage = {"input_tokens": 1000, "output_tokens": 100, "cache_read_tokens": 50} if research else \
         {"input_tokens": 2000, "output_tokens": 300, "cache_read_tokens": 700}
+if research and os.environ.get("FAKE_RESEARCH_RESUMED"):
+    # A quota resume inside the turn: agy 1.5.4 reports the conversation's running total.
+    print(json.dumps({"event": "init", "conversation_id": cid}), flush=True)
+    print(json.dumps({"event": "result", "result": {"response": "", "conversation_id": cid,
+                      "usage": {"input_tokens": 600, "output_tokens": 60, "cache_read_tokens": 20}}}), flush=True)
 print(json.dumps({"event": "init", "conversation_id": cid}), flush=True)
 print(json.dumps({"event": "result", "result": {"response": "RESEARCH-DONE" if research else "WORKER-DONE pr #9",
                                                 "conversation_id": cid, "usage": usage}}), flush=True)
@@ -5362,6 +5374,13 @@ def test_research_then_a_fresh_implement_conversation() -> None:
         check("a unit that continues a conversation skips research: one resumed session",
               (len(calls), calls[0][-2:], "research_usage" in [r for r in rows if r["kind"] == "end"][-1]),
               (1, ["--conversation", "conv-old"], False))
+        os.environ["FAKE_RESEARCH_RESUMED"] = "1"
+        outcome, calls, prompts, rows, w = run("good", seq=4)
+        os.environ.pop("FAKE_RESEARCH_RESUMED")
+        end = [r for r in rows if r["kind"] == "end"][-1]
+        check("a resume inside research: its running totals count once (the last), not summed",
+              (end["research_usage"]["input"], end["implement_usage"]["input"], end["usage"]["input"]),
+              (1000, 2000, 3000))
         t0 = time.time()
         outcome, calls, prompts, rows, w = run("good", pause=3, seq=3)
         check("a quota pause after research holds the new conversation until it ends, and counts as quota time",

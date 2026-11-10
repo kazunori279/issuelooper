@@ -3385,6 +3385,7 @@ class Session(threading.Thread):
                               source=fork_src, conversation=forked)
             else:
                 cmd = base + cli.first_turn(prompt, limit)
+                self.usage_base = {} if hasattr(cli, "recorded_usage") else None
         elif fork_src and cli.can_fork(fork_src):
             self.forked_from = fork_src
             cmd = base + cli.fork_turn(prompt, fork_src, limit)
@@ -3394,6 +3395,9 @@ class Session(threading.Thread):
                           source=fork_src, conversation="")
         else:
             cmd = base + cli.first_turn(prompt, limit)
+            # A new conversation: all its record holds is this session's (agy's record is
+            # exact where its stream's results are running totals after a resume).
+            self.usage_base = {} if hasattr(cli, "recorded_usage") else None
         with open(self.dir / "wrapper.err", "w") as err:
             # Under the pool's lock, after a look at stopping: stop() either sees this
             # process and kills it, or it is never started. A worker still claiming its
@@ -3686,9 +3690,9 @@ class Session(threading.Thread):
         r_paused = self.quota_time
         self.stage_timeout = None
         events = self.events()
-        self.research_mark, self.research_s = len(events), r_elapsed
-        self.research_usage = self.cli.usage(events)
         research_conv = self.conversation()
+        self.research_mark, self.research_s = len(events), r_elapsed
+        self.research_usage = self.counted(events, research_conv, self.usage_base)
         with contextlib.suppress(OSError):
             shutil.copyfile(self.dir / "prompt.txt", self.dir / "research-prompt.txt")
         with contextlib.suppress(OSError):
@@ -3761,22 +3765,24 @@ class Session(threading.Thread):
         conversation (the fallback), what its record grew by (agy), as session_usage does."""
         if self.research_mark is None or self.research_usage is None:
             return None
-        impl = self.cli.usage(self.events()[self.research_mark:])
-        if self.usage_base is not None and hasattr(self.cli, "recorded_usage"):
-            now = self.cli.recorded_usage(self.conversation())
+        return self.research_usage, self.counted(self.events()[self.research_mark:], self.conversation(),
+                                                 self.usage_base)
+
+    def counted(self, events: list[dict], conv: str | None, base: dict | None) -> dict:
+        """Tokens of these events: what the conversation's record grew by since base (agy; {}
+        for a conversation this session started), else the stream's count (Agy.result_counts)."""
+        usage = self.cli.usage(events)
+        if base is not None and hasattr(self.cli, "recorded_usage"):
+            now = self.cli.recorded_usage(conv)
             if now is not None:
-                impl.update({k: max(0, now.get(k, 0) - self.usage_base.get(k, 0)) for k in now})
-        return self.research_usage, impl
+                usage.update({k: max(0, now.get(k, 0) - base.get(k, 0)) for k in now})
+        return usage
 
     def session_usage(self) -> dict:
-        """Tokens this session used: for a conversation it resumed, what the conversation's
-        record grew by (agy); else the stream's count."""
-        usage = self.cli.usage(self.events())
-        if self.usage_base is not None and hasattr(self.cli, "recorded_usage"):
-            now = self.cli.recorded_usage(self.conversation())
-            if now is not None:
-                usage.update({k: max(0, now.get(k, 0) - self.usage_base.get(k, 0)) for k in now})
-        return usage
+        """Tokens this session used: what its conversation's record grew by (agy: from nothing
+        for a conversation it started, from usage_base for one it resumed or forked); else the
+        stream's count."""
+        return self.counted(self.events(), self.conversation(), self.usage_base)
 
     def clear_scratch(self) -> None:
         """Remove what the session left under its scratch prefix (an extracted tree, shots,

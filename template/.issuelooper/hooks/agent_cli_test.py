@@ -485,6 +485,24 @@ def test_usage_and_last_tool() -> None:
     check("agy: tokens over every turn, no cost", agy.usage(ev),
           {"input": 120, "output": 12, "thinking": 5, "cache_read": 50, "turns": 2, "cost_usd": None})
     check("agy: the running tool", agy.last_tool(ev), "run_command pytest -q")
+
+    def res(conv, i, o, cr=0):
+        return {"event": "result", "result": {"conversation_id": conv, "usage": {
+            "input_tokens": i, "output_tokens": o, "thinking_tokens": 1, "cache_read_tokens": cr}}}
+    # agy 1.5.4: a quota-resumed stream's result is the conversation's running total.
+    resumed = []
+    for i, o in ((711, 37), (718, 37), (874, 38), (874, 38), (1031, 38)):
+        resumed += [{"event": "init", "conversation_id": "r"}, res("r", i, o, 2990)]
+    check("agy: results that never go down in one conversation are running totals: the last counts",
+          agy.usage(resumed), {"input": 1031, "output": 38, "thinking": 1, "cache_read": 2990, "turns": 5,
+                               "cost_usd": None})
+    per_stream = [{"event": "init", "conversation_id": "p"}, res("p", 500, 40), {"event": "init", "conversation_id": "p"},
+                  res("p", 300, 50)]
+    check("agy: a counter that goes down means per-stream results: they add up",
+          agy.usage(per_stream)["input"], 800)
+    two = resumed + [{"event": "init", "conversation_id": "i"}, res("i", 404, 46)]
+    check("agy: each conversation on its own (a research one, then an implement one)",
+          (agy.usage(two)["input"], agy.usage(two)["output"]), (1031 + 404, 38 + 46))
     cev = [
         {"type": "system", "subtype": "init", "session_id": "s"},
         {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",

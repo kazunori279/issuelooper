@@ -382,14 +382,43 @@ class Agy(Cli):
                            for s in [e.get("step_update") or {}] if s.get("state") == "DONE" and s.get("usage")]
             else:
                 return {**out, **whole, "turns": inits}
-        for r in results:
-            u = r.get("usage") or {}
-            out["input"] += int(u.get("input_tokens") or 0)
-            out["output"] += int(u.get("output_tokens") or 0)
-            out["thinking"] += int(u.get("thinking_tokens") or 0)
-            out["cache_read"] += int(u.get("cache_read_tokens") or 0)
+        for counts in self.result_counts(events, results):
+            for k in ("input", "output", "thinking", "cache_read"):
+                out[k] += counts[k]
         out["turns"] = max(inits, sum(1 for e in events if e.get("event") == "result"))
         return out
+
+    USAGE_KEYS = (("input", "input_tokens"), ("output", "output_tokens"), ("thinking", "thinking_tokens"),
+                  ("cache_read", "cache_read_tokens"))
+
+    def result_counts(self, events: list[dict], results: list[dict]) -> list[dict]:
+        """The tokens the results stand for, per conversation. agy 1.5.4 reports the
+        conversation's running total in the result of a resumed stream, not that stream's own
+        use: one research conversation resumed four times reported 711k, 718k, 874k, 874k and
+        1,031k input, and summing them over-counted. A conversation whose results never go down
+        in any counter is taken as running totals (its last result counts); one where any
+        counter goes down is per stream (they add up). A run of per-stream results that only
+        ever grow reads as running totals and is under-counted; callers that can read agy's own
+        record (recorded_usage) use it instead. Step events with usage (no result) add up."""
+        by_conv: dict[str, list[dict]] = {}
+        conv = ""
+        rows = []
+        for e in events:
+            if e.get("event") == "init":
+                conv = str(e.get("conversation_id") or conv)
+            r = e.get("result") if e.get("event") == "result" else e.get("step_update")
+            if not isinstance(r, dict) or not any(r is x for x in results):
+                continue
+            u = r.get("usage") or {}
+            row = {k: int(u.get(f) or 0) for k, f in self.USAGE_KEYS}
+            if e.get("event") == "result":
+                by_conv.setdefault(str(r.get("conversation_id") or conv), []).append(row)
+            else:
+                rows.append(row)
+        for runs in by_conv.values():
+            cumulative = len(runs) > 1 and all(b[k] >= a[k] for a, b in zip(runs, runs[1:]) for k in b)
+            rows += [runs[-1]] if cumulative else runs
+        return rows
 
     def recorded_usage(self, conv: str | None) -> dict | None:
         """Tokens over every model call of the conversation, from agy's own record: one
