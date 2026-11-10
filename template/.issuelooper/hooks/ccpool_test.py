@@ -5393,6 +5393,137 @@ def test_research_then_a_fresh_implement_conversation() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_unit_out_of_quota_is_parked_and_goes_on_later() -> None:
+    """POOL_PARK_ON_QUOTA: under a saturated quota 39 of 129 implement units timed out after their
+    clocks had stood still for the 2400-s cap, and their worktrees and conversations were thrown away."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-park-"))
+    work, g = git_repo(d)
+    (work / "a.txt").write_text("x\n")
+    g("add", "-A")
+    g("commit", "-qm", "base")
+    g("push", "-q", "origin", "HEAD:main")
+    convs = d / "convs"
+    convs.mkdir()
+    (convs / "conv-1.db").write_bytes(b"")
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_WRAP)
+    agy.chmod(0o755)
+    restore = with_env({"SHARED_REPO_PATH": str(work), "AGY_CONVERSATIONS_DIR": str(convs), "CCROLE_WORKER_CLI": "agy",
+                        "CCROLE_MODEL_WORKER": ""})
+    real_sh = ccpool.Session.sh
+    steps = []
+
+    def sh(self, args, env, name):
+        steps.append((name, args))
+        if name == "claim":
+            (self.dir / "claim").write_text(json.dumps({"issue": 5, "token": "t", "loop": self.seq, "from": "stage:triage",
+                                                        "title": "x"}))
+            (self.dir / "claim.out").write_text("claimed\n")
+        if name == "finish":
+            (self.dir / "finish.out").write_text("#5: released to stage:triage\n")
+        return 0
+    ccpool.Session.sh = sh
+    wt = pathlib.Path(SCRATCH, "wrk-1-5-wt")
+    try:
+        cfg = dict(logdir=d / "pool", ccrole=str(agy), render="cat", gh="true", kill_leftovers=False, worker_wrap_s=0,
+                   stall_s=0, caps={r: 0 for r in ccpool.ROLES}, timeouts={"worker": "45m"}, retry_pause_max_s=5)
+        pool = ccpool.Pool(ccpool.Config(**cfg), fetcher=state, spawn=False)
+        doing = state([iss(5, ["stage:doing", "P1"])])
+        pool.prev = doing
+        w = pool.start(ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {"title": "x"}))
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / "work.txt").write_text("half done\n")
+        pool.book.quota_until["*"] = time.time() + 3600  # the quota holds the whole time
+        outcome = w.work()
+        pool.finished(w, outcome)
+        b = pool.book
+        rows = [json.loads(x) for x in (pool.cfg.logdir / "pool.jsonl").read_text().splitlines()]
+        parked = [r for r in rows if r["kind"] == "parked"]
+        check("at the clock-pause cap with the quota still holding, the unit is parked, not timed out",
+              (outcome.startswith("parked for quota"), [x for x, _ in steps]), (True, ["claim"]))
+        check("its slot is freed; its worktree, conversation and claim are kept; no try spent",
+              ("wrk:5" in b.running, wt.exists(), b.parked[5]["conv"], b.parked[5]["claim"]["token"], b.parked[5]["parks"],
+               b.tries["wrk:5@x"]), (False, True, "conv-1", "t", 1, 0))
+        check("pool.jsonl says so, with the quota wait so far", [(r["issue"], r["conversation"], r["quota_s"] >= 5)
+                                                                  for r in parked], [(5, "conv-1", True)])
+        h = Rig(doing)
+        h.pool.book.parked[5] = dict(b.parked[5])
+        h.pool.book.quota_until["*"] = NOW + 3600
+        h.step()
+        check("state.json lists the parked unit", json.loads((h.pool.cfg.logdir / "state.json").read_text())["parked"]["5"]["conv"],
+              "conv-1")
+        again = ccpool.Pool(ccpool.Config(**cfg), fetcher=state, spawn=False)
+        check("the parked unit survives a restart (owners.json)", again.book.parked.get(5, {}).get("conv"), "conv-1")
+        due, _ = ccpool.plan(doing, b, pool.cfg, time.time())
+        check("while its quota group is paused it waits, and its stage:doing claim is not reclaimed",
+              [u.key for u in due], [])
+        b.quota_until.clear()
+        due, _ = ccpool.plan(doing, b, pool.cfg, time.time() + 4 * 3600)
+        check("once the pause is over it goes on in its conversation, before new work",
+              [(u.key, u.info.get("resume"), u.info.get("doing")) for u in due], [("unpark:5#1", "conv-1", True)])
+        steps.clear()
+        w2 = pool.start(due[0])
+        outcome2 = w2.work()
+        pool.finished(w2, outcome2)
+        calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+        prompt = calls[-1][calls[-1].index("--print") + 1]
+        check("it resumes the same conversation in the same worktree with a fresh budget, keeping the claim",
+              (calls[-1][-2:], "paused this unit while the model's quota was exhausted" in prompt, str(wt) in prompt,
+               [x for x, _ in steps], 5 in b.parked),
+              (["--conversation", "conv-1"], True, True, ["finish"], False))
+        check("an unparked line in pool.jsonl", any(json.loads(x)["kind"] == "unparked"
+                                                    for x in (pool.cfg.logdir / "pool.jsonl").read_text().splitlines()), True)
+        # Unresumable: the worktree is gone. Today's ending: WIP saved, the claim released without a failed attempt.
+        b.parked[5] = {**w.park_rec}
+        shutil.rmtree(wt, ignore_errors=True)  # (the unparked session above removed it as it ended)
+        steps.clear()
+        w3 = pool.start(ccpool.plan(doing, b, pool.cfg, time.time() + 5 * 3600)[0][0])
+        outcome3 = w3.work()
+        pool.finished(w3, outcome3)
+        fin = [a for x, a in steps if x == "finish"]
+        check("a parked unit that cannot go on ends as an unfinished worker does, with no failed attempt",
+              (outcome3, bool(fin) and "--no-fail" in fin[0], 5 in b.parked),
+              ("parked unit could not go on: its worktree is gone", True, False))
+        # POOL_PARK_MAX: no more parks after that many.
+        w4 = ccpool.Session(pool, ccpool.Unit("worker", "implement", "k", "wrk:6", 6, (4,), {}), 9)
+        w4.dir.mkdir(parents=True)
+        (w4.dir / "claim").write_text("{}")
+        check("a unit with parks left may park", w4.park_allowed(), True)
+        w4.parks = pool.cfg.park_max
+        check("after POOL_PARK_MAX parks it ends as before", w4.park_allowed(), False)
+        pool.cfg.park_on_quota = False
+        w4.parks = 0
+        check("POOL_PARK_ON_QUOTA=0: never", w4.park_allowed(), False)
+        restore_d = with_env({"POOL_PARK_ON_QUOTA": "", "POOL_PARK_MAX": ""})
+        check("on by default, two parks", (ccpool.Config.from_env().park_on_quota, ccpool.Config.from_env().park_max),
+              (True, 2))
+        restore_d()
+
+        # A research stage that ran out of time under quota with no brief never implements in its conversation.
+        for park_on, want in ((True, "parked"), (False, "timed out: no brief was written")):
+            pool.cfg.park_on_quota = park_on
+            rw = ccpool.Session(pool, ccpool.Unit("worker", "implement", "k2", "wrk:7", 7, (4,), {}), 11)
+            rw.dir.mkdir(parents=True, exist_ok=True)
+            (rw.dir / "claim").write_text("{}")
+            sessions = []
+
+            def fake_session(prompt, env, conv=None, fresh=False, _w=rw):
+                sessions.append(prompt)
+                _w.quota_time = 2000.0
+                return 124, 3000.0, True
+            rw.session = fake_session
+            rw.events = lambda: []
+            rw.conversation = lambda: "conv-r"
+            rw.staged_session("research", lambda t, skip_files=False: "implement", str(d / "no-brief.md"), {})
+            check(f"research timed out under quota, no brief, park_on_quota={park_on}: one session, then {want}",
+                  (len(sessions), rw.research_result, bool(rw.park_why)), (1, want, park_on))
+    finally:
+        ccpool.Session.sh = real_sh
+        restore()
+        shutil.rmtree(wt, ignore_errors=True)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 FAKE_AGY_UNSEEN = r"""#!/usr/bin/env python3
 import json, os, sqlite3, sys, time
 with open(sys.argv[0] + ".calls", "a") as f:

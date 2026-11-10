@@ -249,6 +249,11 @@ research_brief = false       # POOL_RESEARCH_BRIEF: a worker that starts cold ru
                              # conversation implements from the issue, the brief and the area notes. No usable brief:
                              # the research conversation is resumed to implement instead
 brief_max_chars = 16000      # POOL_BRIEF_MAX_CHARS: a longer brief is cut there
+park_on_quota = true         # POOL_PARK_ON_QUOTA: an implement unit whose clocks stood still for quota up to
+                             # POOL_RETRY_PAUSE_MAX_S, or that timed out mostly waiting for quota, is parked: its slot is
+                             # freed, its claim, worktree and conversation kept, and it goes on in that conversation with a
+                             # fresh time budget once its quota group's pause is over
+park_max = 2                 # POOL_PARK_MAX: parks per unit; after that it ends as an unfinished worker does
 author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after the supervisor's rebase (or whose rebase
                              # is red) is resolved by its author's conversation, resumed (agy --conversation, claude
                              # --resume), instead of a merger session; the merger stays the fallback (no recorded

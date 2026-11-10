@@ -135,6 +135,8 @@ KEYS = {
     ("pool", "research_brief"): "POOL_RESEARCH_BRIEF",
     ("pool", "brief_max_chars"): "POOL_BRIEF_MAX_CHARS",
     ("pool", "continue_max_tokens"): "POOL_CONTINUE_MAX_TOKENS",
+    ("pool", "park_on_quota"): "POOL_PARK_ON_QUOTA",
+    ("pool", "park_max"): "POOL_PARK_MAX",
     ("pool", "author_resolve"): "POOL_AUTHOR_RESOLVE",
     ("pool", "hub_at"): "POOL_HUB_AT",
     ("pool", "hub_timeout"): "POOL_HUB_TIMEOUT",

@@ -190,6 +190,8 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] symbol_index` | `POOL_SYMBOL_INDEX` | `false` | Give workers a symbol index of `origin/main` (functions, classes, ids and CSS rules with `file:line`, made without a model, cached per main sha in `$ISSUELOOPER_TMP/index/`) and its lines for the issue's files. |
 | `[pool] research_brief` | `POOL_RESEARCH_BRIEF` | `false` | Run a worker that starts cold in two conversations under one claim: research writes a brief outside the repository, then a fresh conversation implements from the issue, the brief and the area notes. |
 | `[pool] brief_max_chars` | `POOL_BRIEF_MAX_CHARS` | `16000` | A longer research brief is cut at this length (and logged). |
+| `[pool] park_on_quota` | `POOL_PARK_ON_QUOTA` | `true` | Park an implement unit that reaches the quota clock-pause cap (`POOL_RETRY_PAUSE_MAX_S`) or times out mostly waiting for quota: keep its claim, worktree and conversation, free its slot, and resume it once its quota group's pause is over. |
+| `[pool] park_max` | `POOL_PARK_MAX` | `2` | Parks per unit; after that it ends as an unfinished worker does. |
 | `[pool] author_resolve` | `POOL_AUTHOR_RESOLVE` | `false` | Resume the PR author's conversation to resolve rebase conflicts or red rebases before falling back to a merger. |
 | `[pool] author_resolve_max` | `POOL_AUTHOR_RESOLVE_MAX` | `2` | Maximum author conflict-resolution attempts before handing to a merger. |
 | `[pool] author_guard` | `POOL_AUTHOR_GUARD` | `false` | Resume the PR author's conversation when a merge-train acceptance guard fails because of that PR. |

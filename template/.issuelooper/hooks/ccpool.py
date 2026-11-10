@@ -586,6 +586,15 @@ class Config:
     # were 38% of a cold worker's cost, and re-sending what they added another third.
     research_brief: bool = False
     brief_max_chars: int = 16000
+    # Parking (POOL_PARK_ON_QUOTA): an implement unit that reaches the quota clock-pause cap
+    # (POOL_RETRY_PAUSE_MAX_S), or times out with quota waits taking POOL_QUOTA_TIMEOUT_SHARE of
+    # its time, is parked instead of ended: its slot is freed, its claim, worktree and
+    # conversation kept, and once its quota group's pause is over the same conversation goes on
+    # in the same worktree with a fresh time budget; at most park_max times, then it ends as
+    # before. Under a saturated quota 39 of 129 implement units timed out after 60 minutes of
+    # work with their worktree and conversation thrown away.
+    park_on_quota: bool = True
+    park_max: int = 2
     area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
     # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
     area_lend_free: bool = True
@@ -801,6 +810,8 @@ class Config:
             symbol_index=env_flag("POOL_SYMBOL_INDEX"),
             research_brief=env_flag("POOL_RESEARCH_BRIEF"),
             brief_max_chars=env_int("POOL_BRIEF_MAX_CHARS", 16000),
+            park_on_quota=env_flag("POOL_PARK_ON_QUOTA", True),
+            park_max=env_int("POOL_PARK_MAX", 2),
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
@@ -1299,6 +1310,9 @@ class Book:
         # Area notes (POOL_AREA_NOTES): area ('' for issues outside any area) -> {"path", "commit"
         # (the origin/main it describes), "files" (the paths it names), "size", "t", "issue"}.
         self.notes: dict[str, dict] = {}
+        # Parked implement units (POOL_PARK_ON_QUOTA): issue -> {"conv", "cli", "seq" (its worktree's),
+        # "claim", "parks", "quota_s", "stage", "group", "why", "area", "hot", "title", "t"}.
+        self.parked: dict[int, dict] = {}
         # Waits for an area ([areas]): issue -> {"why": "hot" | "area", "area", "files"} as the
         # last plan found them; issue -> (when it started waiting, that record); area ->
         # seconds waited, by why ("<area>:hot", "<area>:area"; "-:hot" for no area).
@@ -1410,6 +1424,7 @@ def plan(
             if (
                 n not in pr_of
                 and f"wrk:{n}" not in book.running
+                and n not in book.parked  # its claim is kept while it waits for the quota
                 and age_s(i["updated"], now) > cfg.stale_min * 60
             ):
                 units.append(
@@ -1442,6 +1457,15 @@ def plan(
                      {"title": i["title"], "base": base, "since": since})
             )
 
+    # A parked unit goes on once its quota group is no longer paused, before new work.
+    for n, rec in sorted(book.parked.items()):
+        if f"wrk:{n}" in book.running or book.quota_paused(rec.get("group") or QUOTA_ANY, now):
+            continue
+        i = next((x for x in st["open"] if x["number"] == n), None)
+        units.append(Unit("worker", "implement", f"unpark:{n}#{rec.get('parks', 0)}", f"wrk:{n}", n, (3, n),
+                          {"unpark": True, "resume": rec.get("conv"), "title": rec.get("title") or (i or {}).get("title", ""),
+                           "lent": rec.get("area") or None, "hot": rec.get("hot") or [],
+                           "doing": bool(i and claimlib.DOING in i["labels"])}))
     queue = collections.Counter(book.issue_area.get(i["number"]) for i in claimable)
     book.waits_now = {}
     deps, dep_prio = dependents(st)
@@ -1944,7 +1968,7 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
                                   (cfg.area_refresh_tokens and slot.get("tokens", 0) >= cfg.area_refresh_tokens))
         why = continue_refused(slot, cfg) if slot and not refresh else ""
         conv = "" if refresh or why else conv_resumable(slot)
-        if conv and conv in busy_convs(active):
+        if conv and (conv in busy_convs(active) or any(r.get("conv") == conv for r in book.parked.values())):
             continue
         return {"area": area, "slot": k, "resume": conv or None, "files": sorted(files), "hot": sorted(hot),
                 "notes": area_notes(area, k), "fresh": not conv, "refresh": refresh or bool(why),
@@ -3257,7 +3281,8 @@ def pid_alive(pid: int) -> bool:
 
 # Session outcomes that put the claim back without counting a failed attempt.
 NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "timed out under quota",
-                 "stopped with the supervisor", "cut off with its background task")
+                 "stopped with the supervisor", "cut off with its background task", "parked for quota",
+                 "parked unit could not go on")
 # A worker that ended with no pull request and no release of its own, while a sweep it had
 # started in the background still ran (Session.work): not the agent's failure.
 BG_CUT = "cut off with its background task running (no pull request)"
@@ -3283,6 +3308,13 @@ class Session(threading.Thread):
         # events end in the stream (the implement stage's start), its usage, seconds and result.
         self.stage = ""
         self.stage_timeout: str | None = None
+        # Parking (POOL_PARK_ON_QUOTA): the worktree's session number (an unparked unit keeps the
+        # one it was parked with), its parks so far, why it is being parked, and the record.
+        self.wk = seq
+        self.parks = 0
+        self.park_why = ""
+        self.park_rec: dict = {}
+        self.quota_before = 0.0
         self.research_mark: int | None = None
         self.research_usage: dict | None = None
         self.research_s = 0.0
@@ -3494,6 +3526,17 @@ class Session(threading.Thread):
                         if room > 0:
                             ceiling += min(add, room)
                             ceiling_moved += min(add, room)
+                    # The clocks can stand still no longer while the quota still holds the model:
+                    # park the unit (Session.park) rather than let it time out with its work lost.
+                    if (paused >= cfg.retry_pause_max_s and self.park_allowed()
+                            and (self.in_model_retry() or self.pool.book.quota_paused(self.quota_group, now))):
+                        with open(self.dir / "resumes.log", "a") as rl:
+                            rl.write(f"{time.time():.0f} clocks paused {paused:.0f} s for quota (the cap) and the quota "
+                                     "still holds: parked\n")
+                        self.park_why = f"clocks paused {paused:.0f} s for quota"
+                        self.kill()
+                        rc = 75
+                        break
                     quiet = self.quiet_s()
                     if time.time() > ceiling:
                         with open(self.dir / "resumes.log", "a") as rl:
@@ -3676,18 +3719,87 @@ class Session(threading.Thread):
                      or elapsed >= seconds(timeout) + 900 + paused or time.time() > ceiling)
         return rc, elapsed, timed_out
 
-    def staged_session(self, research: str, build, brief_path: str, env: dict) -> tuple[int, float, bool]:
+    def park_allowed(self) -> bool:
+        """Whether this unit may be parked for quota now (POOL_PARK_ON_QUOTA, POOL_PARK_MAX): an
+        implement unit (either stage) with parks left, while the supervisor runs."""
+        cfg = self.pool.cfg
+        return (cfg.park_on_quota and self.unit.role == "worker" and self.unit.kind == "implement"
+                and self.parks < cfg.park_max and not self.pool.stopping and (self.dir / "claim").exists())
+
+    def quota_bound(self, timed_out: bool) -> bool:
+        """A timeout where quota waits took POOL_QUOTA_TIMEOUT_SHARE of the (stage's) time limit."""
+        share = self.pool.cfg.quota_timeout_share
+        return timed_out and bool(share) and self.quota_time >= share * seconds(self.timeout())
+
+    def park(self) -> str:
+        """Park the unit: stop what it left running, push its work in progress (as an unfinished
+        session does) but keep the worktree, and keep the claim and the conversation for
+        Pool.finished to record (Book.parked). Its slot is freed when it ends."""
+        u, pattern = self.unit, scratch(f"wrk-{self.wk}-*-wt")
+        if self.pool.cfg.kill_leftovers:
+            self.kill_leftovers()
+        self.branch_files = self.changed_files(pattern)
+        self.save_wip(pattern)
+        try:
+            claim = json.loads((self.dir / "claim").read_text())
+        except (OSError, ValueError):
+            claim = {}
+        self.park_rec = {"conv": self.conversation(), "cli": self.cli.name, "seq": self.wk, "claim": claim,
+                         "parks": self.parks + 1, "quota_s": round(self.quota_before + self.quota_time),
+                         "stage": self.stage or "implement", "group": self.quota_group, "why": self.park_why,
+                         "area": notes_key(u), "hot": u.info.get("hot") or [], "title": u.info.get("title", ""),
+                         "t": round(time.time(), 1)}
+        with open(self.dir / "resumes.log", "a") as rl:
+            rl.write(f"{time.time():.0f} parked for quota ({self.park_why}); worktree and conversation kept\n")
+        return f"parked for quota ({self.park_why})"
+
+    def unpark_prompts(self, rec: dict, n: int) -> tuple[str, str]:
+        """(implement, research) prompts for a parked unit going on in its conversation, and the
+        `unparked` line in pool.jsonl."""
+        wt = scratch(f"wrk-{self.wk}-{n}-wt")
+        cont = (f"The supervisor paused this unit while the model's quota was exhausted (#{n} stays claimed for you) and "
+                f"has now resumed this conversation with a fresh time budget of {self.timeout()}. Continue the task from "
+                f"where you stopped, in the same worktree ({wt}): check it with git status and git log first (work you "
+                f"had not committed was committed as `WIP #{n}` and pushed to issue-{n}; amend or squash it as you "
+                "like); anything you had running was stopped.\n")
+        brief = scratch(f"wrk-{self.wk}-{n}-brief.md")
+        self.pool.log("unparked", session=self.seq, unit=self.unit.key, issue=n, conversation=rec.get("conv"),
+                      quota_s=rec.get("quota_s"), parks=rec.get("parks"), stage=rec.get("stage"))
+        return (cont + "End as your first prompt in this conversation says: WORKER-DONE pr #<number>, or commit, "
+                "release the claim and WORKER-RELEASED.",
+                cont + f"This is still the research stage: finish reading, change nothing, and write the brief to {brief} "
+                f"as your first prompt says. Last line: {RESEARCH_DONE} {brief}")
+
+    def unpark_blocker(self, rec: dict) -> str:
+        """Why a parked unit cannot go on ('' when it can): its claim, worktree or conversation is gone."""
+        if not rec or not rec.get("claim"):
+            return "no parked record or claim"
+        if not self.unit.info.get("doing"):
+            return "the issue is no longer claimed (stage:doing)"
+        if not glob.glob(scratch(f"wrk-{self.wk}-*-wt")):
+            return "its worktree is gone"
+        if not rec.get("conv") or rec.get("cli") != self.cli.name or not self.cli.can_resume(rec["conv"]):
+            return "its conversation cannot be resumed"
+        return ""
+
+    def staged_session(self, research: str, build, brief_path: str, env: dict,
+                       resume: str | None = None) -> tuple[int, float, bool]:
         """A worker unit in two conversations under one claim (POOL_RESEARCH_BRIEF): the research
         stage, with RESEARCH_SHARE of the time limit, writes a brief; the implement stage starts a
-        new conversation (not a resume, not a fork) from build(its time limit) and the brief. Without
-        a usable brief the research conversation is resumed to implement instead, so no work is
-        lost. A research stage that ended on quota, an error or a stop, or that released the claim
-        or finished the issue itself, ends the unit there. Returns what session() does, over both."""
+        new conversation (not a resume, not a fork) from build(its time limit) and the brief. When
+        research ended normally without a usable brief, its conversation is resumed to implement
+        instead, so no work is lost. One that timed out without a brief is parked when quota waits
+        took its time (POOL_PARK_ON_QUOTA), else ends the unit: a research conversation that had
+        run out its time under quota and was resumed to implement never opened a PR. A research
+        stage that ended on quota, an error or a stop, or that released the claim or finished the
+        issue itself, ends the unit there. resume: a parked research conversation to go on in
+        (research is then the prompt that says so). Returns what session() does, over both."""
         cfg, u = self.pool.cfg, self.unit
         total = seconds(self.timeout())
         self.stage, self.stage_timeout = "research", f"{max(5, int(total * RESEARCH_SHARE) // 60)}m"
-        rc, r_elapsed, r_timed = self.session(research, env)
+        rc, r_elapsed, r_timed = self.session(research, env, conv=resume)
         r_paused = self.quota_time
+        r_quota = self.quota_bound(r_timed)
         self.stage_timeout = None
         events = self.events()
         research_conv = self.conversation()
@@ -3699,6 +3811,9 @@ class Session(threading.Thread):
             shutil.copyfile(brief_path, self.dir / "brief.md")
         if cfg.kill_leftovers:
             self.kill_leftovers()
+        if self.park_why:
+            self.research_result = "parked"
+            return rc, r_elapsed, False
         # A new conversation is a new session for the quota: while its group is paused, it waits
         # (as admit() would make a new unit wait), and the wait is quota time, not its own.
         waited = 0.0
@@ -3723,11 +3838,20 @@ class Session(threading.Thread):
                           seconds=round(r_elapsed))
             return rc, r_elapsed, r_timed
         brief, why = read_brief(brief_path, cfg.brief_max_chars)
+        if not brief and r_timed:
+            if r_quota and self.park_allowed():
+                self.park_why = "research timed out under quota"
+                self.research_result = "parked"
+            else:
+                self.research_result = f"timed out: {why}"
+                self.pool.log("research_end", session=self.seq, issue=u.number, result=self.research_result,
+                              seconds=round(r_elapsed))
+            return rc, r_elapsed, r_timed
         # The rest of the time limit, at least the implement share: the research stage's quota
         # waits are not its time.
         left = max(total * (1 - RESEARCH_SHARE), total - max(0.0, r_elapsed - r_paused))
         self.stage, self.stage_timeout = "implement", f"{max(1, int(left) // 60)}m"
-        wt = scratch(f"wrk-{self.seq}-{u.number}-wt")
+        wt = scratch(f"wrk-{self.wk}-{u.number}-wt")
         with open(self.dir / "resumes.log", "a") as rl:
             rl.write(f"{time.time():.0f} research stage ended after {r_elapsed:.0f} s"
                      f"{' (timed out)' if r_timed else ''}: {why or 'brief written'}\n")
@@ -3996,7 +4120,7 @@ class Session(threading.Thread):
         skills name them: wrk-<seq>-*, mrg-<pr>-*, tst-<port>-* under $ISSUELOOPER_TMP."""
         u = self.unit
         if u.role == "worker":
-            name = f"wrk-{self.seq}-"
+            name = f"wrk-{self.wk}-"
         elif u.role == "merger" and u.number is not None:
             name = f"mrg-{u.number}-"
         elif u.role == "tester" and self.port:
@@ -4071,35 +4195,56 @@ class Session(threading.Thread):
                     "handback": self.merger_handback, "guardback": self.guard_hand_back}.get(u.kind, self.reclaim)(env)
         claim_file = self.dir / "claim"
         staged = False
+        rec: dict | None = None  # the parked unit this one continues (Book.parked)
+        blocker = ""  # why it cannot
         # Only an implement unit claims: an author resumed to accept its issue
         # (stage:accept) or resolve its PR (stage:pr) works on an issue claim.py would
         # refuse: every one of them ended "unclaimable" when they claimed first.
         if u.role == "worker" and u.kind == "implement":
             pool = str(cfg.caps["worker"] or "unlimited")
-            env.update(WRK_K=str(self.seq), WRK_CLAIM_FILE=str(claim_file), WORKER_POOL=pool)
+            if u.info.get("unpark"):
+                with self.pool.lock:
+                    rec = dict(self.pool.book.parked.get(u.number) or {})
+                self.wk, self.parks = int(rec.get("seq") or self.seq), int(rec.get("parks") or 0)
+                self.quota_before = float(rec.get("quota_s") or 0)
+            env.update(WRK_K=str(self.wk), WRK_CLAIM_FILE=str(claim_file), WORKER_POOL=pool)
             if u.info.get("hub"):
                 env["CLAIM_HUB"] = "1"  # its failures do not park it (claim.py), for the claim, release and finish
-            rc = self.sh(
-                [
-                    sys.executable,
-                    str(HERE / "claim.py"),
+            if rec is not None:
+                # A parked unit keeps the claim it was parked with: no new claim.
+                if rec.get("claim"):
+                    claim_file.write_text(json.dumps(rec["claim"]))
+                    (self.dir / "claim.out").write_text(f"kept from the parked session {self.wk}\n")
+                blocker = self.unpark_blocker(rec)
+                rc = 0
+            else:
+                rc = self.sh(
+                    [
+                        sys.executable,
+                        str(HERE / "claim.py"),
+                        "claim",
+                        "--loop",
+                        str(self.seq),
+                        "--issue",
+                        str(u.number),
+                        "--claim-file",
+                        str(claim_file),
+                    ],
+                    dict(env, CC_ROLE="worker", CLAIM_JITTER_S="0"),
                     "claim",
-                    "--loop",
-                    str(self.seq),
-                    "--issue",
-                    str(u.number),
-                    "--claim-file",
-                    str(claim_file),
-                ],
-                dict(env, CC_ROLE="worker", CLAIM_JITTER_S="0"),
-                "claim",
-            )
+                )
             if rc == 3:
                 why = re.findall(r"is not claimable: (.*)", (self.dir / "claim.out").read_text(errors="replace"))
                 self.pool.log("unclaimable", issue=u.number, why=why[-1] if why else "no reason given")
                 return "unclaimable"
-            if rc != 0 or not claim_file.exists():
+            if blocker:
+                self.pool.log("unpark_failed", session=self.seq, issue=u.number, conversation=(rec or {}).get("conv"),
+                              why=blocker)
+            elif rc != 0 or not claim_file.exists():
                 return f"claim failed (exit {rc})"
+        if u.role == "worker" and u.kind == "implement" and blocker:
+            prompt = ""  # it ends as an unfinished worker does (below), with no session
+        elif u.role == "worker" and u.kind == "implement":
             claim = json.loads(claim_file.read_text())
             n = int(claim["issue"])
             wip = "" if claim.get("pr") else self.wip_branch(n)
@@ -4143,10 +4288,13 @@ class Session(threading.Thread):
                             + " Land the smallest change that unblocks them; say on the issue what is left.\n")
                 return out
             prompt = build(cfg.timeouts["worker"])
-            if staged:
+            if rec is not None:
+                staged = rec.get("stage") == "research"
+                prompt, research = self.unpark_prompts(rec, n)
+            elif staged:
                 research = research_prompt(
                     claim, str(self.seq), f"{max(5, int(seconds(self.timeout()) * RESEARCH_SHARE) // 60)}m",
-                    scratch(f"wrk-{self.seq}-{n}-brief.md"), cfg.brief_max_chars, wip,
+                    scratch(f"wrk-{self.wk}-{n}-brief.md"), cfg.brief_max_chars, wip,
                     issue_text(thread) if thread else "", files,
                     (index + (self.notes_prompt("research") if cfg.area_notes else "")))
         elif u.role == "worker" and u.kind == "own-accept":
@@ -4169,10 +4317,18 @@ class Session(threading.Thread):
             previous = next((x for x in reversed(self.pool.ux_scores) if x.get("score") is not None), None)
             prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys, previous)
 
-        if u.role == "worker" and u.kind == "implement" and staged:
-            rc, elapsed, timed_out = self.staged_session(research, build, scratch(f"wrk-{self.seq}-{n}-brief.md"), env)
+        if blocker:
+            rc, elapsed, timed_out = 0, 0.0, False
+        elif u.role == "worker" and u.kind == "implement" and staged:
+            rc, elapsed, timed_out = self.staged_session(research, build, scratch(f"wrk-{self.wk}-{n}-brief.md"), env,
+                                                         resume=(rec or {}).get("conv") if rec is not None else None)
         else:
             rc, elapsed, timed_out = self.session(prompt, env)
+        if (u.role == "worker" and u.kind == "implement" and not self.park_why and self.park_allowed()
+                and self.quota_bound(timed_out)):
+            self.park_why = f"timed out under quota after {self.timeout()}"
+        if u.role == "worker" and u.kind == "implement" and self.park_why and not self.pool.stopping:
+            return self.park()
         # Before the leftovers go: a worker's sweep still running at the end means the session
         # was cut off with work in progress (BG_CUT), not that the agent gave up.
         still = (u.role == "worker" and u.kind == "implement" and rc == 0 and not timed_out
@@ -4182,7 +4338,9 @@ class Session(threading.Thread):
         if u.role == "tester":
             self.clear_scratch()
 
-        if self.pool.stopping:
+        if blocker:
+            outcome = f"parked unit could not go on: {blocker}"
+        elif self.pool.stopping:
             # The owner stopped the loop: the claim goes back without a failed attempt,
             # so the next start picks the issue up at once instead of after CLAIM_STALE_MIN.
             outcome = "stopped with the supervisor"
@@ -4206,12 +4364,12 @@ class Session(threading.Thread):
             outcome = "ok"
 
         if u.role == "worker" and u.kind != "implement":
-            self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
+            self.cleanup(scratch(f"wrk-{self.wk}-*-wt"))
             self.clear_scratch()
         elif u.role == "worker":
-            self.branch_files = self.changed_files(scratch(f"wrk-{self.seq}-*-wt"))
-            self.branch_base = self.fork_point(scratch(f"wrk-{self.seq}-*-wt"))
-            self.save_wip(scratch(f"wrk-{self.seq}-*-wt"))
+            self.branch_files = self.changed_files(scratch(f"wrk-{self.wk}-*-wt"))
+            self.branch_base = self.fork_point(scratch(f"wrk-{self.wk}-*-wt"))
+            self.save_wip(scratch(f"wrk-{self.wk}-*-wt"))
             args = [
                 sys.executable,
                 str(HERE / "claim.py"),
@@ -4219,7 +4377,7 @@ class Session(threading.Thread):
                 "--claim-file",
                 str(claim_file),
                 "--loop",
-                str(self.seq),
+                str(self.wk),
             ]
             if outcome.startswith(NOT_A_FAILURE) or still:
                 args.append("--no-fail")
@@ -4237,7 +4395,7 @@ class Session(threading.Thread):
                 # No pull request and no release of its own: finish had to release the claim.
                 # Recorded as "ok" before, which hid seven such endings in run 14.
                 outcome = BG_CUT if still else "ended without a pull request"
-            self.cleanup(scratch(f"wrk-{self.seq}-*-wt"))
+            self.cleanup(scratch(f"wrk-{self.wk}-*-wt"))
             self.clear_scratch()
         elif u.role == "merger":
             self.cleanup(scratch(f"mrg-{u.number}-wt"))
@@ -5609,7 +5767,7 @@ class Pool:
                 # Only failures count toward POOL_FAMILY_MAX: a merged PR that a live check
                 # or a reopen sends back is progress, not a loop.
                 b.family_starts[u.family] -= 1
-            if outcome.startswith(("quota error", "transient error", "timed out under quota", BG_CUT)):
+            if outcome.startswith(("quota error", "transient error", "timed out under quota", BG_CUT, "parked for quota")):
                 # The model's capacity, not the unit: no try spent, so it is due again
                 # when the pause ends. A worker cut off mid-sweep is due again at once too.
                 b.tries[u.key] -= 1
@@ -5670,12 +5828,24 @@ class Pool:
                     and not outcome.startswith(NOT_A_FAILURE):
                 b.failed_tries[u.number] += 1
             # A hold has its own event, once, and is retried every POOL_HOLD_RETRY_S.
-            if outcome not in ("ok", "unclaimable") and not outcome.startswith(("quota error", "transient error", "held")):
+            if outcome not in ("ok", "unclaimable") and not outcome.startswith(("quota error", "transient error", "held",
+                                                                                  "parked for quota")):
                 self.events.append(
                     f"{u.role} session {w.seq} on {u.kind} {self.label(u)} {outcome} (log {w.dir})"
                 )
         if outcome.startswith("quota error"):
             self.quota_seen(u.role, group=group)
+        if u.role == "worker" and u.kind == "implement" and u.number is not None:
+            with self.lock:
+                if outcome.startswith("parked for quota"):
+                    self.book.parked[u.number] = w.park_rec
+                elif u.info.get("unpark"):
+                    self.book.parked.pop(u.number, None)
+            self.save_owners()
+            if outcome.startswith("parked for quota"):
+                self.log("parked", session=w.seq, unit=u.key, issue=u.number, conversation=w.park_rec.get("conv"),
+                         quota_s=w.park_rec.get("quota_s"), parks=w.park_rec.get("parks"), stage=w.park_rec.get("stage"),
+                         why=w.park_why)
         if u.role == "worker":
             self.record_conv(w)
         if u.role == "worker" and u.kind == "implement" and self.cfg.area_notes:
@@ -5762,7 +5932,7 @@ class Pool:
                                   "area": area, "slot": slot, "files": w.branch_files or prev.get("files") or []}
             area, k = u.info.get("area"), u.info.get("slot")
             claimed = (w.dir / "claim.out").exists()
-            if u.kind == "implement" and claimed:
+            if u.kind == "implement" and claimed and not w.park_why:
                 tokens = w.cli.context_tokens(w.events())
                 if area and k is not None:
                     slots = self.book.area_slots.setdefault(area, [])
@@ -5836,7 +6006,7 @@ class Pool:
         self.save_owners()
 
     OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
-             "area_seeds", "repo_seed", "area_wait_s", "notes")
+             "area_seeds", "repo_seed", "area_wait_s", "notes", "parked")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""
@@ -8237,6 +8407,8 @@ class Pool:
                        **({"sample": self.sample_stats()} if self.cfg.author_accept else {}),
                        **({"after": self.after_stats()} if self.cfg.accept_mode == "after" else {})},
             "missing_files": self.book.missing,
+            "parked": {str(n): {k: r.get(k) for k in ("conv", "parks", "quota_s", "stage", "why", "t")}
+                       for n, r in self.book.parked.items()},
             **({"area_waits": self.area_waits(now)} if self.cfg.areas else {}),
             **({"areas": {a["name"]: {
                 "queue": sum(1 for x in self.book.issue_area.values() if x == a["name"]),
