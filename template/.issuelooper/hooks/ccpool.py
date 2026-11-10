@@ -983,6 +983,7 @@ FLAKY_MARK = "<!-- flaky: failed and passed at one commit -->"
 # In the body of the chore that turns verified acceptance scripts into tests/accept/: the
 # one kind of PR that may add files there (role_guard ACCEPT_CHORE).
 ACCEPT_CHORE = "<!-- accept-chore -->"
+ACCEPT_TESTS = "tests/accept/"
 # On the comment that says a recorded flaky test is past its deadline (once per test).
 FLAKY_DEADLINE = "<!-- flaky: past its deadline -->"
 # The machine, not the code: a check that failed this way says nothing about the PR. In
@@ -5699,7 +5700,8 @@ class Pool:
         POOL_CONSOLIDATE_GLOB globs, or when one of their directories takes
         POOL_CONSOLIDATE_MIN (5) minutes to run: merge or parametrize them by flow. Not while
         one is open. Many e2e tests ended up as a coverage subset of another, and tests/accept
-        grew slow while the chore looked at tests/e2e only."""
+        grew slow while the chore looked at tests/e2e only. Files under tests/accept/ count only
+        by their runtime, never by their number (one verified script per issue by design)."""
         if not self.cfg.consolidate_at and not self.cfg.consolidate_min:
             return
         r = subprocess.run(["git", "-C", str(repo_root()), "ls-tree", "-r", "--name-only", sha],
@@ -5708,6 +5710,11 @@ class Pool:
         globs = [g.strip() for g in self.cfg.consolidate_glob.split(",") if g.strip()]
         why, files = [], []
         for g in globs:
+            if g.startswith(ACCEPT_TESTS):
+                # Counted, tests/accept filed the chore again and again: a worker may not add or
+                # merge files there outside an acceptance chore, so workers merged tests/e2e,
+                # closed the chore, and the count stayed over the threshold. Its runtime still counts.
+                continue
             hit = [f for f in listed if fnmatch.fnmatch(f, g)]
             if self.cfg.consolidate_at and len(hit) >= self.cfg.consolidate_at:
                 why.append(f"{len(hit)} {g} files")

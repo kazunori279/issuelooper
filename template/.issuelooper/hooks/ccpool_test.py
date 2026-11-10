@@ -4649,6 +4649,17 @@ def test_a_consolidation_chore_when_per_issue_tests_pile_up() -> None:
         g("add", "-A")
         g("commit", "-qm", "accept tests")
         sha = g("rev-parse", "HEAD")
+        # Run 15: 42-55 tests/accept files filed the chore 9 times; workers may not merge files there
+        # outside an acceptance chore, so each one merged tests/e2e and closed it.
+        for k in range(3, 50):
+            (work / "tests" / "accept" / f"test_accept_{k}.py").write_text("def test_a():\n    pass\n")
+        g("add", "-A")
+        g("commit", "-qm", "many accept tests")
+        sha = g("rev-parse", "HEAD")
+        h.pool.cfg.consolidate_at = 40
+        h.pool.consolidation_chore(sha)
+        check("50 tests/accept files and a consolidated tests/e2e: no chore (their count never files one)",
+              "issue create" in (d / "gh.log").read_text(), False)
         h.pool.cfg.consolidate_at = 0
         h.pool.guard_seconds = 14 * 60
         h.pool.consolidation_chore(sha)
