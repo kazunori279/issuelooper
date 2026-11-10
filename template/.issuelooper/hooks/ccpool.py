@@ -298,6 +298,18 @@ def deselect_env(tests: list[str]) -> dict:
     return {"PYTEST_ADDOPTS": (os.environ.get("PYTEST_ADDOPTS", "") + " " + extra).strip(), "SWEEP_FORCE": "1"}
 
 
+def add_usage(a: dict, b: dict) -> dict:
+    """Two usage records added up (a cost known for only one of them is unknown)."""
+    out = {}
+    for k in dict.fromkeys(list(a) + list(b)):
+        x, y = a.get(k), b.get(k)
+        if k == "cost_usd":
+            out[k] = None if x is None or y is None else x + y
+        else:
+            out[k] = (x or 0) + (y or 0)
+    return out
+
+
 def bare_login(login: str) -> str:
     """A login as both GitHub APIs agree on it: REST names a GitHub App's bot
     `<slug>[bot]` and GraphQL (`gh issue view --json`) plain `<slug>`. Comparing them
@@ -561,6 +573,13 @@ class Config:
     # the lines for its issue's files. Research read a median of 22 whole files before the first
     # edit, and each stayed in the context for the rest of the session.
     symbol_index: bool = False
+    # Research, then implementation (POOL_RESEARCH_BRIEF): a worker unit that starts cold runs two
+    # conversations under one claim. The first reads what it needs and writes a brief (at most
+    # brief_max_chars) outside the repository; the second starts fresh from the issue, the brief
+    # and the area notes, so what research read is never sent again. Calls before the first edit
+    # were 38% of a cold worker's cost, and re-sending what they added another third.
+    research_brief: bool = False
+    brief_max_chars: int = 16000
     area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
     # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
     area_lend_free: bool = True
@@ -773,6 +792,8 @@ class Config:
             notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 24000),
             notes_stale_lines=env_int("POOL_NOTES_STALE_LINES", 200),
             symbol_index=env_flag("POOL_SYMBOL_INDEX"),
+            research_brief=env_flag("POOL_RESEARCH_BRIEF"),
+            brief_max_chars=env_int("POOL_BRIEF_MAX_CHARS", 16000),
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
@@ -2362,6 +2383,80 @@ commit your work and release the claim with what you learned rather than being k
 mid-work."""
 
 
+RESEARCH_SHARE = 0.4  # of the worker timeout, for the research stage; the rest is the implement stage's
+BRIEF_MIN_CHARS = 300  # a shorter brief is not one: the implement stage resumes the research conversation
+RESEARCH_DONE = "RESEARCH-DONE"
+
+
+def research_prompt(c: dict, k: str, timeout: str, brief: str, max_chars: int, wip: str = "", issue: str = "",
+                    files: str = "", extra: str = "") -> str:
+    """The research stage of a worker unit (POOL_RESEARCH_BRIEF): read, then write the brief the
+    implement stage starts from. extra: the symbol index and the area notes."""
+    n, token = c["issue"], c["token"]
+    pr = c.get("pr") or {}
+    branch = pr.get("branch") or f"issue-{n}"
+    wt = scratch(f"wrk-{k}-{n}-wt")
+    where = ""
+    if pr:
+        where = (f"\n#{n} already has open pull request #{pr['number']} on branch {branch}; it came back to the "
+                 "queue. Read the newest comments on the PR (gh pr view --comments) and on the issue: they say what to fix.\n")
+    elif wip:
+        where = (f"\nA previous worker on #{n} ended without a pull request; its work is on origin/{branch} ({wip}). "
+                 f"Read what it did (git log and git diff origin/main...origin/{branch}) and the release comment on #{n}.\n")
+    if issue:
+        where += ("\nIssue #%s as of the claim (body, then the newest comments; claim notices left out):\n\n" % n
+                  + "\n".join("    " + ln for ln in issue.splitlines()) + "\n")
+    if files:
+        where += ("\nWhere the issue's names occur on origin/main (a starting point, not a promise):\n\n"
+                  + "\n".join("    " + ln for ln in files.splitlines()) + "\n")
+    return f"""This session is the research stage for issue #{n}: "{c.get("title", "")}" ({c.get("priority") or "no priority"}).
+
+You are pool session {k}. The supervisor claimed #{n} for you (claim token {token}). It works in two stages,
+each its own conversation: you research and write a brief; then a fresh conversation implements #{n} from the
+issue and your brief alone. Nothing you read here reaches it except the brief, so put in it what it needs.
+{where}{extra}
+1. Read what the change needs: the issue, the spec sections it touches ({PROJECT} says where things are), the code
+   it changes and the tests of that code. Read line ranges and grep results, not whole files. You may add a
+   worktree at {wt} (from origin/main, or from origin/{branch} above) to read in and to run existing tests, but
+   change nothing: no edits to project files, no commits, no pushes, no labels, no pull request.
+2. Write the brief to {brief} (at most {max_chars} characters), with these sections:
+   - Goal: what must change and how to tell it is done, in a few lines.
+   - Files: each file to change or read, with line ranges and the functions or classes involved.
+   - Plan: the steps, in order.
+   - Tests: the test file to add or extend (test_issue_{n}.py in the right directory if new) and the exact command
+     that runs it.
+   - Pitfalls: conventions to keep, related tests that may break, traps you found.
+   Quote code only where the implementer needs the exact text.
+3. If #{n} cannot or need not be done (a duplicate, already fixed, or it needs the owner's decision), say why on
+   #{n} and run python3 .issuelooper/hooks/claim.py release {n} --token {token} --reason "<one line>" (add
+   --to stage:owner for the owner's decision) instead of writing the brief. Last line then: WORKER-RELEASED
+
+Last line of your reply: {RESEARCH_DONE} {brief}
+Budget: {timeout} for this stage."""
+
+
+def read_brief(path: str, max_chars: int) -> tuple[str, str]:
+    """(the brief, '') or ('', why it is not usable): missing, empty or too short. One over
+    max_chars is cut there (why then says so, and the brief is still used)."""
+    try:
+        text = pathlib.Path(path).read_text(errors="replace").strip()
+    except OSError:
+        return "", "no brief was written"
+    if len(text) < BRIEF_MIN_CHARS:
+        return "", f"the brief has {len(text)} characters, under {BRIEF_MIN_CHARS}"
+    if max_chars and len(text) > max_chars:
+        return text[:max_chars].rsplit("\n", 1)[0] + "\n[... cut at the size limit]", f"cut from {len(text)} characters"
+    return text, ""
+
+
+def brief_text(brief: str, wt: str) -> str:
+    """The implement stage's start: the research stage's brief."""
+    return ("\nAn earlier conversation researched this issue for you and wrote this brief. Start from it: open only the "
+            "files and line ranges it names unless they prove wrong, and do not repeat its research. A worktree it "
+            f"added may already be at {wt}: if so, use it (git status) instead of adding another.\n\n"
+            + "\n".join("    " + ln for ln in brief.splitlines()) + "\n")
+
+
 def merger_prompt(u: Unit, timeout: str) -> str:
     pr, n = u.number, u.info["issue"]
     return f"""Use the issuelooper-merger skill and land exactly one pull request: #{pr}
@@ -3159,6 +3254,15 @@ class Session(threading.Thread):
         self.branch_base = ""  # where its branch forked off origin/main (the commit its notes describe)
         self.notes_key: str | None = None  # the notes it keeps (POOL_AREA_NOTES), and their file's
         self.notes_mark: tuple | None = None  # (mtime_ns, size) when it started
+        # The research stage (POOL_RESEARCH_BRIEF): which stage runs, its time limit, where its
+        # events end in the stream (the implement stage's start), its usage, seconds and result.
+        self.stage = ""
+        self.stage_timeout: str | None = None
+        self.research_mark: int | None = None
+        self.research_usage: dict | None = None
+        self.research_s = 0.0
+        self.implement_s = 0.0
+        self.research_result = ""
         self.quota_time = 0.0  # seconds its clocks stood still for quota (CLI retries and pool pauses)
         self.quota_base = -1  # a resumed conversation's newest quota step before this session
         self.usage_base: dict | None = None  # and its recorded usage (agy) before this session
@@ -3195,10 +3299,14 @@ class Session(threading.Thread):
             ).returncode
 
     def timeout(self) -> str:
-        """The unit's own time limit (an author resolving a conflict: the merger's), else its role's."""
-        return self.unit.info.get("timeout") or self.pool.cfg.timeouts.get(self.unit.role) or "45m"
+        """The stage's (POOL_RESEARCH_BRIEF), else the unit's own time limit (an author resolving a
+        conflict: the merger's), else its role's."""
+        return (self.stage_timeout or self.unit.info.get("timeout") or self.pool.cfg.timeouts.get(self.unit.role)
+                or "45m")
 
-    def session(self, prompt: str, env: dict) -> tuple[int, float, bool]:
+    def session(self, prompt: str, env: dict, conv: str | None = None, fresh: bool = False) -> tuple[int, float, bool]:
+        """One conversation's run, resumed and nudged as it needs. conv: resume this conversation
+        instead of the unit's; fresh: a new conversation whatever the unit says (the implement stage)."""
         cfg = self.pool.cfg
         role = self.unit.role
         timeout = self.timeout()
@@ -3223,8 +3331,8 @@ class Session(threading.Thread):
         # The CLI's own limit leaves room for the clocks to stand still (below); the
         # supervisor enforces the rest.
         # A unit that continues a recorded conversation (the issue's author) resumes it.
-        first = self.unit.info.get("resume")
-        fork_src = self.unit.info.get("fork") if not first else None
+        first = conv or (None if fresh else self.unit.info.get("resume"))
+        fork_src = self.unit.info.get("fork") if not first and not fresh else None
         limit = hard - start + cfg.retry_pause_max_s
         if first:
             cmd = base + cli.resume(prompt, first, limit)
@@ -3291,7 +3399,9 @@ class Session(threading.Thread):
             # their full timeout were a quarter of all worker time, and most of them
             # ended with nothing saved.
             report = self.unit.kind in REPORTS or self.unit.kind == "own-accept"
-            if role == "worker" and self.unit.kind == "implement" and cfg.wrap_s():
+            if self.stage == "research":
+                wrap_at, wrap_budget = start + 0.85 * seconds(timeout), min(300.0, 0.15 * seconds(timeout))
+            elif role == "worker" and self.unit.kind == "implement" and cfg.wrap_s():
                 # A unit with a longer time limit (a hub) wraps up proportionally later.
                 scale = seconds(timeout) / max(1, seconds(cfg.timeouts.get("worker") or timeout))
                 wrap_at, wrap_budget = start + cfg.wrap_s() * scale, cfg.worker_wrap_budget_s
@@ -3376,6 +3486,9 @@ class Session(threading.Thread):
                             budget = wrap_budget
                             soft = hard = time.time() + budget
                             resume(conv, "wrap-up", (
+                                "Time for research is almost up. Write the brief now with what you have, as your "
+                                f"prompt says, and end with the {RESEARCH_DONE} line."
+                                if self.stage == "research" else
                                 f"Time is almost up. Within the next few minutes write $LOGDIR/{REPORTS[self.unit.kind]} "
                                 "as it stands: its first line `Score: N/100` only if you ran the journeys (or walked "
                                 "your focus) and read the screenshots, else `Score: provisional` and what you did not "
@@ -3533,6 +3646,102 @@ class Session(threading.Thread):
         timed_out = (rc == 124 or bool(cli.timeout_text and cli.timeout_text in errtext)
                      or elapsed >= seconds(timeout) + 900 + paused or time.time() > ceiling)
         return rc, elapsed, timed_out
+
+    def staged_session(self, research: str, build, brief_path: str, env: dict) -> tuple[int, float, bool]:
+        """A worker unit in two conversations under one claim (POOL_RESEARCH_BRIEF): the research
+        stage, with RESEARCH_SHARE of the time limit, writes a brief; the implement stage starts a
+        new conversation (not a resume, not a fork) from build(its time limit) and the brief. Without
+        a usable brief the research conversation is resumed to implement instead, so no work is
+        lost. A research stage that ended on quota, an error or a stop, or that released the claim
+        or finished the issue itself, ends the unit there. Returns what session() does, over both."""
+        cfg, u = self.pool.cfg, self.unit
+        total = seconds(self.timeout())
+        self.stage, self.stage_timeout = "research", f"{max(5, int(total * RESEARCH_SHARE) // 60)}m"
+        rc, r_elapsed, r_timed = self.session(research, env)
+        r_paused = self.quota_time
+        self.stage_timeout = None
+        events = self.events()
+        self.research_mark, self.research_s = len(events), r_elapsed
+        self.research_usage = self.cli.usage(events)
+        research_conv = self.conversation()
+        with contextlib.suppress(OSError):
+            shutil.copyfile(self.dir / "prompt.txt", self.dir / "research-prompt.txt")
+        with contextlib.suppress(OSError):
+            shutil.copyfile(brief_path, self.dir / "brief.md")
+        if cfg.kill_leftovers:
+            self.kill_leftovers()
+        # A new conversation is a new session for the quota: while its group is paused, it waits
+        # (as admit() would make a new unit wait), and the wait is quota time, not its own.
+        waited = 0.0
+        while not self.pool.stopping and not (rc != 0 and not r_timed) and waited < cfg.quota_extend_max_s:
+            until = self.pool.book.quota_paused(self.quota_group, self.pool.clock())
+            if not until:
+                break
+            step = max(1.0, min(30.0, until - self.pool.clock()))
+            if self.pool.halt.wait(step):
+                break
+            waited += step
+        if waited:
+            with open(self.dir / "resumes.log", "a") as rl:
+                rl.write(f"{time.time():.0f} waited {waited:.0f} s for the quota pause before the implement stage\n")
+        if self.pool.stopping or (rc != 0 and not r_timed):
+            self.research_result = "stopped" if self.pool.stopping else f"ended (exit {rc})"
+            return rc, r_elapsed, r_timed
+        if self.work_done():
+            # It released the claim, or (against its prompt) took the issue to a PR itself.
+            self.research_result = "finished the unit"
+            self.pool.log("research_end", session=self.seq, issue=u.number, result=self.research_result,
+                          seconds=round(r_elapsed))
+            return rc, r_elapsed, r_timed
+        brief, why = read_brief(brief_path, cfg.brief_max_chars)
+        # The rest of the time limit, at least the implement share: the research stage's quota
+        # waits are not its time.
+        left = max(total * (1 - RESEARCH_SHARE), total - max(0.0, r_elapsed - r_paused))
+        self.stage, self.stage_timeout = "implement", f"{max(1, int(left) // 60)}m"
+        wt = scratch(f"wrk-{self.seq}-{u.number}-wt")
+        with open(self.dir / "resumes.log", "a") as rl:
+            rl.write(f"{time.time():.0f} research stage ended after {r_elapsed:.0f} s"
+                     f"{' (timed out)' if r_timed else ''}: {why or 'brief written'}\n")
+        try:
+            if brief:
+                self.research_result = "brief" + (f" ({why})" if why else "")
+                if why:
+                    self.pool.log("brief_cut", session=self.seq, issue=u.number, why=why, max_chars=cfg.brief_max_chars)
+                self.pool.log("research_end", session=self.seq, issue=u.number, result=self.research_result,
+                              brief_chars=len(brief), seconds=round(r_elapsed), timed_out=r_timed)
+                rc, i_elapsed, timed_out = self.session(build(self.stage_timeout, skip_files=True) + brief_text(brief, wt),
+                                                        env, fresh=True)
+            else:
+                can = bool(research_conv) and self.cli.can_resume(research_conv)
+                self.research_result = f"fallback: {why}"
+                self.pool.log("research_fallback", session=self.seq, issue=u.number, why=why,
+                              resumed=can, seconds=round(r_elapsed), timed_out=r_timed)
+                text = build(self.stage_timeout)
+                if can:
+                    rc, i_elapsed, timed_out = self.session(
+                        text + f"\nYou researched #{u.number} in this conversation already, but {why} at {brief_path}. "
+                        "Do not write one now: implement the issue as above, from what you found.\n",
+                        env, conv=research_conv)
+                else:
+                    rc, i_elapsed, timed_out = self.session(text, env, fresh=True)
+        finally:
+            self.stage_timeout = None
+        self.implement_s = i_elapsed
+        self.quota_time += r_paused + waited
+        return rc, r_elapsed + i_elapsed, timed_out
+
+    def stage_usages(self) -> tuple[dict, dict] | None:
+        """(research, implement) tokens of a unit that ran in stages, else None. The implement
+        stage's are the stream's events after the research stage's; for a resumed research
+        conversation (the fallback), what its record grew by (agy), as session_usage does."""
+        if self.research_mark is None or self.research_usage is None:
+            return None
+        impl = self.cli.usage(self.events()[self.research_mark:])
+        if self.usage_base is not None and hasattr(self.cli, "recorded_usage"):
+            now = self.cli.recorded_usage(self.conversation())
+            if now is not None:
+                impl.update({k: max(0, now.get(k, 0) - self.usage_base.get(k, 0)) for k in now})
+        return self.research_usage, impl
 
     def session_usage(self) -> dict:
         """Tokens this session used: for a conversation it resumed, what the conversation's
@@ -3830,6 +4039,7 @@ class Session(threading.Thread):
             return {"merge": self.auto_merge, "rebase": self.auto_rebase, "requeue": self.requeue,
                     "handback": self.merger_handback, "guardback": self.guard_hand_back}.get(u.kind, self.reclaim)(env)
         claim_file = self.dir / "claim"
+        staged = False
         # Only an implement unit claims: an author resumed to accept its issue
         # (stage:accept) or resolve its PR (stage:pr) works on an issue claim.py would
         # refuse: every one of them ended "unclaimable" when they claimed first.
@@ -3868,31 +4078,46 @@ class Session(threading.Thread):
                                  id_pattern=cfg.map_id_pattern)
             except (OSError, subprocess.SubprocessError):
                 files = ""
-            prompt = worker_prompt(claim, str(self.seq), cfg.timeouts["worker"], pool, wip,
-                                   cfg.live, int(cfg.wrap_s() // 60) or 35,
-                                   issue_text(thread) if thread else "", files, cfg.devcheck,
-                                   ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
-                                   bool(cfg.accept_guard), cfg.accept_mode)
-            if cfg.symbol_index:
-                prompt += "\n" + self.index_prompt(files)
+            # A unit that continues a conversation (resumed or forked) has its context already.
+            staged = cfg.research_brief and not u.info.get("resume") and not u.info.get("fork")
+            index = self.index_prompt(files) if cfg.symbol_index else ""
             knowledge = self.notes_prompt("implement") if cfg.area_notes else ""
-            if u.info.get("area") or u.info.get("hot") or knowledge:
-                pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
-                prompt += "\n" + area_text(u, cfg, knowledge)
-            if u.info.get("fork"):
-                prompt += (
-                    "\nThis session is forked from an earlier worker conversation that already explored this "
-                    f"repository, {PROJECT} and spec/. Reuse what is already in your conversation history "
-                    "instead of re-reading unchanged files; check your worktree with git status and go straight "
-                    f"to reproducing #{n} with a failing test.\n"
-                )
-            if u.info.get("hub"):
-                prompt += (f"\n#{n} is a hub: {u.info['hub']} open issues wait on it, so you have {self.timeout()} "
-                           "instead of the usual limit."
-                           + (" This conversation worked on it before and that attempt did not merge: read the "
-                              "newest comments (a hand-back, a release) for what failed, and start a new worktree "
-                              "from the branch, since the old one is gone." if u.info.get("resume") else "")
-                           + " Land the smallest change that unblocks them; say on the issue what is left.\n")
+
+            def build(timeout: str, skip_files: bool = False) -> str:
+                """The implement prompt; skip_files: the brief replaces the file map."""
+                out = worker_prompt(claim, str(self.seq), timeout, pool, wip,
+                                    cfg.live, int(cfg.wrap_s() * seconds(timeout) / max(1, seconds(cfg.timeouts["worker"]))
+                                                  // 60) or 35,
+                                    issue_text(thread) if thread else "", "" if skip_files else files, cfg.devcheck,
+                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
+                                    bool(cfg.accept_guard), cfg.accept_mode)
+                if index:
+                    out += "\n" + index
+                if u.info.get("area") or u.info.get("hot") or knowledge:
+                    pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
+                    out += "\n" + area_text(u, cfg, knowledge)
+                if u.info.get("fork"):
+                    out += (
+                        "\nThis session is forked from an earlier worker conversation that already explored this "
+                        f"repository, {PROJECT} and spec/. Reuse what is already in your conversation history "
+                        "instead of re-reading unchanged files; check your worktree with git status and go straight "
+                        f"to reproducing #{n} with a failing test.\n"
+                    )
+                if u.info.get("hub"):
+                    out += (f"\n#{n} is a hub: {u.info['hub']} open issues wait on it, so you have {self.timeout()} "
+                            "instead of the usual limit."
+                            + (" This conversation worked on it before and that attempt did not merge: read the "
+                               "newest comments (a hand-back, a release) for what failed, and start a new worktree "
+                               "from the branch, since the old one is gone." if u.info.get("resume") else "")
+                            + " Land the smallest change that unblocks them; say on the issue what is left.\n")
+                return out
+            prompt = build(cfg.timeouts["worker"])
+            if staged:
+                research = research_prompt(
+                    claim, str(self.seq), f"{max(5, int(seconds(self.timeout()) * RESEARCH_SHARE) // 60)}m",
+                    scratch(f"wrk-{self.seq}-{n}-brief.md"), cfg.brief_max_chars, wip,
+                    issue_text(thread) if thread else "", files,
+                    (index + (self.notes_prompt("research") if cfg.area_notes else "")))
         elif u.role == "worker" and u.kind == "own-accept":
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
@@ -3913,7 +4138,10 @@ class Session(threading.Thread):
             previous = next((x for x in reversed(self.pool.ux_scores) if x.get("score") is not None), None)
             prompt = tester_prompt(u, self.port, cfg.timeouts["tester"], cfg.ux_journeys, previous)
 
-        rc, elapsed, timed_out = self.session(prompt, env)
+        if u.role == "worker" and u.kind == "implement" and staged:
+            rc, elapsed, timed_out = self.staged_session(research, build, scratch(f"wrk-{self.seq}-{n}-brief.md"), env)
+        else:
+            rc, elapsed, timed_out = self.session(prompt, env)
         # Before the leftovers go: a worker's sweep still running at the end means the session
         # was cut off with work in progress (BG_CUT), not that the agent gave up.
         still = (u.role == "worker" and u.kind == "implement" and rc == 0 and not timed_out
@@ -5455,7 +5683,14 @@ class Pool:
             self.record_ux_score(w, outcome)
         extra = {}
         if (w.dir / "session.jsonl").exists():
-            extra["usage"] = w.session_usage()
+            staged = w.stage_usages()
+            if staged:
+                # usage stays the unit's total; the stages split it (research and implementation cost).
+                extra.update(usage=add_usage(*staged), research_usage=staged[0], implement_usage=staged[1],
+                             research_s=round(w.research_s), implement_s=round(w.implement_s),
+                             research=w.research_result)
+            else:
+                extra["usage"] = w.session_usage()
             extra["cli"] = w.cli.name
             retried, _ = w.cli.inturn_quota(w.conversation(), w.quota_base) if w.unit.role != "auto" else (0, 0)
             if retried:

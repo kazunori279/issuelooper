@@ -240,6 +240,11 @@ notes_stale_lines = 200      # POOL_NOTES_STALE_LINES
 symbol_index = false         # POOL_SYMBOL_INDEX: a symbol index of origin/main (functions, classes, ids, CSS rules with
                              # file:line; Python, JS/TS, HTML, CSS; no model), cached per main sha, named in the worker's
                              # prompt with its lines for the issue's files, so workers read line ranges, not whole files
+research_brief = false       # POOL_RESEARCH_BRIEF: a worker that starts cold runs two conversations under one claim:
+                             # research (40% of the timeout) writes a brief outside the repository, then a fresh
+                             # conversation implements from the issue, the brief and the area notes. No usable brief:
+                             # the research conversation is resumed to implement instead
+brief_max_chars = 16000      # POOL_BRIEF_MAX_CHARS: a longer brief is cut there
 author_resolve = false       # POOL_AUTHOR_RESOLVE: a PR that conflicts after the supervisor's rebase (or whose rebase
                              # is red) is resolved by its author's conversation, resumed (agy --conversation, claude
                              # --resume), instead of a merger session; the merger stays the fallback (no recorded

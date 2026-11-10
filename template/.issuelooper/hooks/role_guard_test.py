@@ -2088,6 +2088,19 @@ def test_files_in_the_shared_checkout() -> None:
         check(f"allowed: {cmd!r}", verdict, "allow")
     verdict, _ = run("rm -f .env", role="worker", cwd="/tmp/issuelooper-x/wrk-3-12-wt")
     check("a bare rm in Claude Code's worktree cwd is allowed", verdict, "allow")
+    # The research stage's brief and the area notes live under scratch, outside the repository.
+    for cmd in ("cat > $ISSUELOOPER_TMP/wrk-3-12-brief.md <<'MD'\nGoal: fix the map.\nMD",
+                'mkdir -p "$ISSUELOOPER_TMP/areas" && cp "$ISSUELOOPER_TMP/wrk-3-12-notes.md" "$ISSUELOOPER_TMP/areas/live.md"',
+                "printf 'src/live.py: run_turn at 120-180\\n' > $ISSUELOOPER_TMP/areas/_repo.md"):
+        for host in (AGY, CLAUDE):
+            verdict, _ = run(cmd, role="worker", host=host)
+            check(f"a worker writes its brief or the area notes under scratch ({host}): {cmd!r}", verdict, "allow")
+    proc = subprocess.run([sys.executable, str(GUARD)], capture_output=True, text=True, check=True,
+                          env=dict(os.environ, CC_ROLE="worker"),
+                          input=json.dumps({"toolCall": {"name": "write_to_file", "args": {
+                              "TargetFile": os.environ["ISSUELOOPER_TMP"] + "/wrk-3-12-brief.md", "CodeContent": "Goal"}},
+                              "conversationId": "test-conversation"}))
+    check("agy's file tool writing the brief is allowed", "deny" in proc.stdout or "block" in proc.stdout, False)
     verdict, _ = run("rm -f .env", role="", host=AGY)
     check("a session with no role (the owner's own) is not bound", verdict, "allow")
 

@@ -5003,6 +5003,34 @@ time.sleep(120)
 """
 
 
+FAKE_AGY_STAGES = r"""#!/usr/bin/env python3
+import json, os, pathlib, re, sys
+args = sys.argv[1:]
+with open(sys.argv[0] + ".calls", "a") as f:
+    f.write(json.dumps(args) + "\n")
+prompt = args[args.index("--print") + 1]
+convs = pathlib.Path(os.environ["AGY_CONVERSATIONS_DIR"])
+if "--conversation" in args:
+    cid = args[args.index("--conversation") + 1]
+else:
+    cid = f"conv-{len(list(convs.glob('*.db'))) + 1}"
+    (convs / f"{cid}.db").write_bytes(b"")
+research = "research stage for issue" in prompt
+if research:
+    m = re.search(r"Write the brief to (\S+) ", prompt)
+    mode = os.environ.get("FAKE_BRIEF", "good")
+    if mode != "none":
+        text = {"good": "Goal: fix it.\n" + "Files: src/app.py:10-40 handle()\n" * 20,
+                "short": "Goal: fix it.", "long": "Files: src/app.py:1-9\n" * 2000}[mode]
+        pathlib.Path(m.group(1)).write_text(text)
+usage = {"input_tokens": 1000, "output_tokens": 100, "cache_read_tokens": 50} if research else \
+        {"input_tokens": 2000, "output_tokens": 300, "cache_read_tokens": 700}
+print(json.dumps({"event": "init", "conversation_id": cid}), flush=True)
+print(json.dumps({"event": "result", "result": {"response": "RESEARCH-DONE" if research else "WORKER-DONE pr #9",
+                                                "conversation_id": cid, "usage": usage}}), flush=True)
+"""
+
+
 FAKE_AGY_STALL = r"""#!/usr/bin/env python3
 import json, sys, time
 args = sys.argv[1:]
@@ -5191,6 +5219,113 @@ def test_a_worker_with_no_pull_request_is_not_ok() -> None:
     finally:
         ccpool.Session.sh = real_sh
         restore()
+
+
+def test_research_then_a_fresh_implement_conversation() -> None:
+    """POOL_RESEARCH_BRIEF: calls before the first edit were 38% of a cold worker's cost, and
+    re-sending what they added (~11k to ~88k tokens of context) another third."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-stages-"))
+    work, g = git_repo(d)
+    (work / "a.txt").write_text("x\n")
+    g("add", "-A")
+    g("commit", "-qm", "base")
+    g("push", "-q", "origin", "HEAD:main")
+    convs = d / "convs"
+    convs.mkdir()
+    agy = d / "ccrole"
+    agy.write_text(FAKE_AGY_STAGES)
+    agy.chmod(0o755)
+    restore = with_env({"SHARED_REPO_PATH": str(work), "AGY_CONVERSATIONS_DIR": str(convs), "CCROLE_WORKER_CLI": "agy",
+                        "FAKE_BRIEF": "good"})
+    real_sh = ccpool.Session.sh
+    steps = []
+
+    def sh(self, args, env, name):
+        steps.append(name)
+        if name == "claim":
+            (self.dir / "claim").write_text(json.dumps({"issue": 5, "token": "t", "from": "stage:triage", "title": "x"}))
+            (self.dir / "claim.out").write_text("claimed\n")
+        if name == "finish":
+            (self.dir / "finish.out").write_text("#5: pr #9\n")
+        return 0
+    ccpool.Session.sh = sh
+
+    def run(mode, info=None, seq=1, pause=0.0):
+        os.environ["FAKE_BRIEF"] = mode
+        for f in convs.glob("*"):
+            f.unlink()
+        (d / "ccrole.calls").unlink(missing_ok=True)
+        steps.clear()
+        pool = ccpool.Pool(ccpool.Config(logdir=d / f"pool-{mode}-{seq}", ccrole=str(agy), render="cat", gh="true",
+                                         research_brief=True, kill_leftovers=False, worker_wrap_s=0, stall_s=0,
+                                         caps={r: 0 for r in ccpool.ROLES}, timeouts={"worker": "45m"},
+                                         brief_max_chars=2000),
+                           fetcher=state, spawn=False)
+        w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), info or {}), seq)
+        w.issue_thread = lambda n: {"body": "The page breaks."}
+        if pause:
+            pool.book.quota_until["agy/x"] = time.time() + pause
+        outcome = w.work()
+        pool.finished(w, outcome)
+        calls = [json.loads(x) for x in (d / "ccrole.calls").read_text().splitlines()]
+        prompts = [c[c.index("--print") + 1] for c in calls]
+        rows = [json.loads(x) for x in (pool.cfg.logdir / "pool.jsonl").read_text().splitlines()]
+        return outcome, calls, prompts, rows, w
+    try:
+        outcome, calls, prompts, rows, w = run("good")
+        end = [r for r in rows if r["kind"] == "end"][-1]
+        check("research, then a new conversation (no resume, no fork) whose prompt has the brief and not the research",
+              (outcome, len(calls), ["--conversation" in c for c in calls], "research stage" in prompts[0],
+               "Files: src/app.py:10-40 handle()" in prompts[1], "research stage" in prompts[1],
+               "An earlier conversation researched this issue" in prompts[1]),
+              ("ok", 2, [False, False], True, True, False, True))
+        check("one claim covers both stages: claimed before research, finished after the implement stage",
+              steps, ["claim", "finish"])
+        check("the research prompt names the brief file outside the repository and ends with the fixed line",
+              (f"Write the brief to {SCRATCH}/wrk-1-5-brief.md " in prompts[0], "RESEARCH-DONE" in prompts[0],
+               "change nothing" in prompts[0]), (True, True, True))
+        check("usage per stage in the end line, and the total as before",
+              (end["research_usage"]["input"], end["implement_usage"]["input"], end["usage"]["input"],
+               end["usage"]["output"], end["research"], "research_s" in end and "implement_s" in end),
+              (1000, 2000, 3000, 400, "brief", True))
+        check("the brief is kept in the session's directory; the scratch copy goes with the session",
+              ((w.dir / "brief.md").exists(), (w.dir / "research-prompt.txt").exists(),
+               pathlib.Path(SCRATCH, "wrk-1-5-brief.md").exists()), (True, True, False))
+        check("the implement stage gets the rest of the time limit", "hard wall-clock timeout of 44m" in prompts[1], True)
+
+        outcome, calls, prompts, rows, w = run("none")
+        end = [r for r in rows if r["kind"] == "end"][-1]
+        fb = [r for r in rows if r["kind"] == "research_fallback"]
+        check("no brief: the research conversation is resumed to implement, and the fallback is logged",
+              (outcome, calls[1][-2:], "You researched #5 in this conversation already" in prompts[1],
+               [(r["why"], r["resumed"]) for r in fb], end["research"]),
+              ("ok", ["--conversation", "conv-1"], True, [("no brief was written", True)], "fallback: no brief was written"))
+        check("and its usage is still split by stage", (end["research_usage"]["input"], end["implement_usage"]["input"]),
+              (1000, 2000))
+        outcome, calls, prompts, rows, w = run("short")
+        check("a brief too short to use: the same fallback",
+              ([r["why"] for r in rows if r["kind"] == "research_fallback"], calls[1][-2:]),
+              (["the brief has 13 characters, under 300"], ["--conversation", "conv-1"]))
+        outcome, calls, prompts, rows, w = run("long")
+        cut = [r for r in rows if r["kind"] == "brief_cut"]
+        check("a brief over POOL_BRIEF_MAX_CHARS is cut there and logged, and still starts a fresh conversation",
+              ("[... cut at the size limit]" in prompts[1], len(prompts[1].split("An earlier conversation")[1]) < 3000,
+               [r["why"] for r in cut], "--conversation" in calls[1]),
+              (True, True, ["cut from 43999 characters"], False))
+        outcome, calls, prompts, rows, w = run("good", {"resume": "conv-old"}, seq=2)
+        check("a unit that continues a conversation skips research: one resumed session",
+              (len(calls), calls[0][-2:], "research_usage" in [r for r in rows if r["kind"] == "end"][-1]),
+              (1, ["--conversation", "conv-old"], False))
+        t0 = time.time()
+        outcome, calls, prompts, rows, w = run("good", pause=3, seq=3)
+        check("a quota pause after research holds the new conversation until it ends, and counts as quota time",
+              (outcome, len(calls), time.time() - t0 >= 2, "for the quota pause before the implement stage"
+               in (w.dir / "resumes.log").read_text(), w.quota_time >= 2), ("ok", 2, True, True, True))
+        check("POOL_RESEARCH_BRIEF defaults to off", ccpool.Config.from_env().research_brief, False)
+    finally:
+        ccpool.Session.sh = real_sh
+        restore()
+        shutil.rmtree(d, ignore_errors=True)
 
 
 FAKE_AGY_UNSEEN = r"""#!/usr/bin/env python3

@@ -187,6 +187,8 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] notes_max_chars` | `POOL_NOTES_MAX_CHARS` | `24000` | Notes longer than this are stale and the next worker rebuilds them. |
 | `[pool] notes_stale_lines` | `POOL_NOTES_STALE_LINES` | `200` | Notes are stale once the files they name changed by more lines than this since the commit they describe. |
 | `[pool] symbol_index` | `POOL_SYMBOL_INDEX` | `false` | Give workers a symbol index of `origin/main` (functions, classes, ids and CSS rules with `file:line`, made without a model, cached per main sha in `$ISSUELOOPER_TMP/index/`) and its lines for the issue's files. |
+| `[pool] research_brief` | `POOL_RESEARCH_BRIEF` | `false` | Run a worker that starts cold in two conversations under one claim: research writes a brief outside the repository, then a fresh conversation implements from the issue, the brief and the area notes. |
+| `[pool] brief_max_chars` | `POOL_BRIEF_MAX_CHARS` | `16000` | A longer research brief is cut at this length (and logged). |
 | `[pool] author_resolve` | `POOL_AUTHOR_RESOLVE` | `false` | Resume the PR author's conversation to resolve rebase conflicts or red rebases before falling back to a merger. |
 | `[pool] author_resolve_max` | `POOL_AUTHOR_RESOLVE_MAX` | `2` | Maximum author conflict-resolution attempts before handing to a merger. |
 | `[pool] author_guard` | `POOL_AUTHOR_GUARD` | `false` | Resume the PR author's conversation when a merge-train acceptance guard fails because of that PR. |

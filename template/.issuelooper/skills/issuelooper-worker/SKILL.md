@@ -16,6 +16,11 @@ stop. You never touch another issue. You do not merge, close or deploy: the
 supervisor merges your PR once the merge gates and the review gate pass, so the
 PR body has to carry everything they check.
 
+**A research stage** (your prompt says so, `[pool] research_brief`): follow the
+prompt, not the steps below. Read what the change needs, change nothing, write the
+brief where the prompt says and end with its `RESEARCH-DONE` line. A fresh
+conversation then implements from your brief and runs these steps.
+
 Names below: `K=$WRK_K`, `N` your issue, `T` your claim token,
 `WT=$ISSUELOOPER_TMP/wrk-$K-$N-wt`, scratch files `$ISSUELOOPER_TMP/wrk-$K-$N-*`. Write nowhere else.
 
