@@ -5288,6 +5288,11 @@ def test_research_then_a_fresh_implement_conversation() -> None:
     g("add", "-A")
     g("commit", "-qm", "base")
     g("push", "-q", "origin", "HEAD:main")
+    (work / ".issuelooper" / "skills" / "issuelooper-worker").mkdir(parents=True)
+    (work / ".issuelooper" / "skills" / "issuelooper-worker" / "SKILL.md").write_text(
+        "# worker\n## 2. Worktree\nWORKTREE-RULE\n## 3. Trace the cause\nTRACE-RULE\n## 6. Push, open the PR\nPR-RULE\n"
+        "## 7. When you cannot finish\nRELEASE-RULE\n")
+    (work / ".issuelooper" / "review_rules.md").write_text("Reject made-up data shown as real.\n")
     convs = d / "convs"
     convs.mkdir()
     agy = d / "ccrole"
@@ -5308,7 +5313,7 @@ def test_research_then_a_fresh_implement_conversation() -> None:
         return 0
     ccpool.Session.sh = sh
 
-    def run(mode, info=None, seq=1, pause=0.0):
+    def run(mode, info=None, seq=1, pause=0.0, min_files=0):
         os.environ["FAKE_BRIEF"] = mode
         for f in convs.glob("*"):
             f.unlink()
@@ -5317,7 +5322,7 @@ def test_research_then_a_fresh_implement_conversation() -> None:
         pool = ccpool.Pool(ccpool.Config(logdir=d / f"pool-{mode}-{seq}", ccrole=str(agy), render="cat", gh="true",
                                          research_brief=True, kill_leftovers=False, worker_wrap_s=0, stall_s=0,
                                          caps={r: 0 for r in ccpool.ROLES}, timeouts={"worker": "45m"},
-                                         brief_max_chars=2000),
+                                         brief_max_chars=2000, research_min_files=min_files),
                            fetcher=state, spawn=False)
         w = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), info or {}), seq)
         w.issue_thread = lambda n: {"body": "The page breaks."}
@@ -5339,6 +5344,16 @@ def test_research_then_a_fresh_implement_conversation() -> None:
               ("ok", 2, [False, False], True, True, False, True))
         check("one claim covers both stages: claimed before research, finished after the implement stage",
               steps, ["claim", "finish"])
+        check("the brief must list the neighbors of the change and quote the code of its ranges",
+              ("Neighbors (required)" in prompts[0], "quote the exact code of the line ranges" in prompts[0]), (True, True))
+        check("the implement stage starts from the brief, may open what its Neighbors need, and gets the skill's steps "
+              "3-6 and the review rules inline",
+              ("open other files when its Neighbors section needs it" in prompts[1], "TRACE-RULE" in prompts[1],
+               "PR-RULE" in prompts[1], "WORKTREE-RULE" in prompts[1], "RELEASE-RULE" in prompts[1],
+               "Reject made-up data shown as real." in prompts[1]),
+              (True, True, True, False, False, True))
+        check("a brief with no Neighbors section is noted in pool.jsonl", [r["kind"] for r in rows if r["kind"] == "brief_no_neighbors"],
+              ["brief_no_neighbors"])
         check("the research prompt names the brief file outside the repository and ends with the fixed line",
               (f"Write the brief to {SCRATCH}/wrk-1-5-brief.md " in prompts[0], "RESEARCH-DONE" in prompts[0],
                "change nothing" in prompts[0]), (True, True, True))
@@ -5367,7 +5382,7 @@ def test_research_then_a_fresh_implement_conversation() -> None:
         outcome, calls, prompts, rows, w = run("long")
         cut = [r for r in rows if r["kind"] == "brief_cut"]
         check("a brief over POOL_BRIEF_MAX_CHARS is cut there and logged, and still starts a fresh conversation",
-              ("[... cut at the size limit]" in prompts[1], len(prompts[1].split("An earlier conversation")[1]) < 3000,
+              ("[... cut at the size limit]" in prompts[1], len(prompts[1].split("An earlier conversation")[1].split("The issuelooper-worker skill")[0]) < 3000,
                [r["why"] for r in cut], "--conversation" in calls[1]),
               (True, True, ["cut from 43999 characters"], False))
         outcome, calls, prompts, rows, w = run("good", {"resume": "conv-old"}, seq=2)
@@ -5387,6 +5402,17 @@ def test_research_then_a_fresh_implement_conversation() -> None:
               (outcome, len(calls), time.time() - t0 >= 2, "for the quota pause before the implement stage"
                in (w.dir / "resumes.log").read_text(), w.quota_time >= 2), ("ok", 2, True, True, True))
         check("POOL_RESEARCH_BRIEF defaults to off", ccpool.Config.from_env().research_brief, False)
+        cfg = ccpool.Config.from_env()
+        check("research takes a quarter of the timeout by default, and needs two predicted files",
+              (cfg.research_share, cfg.research_min_files), (0.25, 2))
+        unit = lambda info: ccpool.Unit("worker", "implement", "k", "f", 1, (4,), info)
+        check("research only for an issue in an area with at least two predicted files",
+              (ccpool.research_wanted(unit({"area": "live"}), ["a.py", "b.py"], cfg),
+               ccpool.research_wanted(unit({"lent": "live"}), ["a.py", "b.py"], cfg),
+               ccpool.research_wanted(unit({"area": "live"}), ["a.py"], cfg),
+               ccpool.research_wanted(unit({}), ["a.py", "b.py", "c.py"], cfg)), (True, True, False, False))
+        outcome, calls, prompts, rows, w = run("good", {"area": "live", "slot": 0, "files": ["src/live.py"]}, seq=5, min_files=2)
+        check("a small issue (one predicted file) skips research: one conversation", len(calls), 1)
     finally:
         ccpool.Session.sh = real_sh
         restore()

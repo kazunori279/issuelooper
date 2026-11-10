@@ -245,10 +245,13 @@ symbol_index = false         # POOL_SYMBOL_INDEX: a symbol index of origin/main 
                              # file:line; Python, JS/TS, HTML, CSS; no model), cached per main sha, named in the worker's
                              # prompt with its lines for the issue's files, so workers read line ranges, not whole files
 research_brief = false       # POOL_RESEARCH_BRIEF: a worker that starts cold runs two conversations under one claim:
-                             # research (40% of the timeout) writes a brief outside the repository, then a fresh
+                             # research (research_share of the timeout) writes a brief outside the repository, then a fresh
                              # conversation implements from the issue, the brief and the area notes. No usable brief:
                              # the research conversation is resumed to implement instead
 brief_max_chars = 16000      # POOL_BRIEF_MAX_CHARS: a longer brief is cut there
+research_share = 0.25        # POOL_RESEARCH_SHARE: the research stage's share of the worker timeout
+research_min_files = 2       # POOL_RESEARCH_MIN_FILES: research only for an issue in an area with this many predicted
+                             # files; a smaller one, or one in no area, is implemented in one conversation (0 = always)
 park_on_quota = true         # POOL_PARK_ON_QUOTA: an implement unit whose clocks stood still for quota up to
                              # POOL_RETRY_PAUSE_MAX_S, or that timed out mostly waiting for quota, is parked: its slot is
                              # freed, its claim, worktree and conversation kept, and it goes on in that conversation with a

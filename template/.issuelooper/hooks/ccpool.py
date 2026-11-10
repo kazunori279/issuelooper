@@ -586,6 +586,11 @@ class Config:
     # were 38% of a cold worker's cost, and re-sending what they added another third.
     research_brief: bool = False
     brief_max_chars: int = 16000
+    # The research stage's share of the worker timeout, and the predicted files an issue in an
+    # area needs for a research stage at all (a smaller one, or one in no area, is implemented
+    # in one conversation). Research cost more than a cold worker's own research phase.
+    research_share: float = 0.25
+    research_min_files: int = 2
     # Parking (POOL_PARK_ON_QUOTA): an implement unit that reaches the quota clock-pause cap
     # (POOL_RETRY_PAUSE_MAX_S), or times out with quota waits taking POOL_QUOTA_TIMEOUT_SHARE of
     # its time, is parked instead of ended: its slot is freed, its claim, worktree and
@@ -810,6 +815,8 @@ class Config:
             symbol_index=env_flag("POOL_SYMBOL_INDEX"),
             research_brief=env_flag("POOL_RESEARCH_BRIEF"),
             brief_max_chars=env_int("POOL_BRIEF_MAX_CHARS", 16000),
+            research_share=float(e("POOL_RESEARCH_SHARE", "") or 0.25),
+            research_min_files=env_int("POOL_RESEARCH_MIN_FILES", 2),
             park_on_quota=env_flag("POOL_PARK_ON_QUOTA", True),
             park_max=env_int("POOL_PARK_MAX", 2),
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
@@ -2432,7 +2439,6 @@ commit your work and release the claim with what you learned rather than being k
 mid-work."""
 
 
-RESEARCH_SHARE = 0.4  # of the worker timeout, for the research stage; the rest is the implement stage's
 BRIEF_MIN_CHARS = 300  # a shorter brief is not one: the implement stage resumes the research conversation
 RESEARCH_DONE = "RESEARCH-DONE"
 
@@ -2474,8 +2480,13 @@ issue and your brief alone. Nothing you read here reaches it except the brief, s
    - Plan: the steps, in order.
    - Tests: the test file to add or extend (test_issue_{n}.py in the right directory if new) and the exact command
      that runs it.
+   - Neighbors (required): the behaviors next to the change that must still work, each quoted from the spec or the
+     issue, with the test or check that covers it. Look for them: a second item after the first (two cards in
+     one feed), live mode, the failure path (a source that fails, an empty result), another viewport or language
+     after a reload. Most defects found after a merge sat next to a correct fix.
    - Pitfalls: conventions to keep, related tests that may break, traps you found.
-   Quote code only where the implementer needs the exact text.
+   Under Files, quote the exact code of the line ranges you name (within the size limit), so the implementer
+   need not open them again.
 3. If #{n} cannot or need not be done (a duplicate, already fixed, or it needs the owner's decision), say why on
    #{n} and run python3 .issuelooper/hooks/claim.py release {n} --token {token} --reason "<one line>" (add
    --to stage:owner for the owner's decision) instead of writing the brief. Last line then: WORKER-RELEASED
@@ -2498,12 +2509,52 @@ def read_brief(path: str, max_chars: int) -> tuple[str, str]:
     return text, ""
 
 
-def brief_text(brief: str, wt: str) -> str:
-    """The implement stage's start: the research stage's brief."""
-    return ("\nAn earlier conversation researched this issue for you and wrote this brief. Start from it: open only the "
-            "files and line ranges it names unless they prove wrong, and do not repeat its research. A worktree it "
-            f"added may already be at {wt}: if so, use it (git status) instead of adding another.\n\n"
-            + "\n".join("    " + ln for ln in brief.splitlines()) + "\n")
+def brief_text(brief: str, wt: str, rules: str = "") -> str:
+    """The implement stage's start: the research stage's brief, and rules (implement_rules)."""
+    return ("\nAn earlier conversation researched this issue for you and wrote this brief. Start from it, and do not "
+            "repeat its research; open other files when its Neighbors section needs it (and when it has none, find "
+            "the behaviors next to your change yourself). Before your PR, check that each neighbor still works. A "
+            f"worktree it added may already be at {wt}: if so, use it (git status) instead of adding another.\n\n"
+            + "\n".join("    " + ln for ln in brief.splitlines()) + "\n" + rules)
+
+
+SKILL_RULES = (3, 6)  # the worker skill's sections quoted in the implement stage's prompt
+RULES_MAX = 9000  # characters of them, and RULES_MAX // 2 of the review rules
+
+
+def implement_rules(root: pathlib.Path) -> str:
+    """The worker skill's steps (SKILL_RULES) and the project's review rules, quoted and capped
+    for the implement stage: a fresh implement conversation reread the skill about 110 times and
+    the review rules 45 times in one run."""
+    out = ""
+    try:
+        skill = (root / ".issuelooper/skills/issuelooper-worker/SKILL.md").read_text(errors="replace")
+    except OSError:
+        skill = ""
+    parts = re.split(r"(?m)^(?=## )", skill)
+    steps = "".join(x for x in parts if (m := re.match(r"## (\d+)\.", x)) and SKILL_RULES[0] <= int(m.group(1)) <= SKILL_RULES[1])
+    if steps:
+        cut = steps[:RULES_MAX].rsplit("\n", 1)[0] + ("\n[... the rest is in the skill]" if len(steps) > RULES_MAX else "")
+        out += ("\nThe issuelooper-worker skill's steps for this stage, quoted so you need not reopen the skill:\n\n"
+                + "\n".join("    " + ln for ln in cut.strip().splitlines()) + "\n")
+    try:
+        rules = (root / review_rules()).read_text(errors="replace").strip()
+    except OSError:
+        rules = ""
+    if rules:
+        cap = RULES_MAX // 2
+        cut = rules[:cap].rsplit("\n", 1)[0] + (f"\n[... the rest is in {review_rules()}]" if len(rules) > cap else "")
+        out += (f"\nThe review gate's rules ({review_rules()}), quoted:\n\n"
+                + "\n".join("    " + ln for ln in cut.splitlines()) + "\n")
+    return out
+
+
+def research_wanted(u: Unit, files: list[str], cfg: "Config") -> bool:
+    """Whether a cold implement unit gets a research stage: an issue in an area with at least
+    POOL_RESEARCH_MIN_FILES predicted files (0: every cold unit)."""
+    if not cfg.research_min_files:
+        return True
+    return bool(notes_key(u)) and len(set(files)) >= cfg.research_min_files
 
 
 def merger_prompt(u: Unit, timeout: str) -> str:
@@ -3785,7 +3836,7 @@ class Session(threading.Thread):
     def staged_session(self, research: str, build, brief_path: str, env: dict,
                        resume: str | None = None) -> tuple[int, float, bool]:
         """A worker unit in two conversations under one claim (POOL_RESEARCH_BRIEF): the research
-        stage, with RESEARCH_SHARE of the time limit, writes a brief; the implement stage starts a
+        stage, with POOL_RESEARCH_SHARE of the time limit, writes a brief; the implement stage starts a
         new conversation (not a resume, not a fork) from build(its time limit) and the brief. When
         research ended normally without a usable brief, its conversation is resumed to implement
         instead, so no work is lost. One that timed out without a brief is parked when quota waits
@@ -3796,7 +3847,8 @@ class Session(threading.Thread):
         (research is then the prompt that says so). Returns what session() does, over both."""
         cfg, u = self.pool.cfg, self.unit
         total = seconds(self.timeout())
-        self.stage, self.stage_timeout = "research", f"{max(5, int(total * RESEARCH_SHARE) // 60)}m"
+        share = min(0.9, max(0.05, cfg.research_share))
+        self.stage, self.stage_timeout = "research", f"{max(5, int(total * share) // 60)}m"
         rc, r_elapsed, r_timed = self.session(research, env, conv=resume)
         r_paused = self.quota_time
         r_quota = self.quota_bound(r_timed)
@@ -3849,7 +3901,7 @@ class Session(threading.Thread):
             return rc, r_elapsed, r_timed
         # The rest of the time limit, at least the implement share: the research stage's quota
         # waits are not its time.
-        left = max(total * (1 - RESEARCH_SHARE), total - max(0.0, r_elapsed - r_paused))
+        left = max(total * (1 - share), total - max(0.0, r_elapsed - r_paused))
         self.stage, self.stage_timeout = "implement", f"{max(1, int(left) // 60)}m"
         wt = scratch(f"wrk-{self.wk}-{u.number}-wt")
         with open(self.dir / "resumes.log", "a") as rl:
@@ -3862,7 +3914,10 @@ class Session(threading.Thread):
                     self.pool.log("brief_cut", session=self.seq, issue=u.number, why=why, max_chars=cfg.brief_max_chars)
                 self.pool.log("research_end", session=self.seq, issue=u.number, result=self.research_result,
                               brief_chars=len(brief), seconds=round(r_elapsed), timed_out=r_timed)
-                rc, i_elapsed, timed_out = self.session(build(self.stage_timeout, skip_files=True) + brief_text(brief, wt),
+                if not re.search(r"(?i)\bneighbou?rs?\b", brief):
+                    self.pool.log("brief_no_neighbors", session=self.seq, issue=u.number)
+                rc, i_elapsed, timed_out = self.session(build(self.stage_timeout, skip_files=True)
+                                                        + brief_text(brief, wt, implement_rules(repo_root())),
                                                         env, fresh=True)
             else:
                 can = bool(research_conv) and self.cli.can_resume(research_conv)
@@ -4255,7 +4310,9 @@ class Session(threading.Thread):
             except (OSError, subprocess.SubprocessError):
                 files = ""
             # A unit that continues a conversation (resumed or forked) has its context already.
-            staged = cfg.research_brief and not u.info.get("resume") and not u.info.get("fork")
+            staged = (cfg.research_brief and not u.info.get("resume") and not u.info.get("fork")
+                      and research_wanted(u, list(u.info.get("files") or [])
+                                          or [ln.split(" (", 1)[0] for ln in files.splitlines() if ln.strip()], cfg))
             index = self.index_prompt(files) if cfg.symbol_index else ""
             knowledge = self.notes_prompt("implement") if cfg.area_notes else ""
 
@@ -4293,7 +4350,8 @@ class Session(threading.Thread):
                 prompt, research = self.unpark_prompts(rec, n)
             elif staged:
                 research = research_prompt(
-                    claim, str(self.seq), f"{max(5, int(seconds(self.timeout()) * RESEARCH_SHARE) // 60)}m",
+                    claim, str(self.seq),
+                    f"{max(5, int(seconds(self.timeout()) * min(0.9, max(0.05, cfg.research_share))) // 60)}m",
                     scratch(f"wrk-{self.wk}-{n}-brief.md"), cfg.brief_max_chars, wip,
                     issue_text(thread) if thread else "", files,
                     (index + (self.notes_prompt("research") if cfg.area_notes else "")))
