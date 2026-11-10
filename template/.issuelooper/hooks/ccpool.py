@@ -548,6 +548,14 @@ class Config:
     area_conversations: int = 3
     area_second_at: int = 3
     area_hot_lock: bool = True
+    # Area notes (POOL_AREA_NOTES): one notes file per area (and one for issues outside any area),
+    # written by the worker after its PR is open, given to the next workers there in their
+    # prompt instead of a forked transcript. Stale once the files they name changed by more
+    # than notes_stale_lines since the commit they describe, or over notes_max_chars. About
+    # 70% of a cold worker's cost was research, half of it re-sending the files it read.
+    area_notes: bool = False
+    notes_max_chars: int = 24000
+    notes_stale_lines: int = 200
     area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
     # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
     area_lend_free: bool = True
@@ -756,6 +764,9 @@ class Config:
             area_conversations=env_int("POOL_AREA_CONVERSATIONS", 3),
             area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
+            area_notes=env_flag("POOL_AREA_NOTES"),
+            notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 24000),
+            notes_stale_lines=env_int("POOL_NOTES_STALE_LINES", 200),
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
@@ -1251,6 +1262,9 @@ class Book:
         self.area_slots: dict[str, list] = {}
         self.area_seeds: dict[str, dict] = {}
         self.repo_seed: dict = {}
+        # Area notes (POOL_AREA_NOTES): area ('' for issues outside any area) -> {"path", "commit"
+        # (the origin/main it describes), "files" (the paths it names), "size", "t", "issue"}.
+        self.notes: dict[str, dict] = {}
         # Waits for an area ([areas]): issue -> {"why": "hot" | "area", "area", "files"} as the
         # last plan found them; issue -> (when it started waiting, that record); area ->
         # seconds waited, by why ("<area>:hot", "<area>:area"; "-:hot" for no area).
@@ -1727,6 +1741,85 @@ def area_notes(area: str, slot: int) -> str:
     return scratch(f"areas/{area}-{slot}.md")
 
 
+def notes_key(u: Unit) -> str:
+    """Whose notes a worker reads and keeps (POOL_AREA_NOTES): its area's, also when it runs
+    outside the area's conversations (lent); '' (the repository's) only for an issue in no area."""
+    return u.info.get("area") or u.info.get("lent") or ""
+
+
+def knowledge_path(key: str) -> str:
+    """One notes file per area, shared by its conversations; `_repo.md` for issues in no area."""
+    return scratch(f"areas/{re.sub(r'[^A-Za-z0-9_.-]+', '_', key) if key else '_repo'}.md")
+
+
+NOTES_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+")
+
+
+def notes_files(text: str, root: pathlib.Path, commit: str) -> list[str]:
+    """The tracked files at commit that the notes name."""
+    r = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "--name-only", commit],
+                       capture_output=True, text=True, timeout=60)
+    tracked = set(r.stdout.split()) if r.returncode == 0 else set()
+    return list(dict.fromkeys(t for t in NOTES_PATH.findall(text) if t in tracked))[:80]
+
+
+def notes_stale(rec: dict, size: int, cfg: "Config", root: pathlib.Path, ref: str = "origin/main") -> str:
+    """Why notes need rebuilding ('' when they do not): over POOL_NOTES_MAX_CHARS, or the files
+    they name changed by more than POOL_NOTES_STALE_LINES lines since the commit they describe."""
+    if cfg.notes_max_chars and size > cfg.notes_max_chars:
+        return f"they are {size} characters, over the {cfg.notes_max_chars} limit"
+    if not rec.get("commit") or not rec.get("files"):
+        return ""
+    r = subprocess.run(["git", "-C", str(root), "diff", "--numstat", rec["commit"], ref, "--", *rec["files"]],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        return f"the commit they describe ({rec['commit'][:8]}) is gone"
+    changed = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t")
+        if len(parts) == 3:
+            n = sum(int(x) for x in parts[:2] if x.isdigit())
+            changed.append((n, parts[2]))
+    total = sum(n for n, _ in changed)
+    if cfg.notes_stale_lines and total > cfg.notes_stale_lines:
+        top = ", ".join(f"`{f}` ({n} lines)" for n, f in sorted(changed, reverse=True)[:8])
+        return f"{total} lines of the files they name changed since {rec['commit'][:8]}: {top}"
+    return ""
+
+
+def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, stage: str = "implement") -> str:
+    """The notes a worker gets and keeps (POOL_AREA_NOTES): their text (not for a conversation
+    resumed in its area, which has the area in context), whether they are stale, and, in the
+    implement stage, the request to update them once the pull request is open."""
+    key = notes_key(u)
+    path = knowledge_path(key)
+    scope = f"the `{key}` area" if key else "this repository (issues outside any area)"
+    try:
+        text = pathlib.Path(path).read_text(errors="replace").strip()
+    except OSError:
+        text = ""
+    out = ""
+    stale = notes_stale(rec or {}, len(text), cfg, root) if text else ""
+    if text and not u.info.get("resume"):
+        at = f", describing origin/main at {rec['commit'][:8]}" if (rec or {}).get("commit") else ""
+        cut = text[:cfg.notes_max_chars] if cfg.notes_max_chars else text
+        out += (f"\nNotes on {scope} from earlier workers{at} ({path}). Use them to find your way before you search:\n"
+                + "\n".join("    " + ln for ln in cut.splitlines()) + "\n")
+    elif not text:
+        out += f"\nThere are no notes on {scope} yet.\n"
+    if stale:
+        out += f"These notes are stale: {stale}. Check what they say about those files before you rely on it.\n"
+    if stage != "implement":
+        return out
+    return out + (
+        f"After your pull request is open (not before it, and not when you release the claim), as your last step "
+        f"before your last line: {'rebuild' if stale or not text else 'update'} the notes at {path} for the next worker "
+        f"in {scope}. Cover the file map (paths, with line ranges for the parts that matter), the key functions and "
+        "classes, conventions, how to test (which test files, which commands) and pitfalls. Read the file again first "
+        "(another worker may have changed it), keep what is still true, drop what your change made wrong, and write "
+        f"it whole, in at most {cfg.notes_max_chars} characters.\n")
+
+
 def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: dict | None) -> set:
     """The hot files sessions hold now: a worker's from its start until its pull request is
     open (a hand-back, whose PR was open from the start, holds them to its end) and for
@@ -2162,13 +2255,14 @@ Do not read, rebase or merge any other pull request.
 Budget: hard wall-clock timeout of {timeout}."""
 
 
-def area_text(u: Unit, cfg: "Config") -> str:
-    """What a worker in an area's conversation is told on top of its issue ([areas])."""
+def area_text(u: Unit, cfg: "Config", knowledge: str = "") -> str:
+    """What a worker in an area's conversation is told on top of its issue ([areas]), and the
+    area's notes (notes_text) with POOL_AREA_NOTES, which replace the per-conversation notes."""
     area = u.info.get("area")
     if not area:
         hot = u.info.get("hot") or []
         return (f"\nWhile you work, no other session works an issue naming {', '.join(f'`{h}`' for h in hot)} "
-                "(hot files, one session at a time).\n" if hot else "")
+                "(hot files, one session at a time).\n" if hot else "") + knowledge
     a = next((x for x in cfg.areas if x["name"] == area), {"paths": []})
     notes = u.info.get("notes") or area_notes(area, u.info.get("slot") or 0)
     text = (f"\nYou are the conversation for the app's `{area}` area ({', '.join(a['paths'])}). "
@@ -2178,6 +2272,10 @@ def area_text(u: Unit, cfg: "Config") -> str:
                "The supervisor resumed you with its next issue: you keep what you learned on the earlier ones. "
                "Your earlier worktree is gone; start a new one at the path below.\n"
                if not u.info.get("fresh") else "This is a fresh conversation for the area.\n"))
+    if cfg.area_notes:
+        if u.info.get("hot"):
+            text += f"Its hot files you touch ({', '.join(f'`{h}`' for h in u.info['hot'])}) are yours alone while you work.\n"
+        return text + knowledge
     if u.info.get("fresh"):
         try:
             old = pathlib.Path(notes).read_text(errors="replace").strip()[:3000]
@@ -2915,6 +3013,9 @@ class Session(threading.Thread):
         self.left_pr = False  # a worker session that ended with its pull request open (claim.py finish)
         self.quota_idx = -1  # the newest in-turn quota retry already counted (agy's record)
         self.branch_files: list[str] = []  # what a worker's branch changed (Book.convs)
+        self.branch_base = ""  # where its branch forked off origin/main (the commit its notes describe)
+        self.notes_key: str | None = None  # the notes it keeps (POOL_AREA_NOTES), and their file's
+        self.notes_mark: tuple | None = None  # (mtime_ns, size) when it started
         self.quota_time = 0.0  # seconds its clocks stood still for quota (CLI retries and pool pauses)
         self.quota_base = -1  # a resumed conversation's newest quota step before this session
         self.usage_base: dict | None = None  # and its recorded usage (agy) before this session
@@ -3629,9 +3730,10 @@ class Session(threading.Thread):
                                    issue_text(thread) if thread else "", files, cfg.devcheck,
                                    ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
                                    bool(cfg.accept_guard), cfg.accept_mode)
-            if u.info.get("area") or u.info.get("hot"):
+            knowledge = self.notes_prompt("implement") if cfg.area_notes else ""
+            if u.info.get("area") or u.info.get("hot") or knowledge:
                 pathlib.Path(scratch("areas")).mkdir(parents=True, exist_ok=True)
-                prompt += "\n" + area_text(u, cfg)
+                prompt += "\n" + area_text(u, cfg, knowledge)
             if u.info.get("fork"):
                 prompt += (
                     "\nThis session is forked from an earlier worker conversation that already explored this "
@@ -3704,6 +3806,7 @@ class Session(threading.Thread):
             self.clear_scratch()
         elif u.role == "worker":
             self.branch_files = self.changed_files(scratch(f"wrk-{self.seq}-*-wt"))
+            self.branch_base = self.fork_point(scratch(f"wrk-{self.seq}-*-wt"))
             self.save_wip(scratch(f"wrk-{self.seq}-*-wt"))
             args = [
                 sys.executable,
@@ -3744,6 +3847,31 @@ class Session(threading.Thread):
             if r.returncode == 0:
                 return sorted(set(r.stdout.split()))[:200]
         return []
+
+    def fork_point(self, pattern: str) -> str:
+        """Where the session's branch forked off origin/main (its first worktree), or ''."""
+        for wt in glob.glob(pattern):
+            r = subprocess.run(["git", "-C", wt, "merge-base", "origin/main", "HEAD"],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        return ""
+
+    def notes_prompt(self, stage: str) -> str:
+        """notes_text for this worker, remembering which notes it keeps and how their file
+        stood, so Pool.record_notes can tell whether it updated them."""
+        key = self.notes_key = notes_key(self.unit)
+        try:
+            st = pathlib.Path(knowledge_path(key)).stat()
+            self.notes_mark = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self.notes_mark = None
+        with self.pool.lock:
+            rec = dict(self.pool.book.notes.get(key) or {})
+        try:
+            return notes_text(self.unit, self.pool.cfg, rec, repo_root(), stage)
+        except (OSError, subprocess.SubprocessError):
+            return ""
 
     def main_commits(self, branch: str, limit: int = 15) -> str:
         """Main's commits since the PR's branch forked, newest first, for the author's prompt."""
@@ -5127,6 +5255,8 @@ class Pool:
             self.quota_seen(u.role, group=group)
         if u.role == "worker":
             self.record_conv(w)
+        if u.role == "worker" and u.kind == "implement" and self.cfg.area_notes:
+            self.record_notes(w)
         if u.role == "tester" and u.kind == "live" and outcome == "ok":
             self.settle_live(u)
         if u.kind == "own-accept":
@@ -5246,8 +5376,37 @@ class Pool:
                                  issue=n, tokens=tokens)
         self.save_owners()
 
+    def record_notes(self, w: Session) -> None:
+        """Record the notes a worker that opened its pull request updated (POOL_AREA_NOTES):
+        the commit they describe (its branch's fork point), the files they name and their size.
+        Kept in owners.json, so a restarted supervisor still knows when they go stale."""
+        if not w.left_pr or w.notes_key is None:
+            return
+        path = pathlib.Path(knowledge_path(w.notes_key))
+        try:
+            st = path.stat()
+            text = path.read_text(errors="replace")
+        except OSError:
+            self.log("notes_missing", area=w.notes_key, issue=w.unit.number, session=w.seq)
+            return
+        if (st.st_mtime_ns, st.st_size) == w.notes_mark:
+            self.log("notes_not_updated", area=w.notes_key, issue=w.unit.number, session=w.seq)
+            return
+        commit = w.branch_base or self.git("rev-parse", "origin/main").stdout.strip()
+        try:
+            files = notes_files(text, repo_root(), commit) if commit else []
+        except (OSError, subprocess.SubprocessError):
+            files = []
+        rec = {"path": str(path), "commit": commit, "files": files, "size": len(text), "t": round(self.clock(), 1),
+               "issue": w.unit.number}
+        with self.lock:
+            self.book.notes[w.notes_key] = rec
+        self.log("notes_saved", area=w.notes_key, issue=w.unit.number, session=w.seq, commit=commit[:12],
+                 files=len(files), size=len(text), over=bool(self.cfg.notes_max_chars and len(text) > self.cfg.notes_max_chars))
+        self.save_owners()
+
     OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
-             "area_seeds", "repo_seed", "area_wait_s")
+             "area_seeds", "repo_seed", "area_wait_s", "notes")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""

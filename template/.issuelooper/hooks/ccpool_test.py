@@ -2736,6 +2736,104 @@ def test_areas_route_issues_to_their_conversations() -> None:
     check("no [areas]: every claimable issue gets a worker, as before", sorted(u.number for u in off.step()), [1, 2])
 
 
+def test_area_notes_are_kept_per_area_and_go_stale() -> None:
+    """POOL_AREA_NOTES: forked workers started from ~100k inherited tokens and their first call
+    missed the cache; one notes file per area carries what earlier workers learned instead."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-notes-"))
+    restore = with_env({"SHARED_REPO_PATH": str(d / "work")})
+    try:
+        work, g = git_repo(d)
+        (work / "src").mkdir()
+        (work / "src" / "live.py").write_text("".join(f"x{k} = {k}\n" for k in range(50)))
+        (work / "src" / "other.py").write_text("y = 1\n")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        g("push", "-q", "origin", "HEAD:main")
+        g("fetch", "-q", "origin")
+        base = g("rev-parse", "HEAD")
+        h = Rig(state(), areas=AREAS, area_notes=True, notes_stale_lines=20, notes_max_chars=2000)
+        b = h.pool.book
+        live = ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,), {"area": "live", "slot": 0})
+        lent = ccpool.Unit("worker", "implement", "wrk:2@x", "wrk:2", 2, (4,), {"lent": "live"})
+        none = ccpool.Unit("worker", "implement", "wrk:3@x", "wrk:3", 3, (4,), {})
+        check("one notes file per area (not per conversation), and one for issues in no area",
+              (ccpool.knowledge_path(ccpool.notes_key(live)), ccpool.knowledge_path(ccpool.notes_key(lent)),
+               ccpool.knowledge_path(ccpool.notes_key(none))),
+              (f"{SCRATCH}/areas/live.md", f"{SCRATCH}/areas/live.md", f"{SCRATCH}/areas/_repo.md"))
+        pathlib.Path(SCRATCH, "areas").mkdir(exist_ok=True)
+        repo_note = pathlib.Path(SCRATCH, "areas", "_repo.md")
+        repo_note.write_text("REPO-WIDE NOTE: start in src/other.py\n")
+        w = ccpool.Session(h.pool, live, 1)
+        first = w.notes_prompt("implement")
+        check("an area issue with no notes yet is asked to write its area's, never given the repository's",
+              ("no notes on the `live` area" in first, "REPO-WIDE NOTE" in first, f"{SCRATCH}/areas/live.md" in first),
+              (True, False, True))
+        check("the notes text reaches the prompt through area_text, without the per-conversation notes",
+              ("REPO-WIDE" in ccpool.area_text(live, h.pool.cfg, first), "live-0.md" in ccpool.area_text(live, h.pool.cfg, first)),
+              (False, False))
+        lent_text = ccpool.Session(h.pool, lent, 2).notes_prompt("research")
+        check("a lent area issue gets its area's notes too, and the research stage is not asked to write them",
+              ("`live` area" in lent_text, "REPO-WIDE" in lent_text, "After your pull request is open" in lent_text),
+              (True, False, False))
+        none_text = ccpool.Session(h.pool, none, 3).notes_prompt("implement")
+        check("an issue in no area gets the repository's notes", "REPO-WIDE NOTE" in none_text, True)
+
+        # The worker writes the notes after its PR is open; the supervisor records them.
+        pathlib.Path(SCRATCH, "areas", "live.md").write_text("src/live.py: x0..x49 at lines 1-50. Test: tests/unit.\n")
+        w.left_pr, w.branch_base = True, base
+        h.pool.record_notes(w)
+        rec = b.notes["live"]
+        check("notes saved with the commit they describe and the files they name",
+              (rec["commit"], rec["files"], rec["size"] > 0), (base, ["src/live.py"], True))
+        again = ccpool.Pool(h.pool.cfg, fetcher=state, spawn=False)
+        check("the record survives a restart (owners.json)", again.book.notes.get("live", {}).get("commit"), base)
+        w2 = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:4@x", "wrk:4", 4, (4,),
+                                                {"area": "live", "slot": 1}), 4)
+        fresh = w2.notes_prompt("implement")
+        check("the next worker in the area gets them, fresh, and is asked to update them",
+              ("x0..x49 at lines 1-50" in fresh, f"origin/main at {base[:8]}" in fresh, "stale" in fresh,
+               "update the notes at" in fresh), (True, True, False, True))
+        w2.left_pr = True
+        h.pool.record_notes(w2)
+        check("a worker that did not touch them records nothing new",
+              [json.loads(x)["kind"] for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+               if "notes_" in x][-1], "notes_not_updated")
+
+        # Main moves: a small change elsewhere keeps them fresh; a large one to a file they name makes them stale.
+        (work / "src" / "other.py").write_text("".join(f"y{k} = {k}\n" for k in range(100)))
+        g("commit", "-qam", "other")
+        g("push", "-q", "origin", "HEAD:main")
+        g("fetch", "-q", "origin")
+        check("files the notes do not name changing: still fresh",
+              ccpool.notes_stale(rec, rec["size"], h.pool.cfg, work), "")
+        (work / "src" / "live.py").write_text("".join(f"z{k} = {k}\n" for k in range(30)))
+        g("commit", "-qam", "live")
+        g("push", "-q", "origin", "HEAD:main")
+        g("fetch", "-q", "origin")
+        why = ccpool.notes_stale(rec, rec["size"], h.pool.cfg, work)
+        check("the files they name changed by more than POOL_NOTES_STALE_LINES: stale, naming the file",
+              (why.startswith("80 lines"), "`src/live.py` (80 lines)" in why), (True, True))
+        stale = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,),
+                                                   {"area": "live", "slot": 0}), 5).notes_prompt("implement")
+        check("a stale note is still given, says which files changed, and asks for a rebuild",
+              ("x0..x49" in stale, "These notes are stale" in stale, "rebuild the notes" in stale), (True, True, True))
+        check("notes over POOL_NOTES_MAX_CHARS are stale whatever changed",
+              ccpool.notes_stale({}, 5000, h.pool.cfg, work), "they are 5000 characters, over the 2000 limit")
+        check("a resumed area conversation is not sent the notes again, only asked to keep them",
+              "x0..x49" in ccpool.notes_text(ccpool.Unit("worker", "implement", "k", "f", 6, (4,),
+                                                         {"area": "live", "resume": "c1"}), h.pool.cfg, rec, work),
+              False)
+        off = Rig(state(), areas=AREAS)
+        check("off (the default): the per-conversation notes as before",
+              f"{SCRATCH}/areas/live-0.md" in ccpool.area_text(live, off.pool.cfg), True)
+        check("POOL_AREA_NOTES defaults to off", ccpool.Config.from_env().area_notes, False)
+    finally:
+        restore()
+        for f in ("live.md", "_repo.md"):
+            pathlib.Path(SCRATCH, "areas", f).unlink(missing_ok=True)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 CONCIERGE_AREAS = [
     {"name": "live", "paths": ["src/concierge/main.py", "src/concierge/static/js/audio.js"], "hot": ["src/concierge/main.py"],
      "words": ["live mode", "voice", "microphone"], "ids": ["R-RUN", "R-CONV"]},

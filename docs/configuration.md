@@ -183,6 +183,9 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] tester_port_base` | `TST_PORT` | `8021`–`8099` (by path hash) | First port assigned to tester sessions (each tester steps by `100`). |
 | `[pool] run_dir` | `ISSUELOOPER_RUN` | `".issuelooper/run"` | Directory for supervisor logs, PID files, and session logs (must be git-ignored). |
 | `[pool] fork` | `POOL_FORK` | `true` | Save the first PR-opening worker conversation per area (and repo-wide) as a seed checkpoint and fork parallel workers, overflow workers, and busy authors from it. |
+| `[pool] area_notes` | `POOL_AREA_NOTES` | `false` | Keep one notes file per area (`$ISSUELOOPER_TMP/areas/<area>.md`, `_repo.md` for issues in no area): a worker updates it after its PR is open, and the next workers there get it in their prompt. |
+| `[pool] notes_max_chars` | `POOL_NOTES_MAX_CHARS` | `24000` | Notes longer than this are stale and the next worker rebuilds them. |
+| `[pool] notes_stale_lines` | `POOL_NOTES_STALE_LINES` | `200` | Notes are stale once the files they name changed by more lines than this since the commit they describe. |
 | `[pool] author_resolve` | `POOL_AUTHOR_RESOLVE` | `false` | Resume the PR author's conversation to resolve rebase conflicts or red rebases before falling back to a merger. |
 | `[pool] author_resolve_max` | `POOL_AUTHOR_RESOLVE_MAX` | `2` | Maximum author conflict-resolution attempts before handing to a merger. |
 | `[pool] author_guard` | `POOL_AUTHOR_GUARD` | `false` | Resume the PR author's conversation when a merge-train acceptance guard fails because of that PR. |

@@ -305,6 +305,10 @@ or, with `[areas]` on, for your area's next issue. The prompt says which step:
 
 ## 9. Finish
 
+When your prompt names a notes file for your area (or the repository) and your PR
+is open, update it as the prompt says before you finish: the next worker there starts
+from it. Not when you release the claim.
+
 `cd /`, remove your worktree
 (`git -C "$SHARED_REPO_PATH" worktree remove --force "$WT"`), stop anything you
 started. Your last line is `WORKER-DONE pr #<number>` or `WORKER-RELEASED`.
