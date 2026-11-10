@@ -3053,9 +3053,14 @@ def test_a_train_prefix_merges_only_when_checked_and_guards_rerun_alone() -> Non
     check("a failing test that is not a guard is never excused that way",
           g.pool.passes_alone("/wt", guards + ["tests/e2e/test_a.py::t"]), False)
     g.pool.report_flaky = lambda where, failing: g.pool.events.append("flaky: " + where)
-    ok, _ = g.pool.train_second_look("/wt", "a" * 40, cars[:1], "\n".join(f"FAILED {t}" for t in guards))
-    check("so the train counts as green and files the isolation as flaky",
-          (ok, any("test isolation" in e for e in g.pool.events)), (True, True))
+    rest = []
+    g.pool.guard_tree = lambda wt, sha="", env=None: (rest.append((env or {}).get("PYTEST_ADDOPTS", "")), (True, "8 passed"))[1]
+    ok, _ = g.pool.train_second_look("/wt", "a" * 40, cars[:1], "sweep green" + ccpool.GUARD_SECTION
+                                     + "\n".join(f"FAILED {t}" for t in guards))
+    check("so the train counts as green and files the isolation as flaky, once the rest of the guard passes "
+          "with those guards deselected (the sweep was green)",
+          (ok, any("test isolation" in e for e in g.pool.events), rest),
+          (True, True, [" ".join(f"--deselect {t}" for t in guards)]))
 
 
 def test_leftover_processes_are_killed() -> None:
@@ -5873,6 +5878,7 @@ class TrainRig:
         self.pool.prev = state([iss(n, ["stage:pr", (labels or {}).get(n, "P2")]) for n in prs])
         self.sweeps: list[str] = []  # (caller, which car or "main") per full sweep
         self.reruns: list[str] = []
+        self.sweep_envs: list[str] = []  # PYTEST_ADDOPTS each full sweep got
         self.red_once = False  # the first full sweep is red whatever the tree (a flaky test)
         self.pool.sweep_tree = self.sweep_tree
         self.pool.rerun_tests = self.rerun_tests
@@ -5884,8 +5890,9 @@ class TrainRig:
     def where(self, wt: str) -> str:
         return ",".join(sorted(p.name for p in pathlib.Path(wt).iterdir() if p.name.startswith(("pr", "bad"))))
 
-    def sweep_tree(self, wt, caller):
+    def sweep_tree(self, wt, caller, env=None):
         self.sweeps.append(f"{caller}:{self.where(wt)}")
+        self.sweep_envs.append((env or {}).get("PYTEST_ADDOPTS", ""))
         if self.red_once:
             self.red_once = False
             return False, "FAILED tests/test_app.py::test_flaky - boom\n== sweep is red =="
@@ -6110,6 +6117,51 @@ def test_a_train_holds_on_a_flake_a_machine_failure_or_a_moved_main() -> None:
                any("main moved" in e for e in t.pool.events)), ([], [11], True))
     finally:
         t.close()
+
+
+def test_a_flaky_red_train_still_runs_the_guard() -> None:
+    """A red sweep whose failures passed two of three reruns counted as green at once: the
+    acceptance guard never ran, trains landed a regression it would have caught, and main
+    went red. The check now goes on with the flaky tests deselected."""
+    flaky, guard = "tests/test_app.py::test_flaky", "tests/accept/test_accept_5.py::test_map"
+    for known in (False, True):
+        t = TrainRig({1: "pr1=a", 2: "gbad=b"})
+        try:
+            t.pool.cfg.accept_guard = "pytest tests/accept"
+            if known:
+                t.pool.flaky_known = (time.time() + 3600, {flaky: 77})
+            guard_envs = []
+
+            def guard_tree(wt, sha="", env=None):
+                guard_envs.append((env or {}).get("PYTEST_ADDOPTS", ""))
+                return ((False, f"FAILED {guard} - blank map") if (pathlib.Path(wt) / "gbad").exists()
+                        else (True, "1 passed"))
+            t.pool.guard_tree = guard_tree
+            t.red_once = True
+            t.pool.run_train()
+            what = "a known flaky test" if known else "a test that passed two of three reruns"
+            check(f"the sweep red on {what}: the whole check runs again with it deselected, the guard fails on PR "
+                  "#12, which goes back, and #11 merges after its own check",
+                  (t.sweep_envs[1], guard_envs[0], [x.split()[2] for x in t.gh_log() if x.startswith("pr merge")],
+                   "pr comment 12" in (t.d / "gh.log").read_text()),
+                  (f"--deselect {flaky}", f"--deselect {flaky}", ["11"], True))
+            check(f"{what}: pool.jsonl says what ran with what deselected",
+                  [(r["step"], r["deselected"], r["ok"]) for r in t.logs("train_flaky_rest")],
+                  [("sweep and guard", [flaky], False)])
+        finally:
+            t.close()
+    t = TrainRig({1: "pr1=a"})
+    try:
+        t.red_once = True
+        t.pool.run_train()
+        check("with nothing else failing, the train lands after the deselected check",
+              ([x.split()[2] for x in t.gh_log() if x.startswith("pr merge")], len(t.sweeps), t.sweep_envs[1]),
+              (["11"], 2, f"--deselect {flaky}"))
+    finally:
+        t.close()
+    check("deselect_env adds to the environment's PYTEST_ADDOPTS and quotes node ids",
+          ccpool.deselect_env(["tests/a.py::t[x y]", "no-node-id"])["PYTEST_ADDOPTS"].endswith(
+              "--deselect 'tests/a.py::t[x y]'"), True)
 
 
 def test_a_test_main_does_not_have_is_the_prs_not_mains() -> None:

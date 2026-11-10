@@ -288,6 +288,16 @@ ACCEPT_HANDBACK = "<!-- accept-handback -->"
 # [accept] mode "after": what the post-merge check found on a closed issue (Pool.settle_after).
 AFTER_VERIFIED = "accept:verified"
 AFTER_FAILED = "accept:failed"
+GUARD_SECTION = "\n== acceptance guard ==\n"  # where the guard's output starts in a train check's
+
+
+def deselect_env(tests: list[str]) -> dict:
+    """PYTEST_ADDOPTS that deselect these tests (pytest node ids) on top of the environment's
+    own, and SWEEP_FORCE so the sweep runs rather than reusing a record."""
+    extra = " ".join(f"--deselect {shlex.quote(t)}" for t in tests if "::" in t)
+    return {"PYTEST_ADDOPTS": (os.environ.get("PYTEST_ADDOPTS", "") + " " + extra).strip(), "SWEEP_FORCE": "1"}
+
+
 def bare_login(login: str) -> str:
     """A login as both GitHub APIs agree on it: REST names a GitHub App's bot
     `<slug>[bot]` and GraphQL (`gh issue view --json`) plain `<slug>`. Comparing them
@@ -5466,15 +5476,15 @@ class Pool:
         finally:
             remove_worktree(root, wt, self.log)
 
-    def sweep_tree(self, wt: str, caller: str) -> tuple[bool | None, str]:
+    def sweep_tree(self, wt: str, caller: str, env: dict | None = None) -> tuple[bool | None, str]:
         """The full sweep in a worktree that exists, in the main lane: (True green, False
         red, None when it could not run; its output). In its own lane: the main check ran
         after every merge, and in a sweep slot it held one of the sessions' slots for over
-        half the run."""
+        half the run. env: variables to add (deselect_env)."""
         try:
             r = self.run_owned([sys.executable, str(HERE / "sweep_locked.py"), "--lane", "main", "--full"],
                                self.cfg.main_check_s, cwd=wt,
-                               env=dict(os.environ, SWEEP_CALLER=caller), stdin=subprocess.DEVNULL)
+                               env=dict(os.environ, SWEEP_CALLER=caller, **(env or {})), stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, str(exc)
         out = r.stdout + r.stderr
@@ -6090,19 +6100,21 @@ class Pool:
         finally:
             remove_worktree(root, wt, self.log)
 
-    def train_check(self, wt: str) -> tuple[bool | None, str]:
+    def train_check(self, wt: str, env: dict | None = None) -> tuple[bool | None, str]:
         """The train's full check: the sweep, then [accept] guard on the same tree (regressions
         passed `make verify`, which leaves tests/accept out, and turned main red until the
         guard after the deploy caught them). Each has its own time limit,
-        POOL_MAIN_CHECK_S and POOL_ACCEPT_GUARD_S, so the check takes at most their sum."""
-        ok, out = self.sweep_tree(wt, "merge-train")
+        POOL_MAIN_CHECK_S and POOL_ACCEPT_GUARD_S, so the check takes at most their sum.
+        env: variables for both (deselect_env)."""
+        extra = {"env": env} if env else {}
+        ok, out = self.sweep_tree(wt, "merge-train", **extra)
         if ok:
-            ok, guard = self.guard_tree(wt)
+            ok, guard = self.guard_tree(wt, **extra)
             if guard:
-                out += "\n== acceptance guard ==\n" + guard
+                out += GUARD_SECTION + guard
         return ok, out
 
-    def guard_tree(self, wt: str, sha: str = "") -> tuple[bool | None, str]:
+    def guard_tree(self, wt: str, sha: str = "", env: dict | None = None) -> tuple[bool | None, str]:
         """[accept] guard in a worktree that exists: (True green, False red, None it could
         not run; its output, '' when there is nothing to run: no guard, no tests/accept/,
         or pytest finding no test there)."""
@@ -6112,7 +6124,7 @@ class Pool:
         config.link_shared_files(wt)
         try:
             r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.accept_guard_s, cwd=wt,
-                               env=dict(os.environ, ACCEPT_SHA=sha), stdin=subprocess.DEVNULL)
+                               env=dict(os.environ, ACCEPT_SHA=sha, **(env or {})), stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, str(exc)
         self.guard_seconds = time.time() - t0
@@ -6130,16 +6142,20 @@ class Pool:
     def train_second_look(self, wt: str, base: str, cars: list[dict], out: str) -> tuple[bool | None, str]:
         """A red train, looked at again as second_look does for main: a failure of the
         machine is None; only known flaky tests count as green; otherwise the failing tests
-        (or the whole sweep) run again on the same tree, and two passes of three make them flaky."""
+        (or the whole sweep) run again on the same tree, and two passes of three make them flaky.
+        Failures that count as flaky are not a green check yet: train_rest runs what they cut
+        short with them deselected."""
         if INFRA.search(out):
             return None, out
         failing = failing_tests(out)
         known = self.flaky_tests()
         if failing and all(t in known for t in failing) and \
                 self.known_flaky_again(lambda: self.rerun_tests(wt, failing), failing):
-            self.event(f"merge train of {self.train_label(cars)} failed only known flaky tests "
-                       f"({', '.join(failing[:2])}); counted as green")
-            return True, out
+            ok, rest = self.train_rest(wt, cars, failing, out)
+            if ok:
+                self.event(f"merge train of {self.train_label(cars)} failed only known flaky tests "
+                           f"({', '.join(failing[:2])}); counted as green")
+            return ok, rest
         again, out2 = self.two_of_three(lambda: self.rerun_tests(wt, failing))
         if again is False and self.passes_alone(wt, failing):
             # The failing tests are guards that pass one at a time on this very tree: they
@@ -6147,15 +6163,39 @@ class Pool:
             # Not the PR's.
             self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged (they fail together and "
                               "pass one at a time: test isolation)", failing)
-            return True, out
+            return self.train_rest(wt, cars, failing, out)
         if again is False:
             return False, out
         if again is None:
+            # The whole check ran again: sweep and guard, nothing cut short.
             again, out2 = self.two_of_three(lambda: self.train_check(wt))
-        if again:
-            self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged", failing)
-            return True, out2
-        return (None, out2) if again is None else (False, out2)
+            if again:
+                self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged", failing)
+                return True, out2
+            return (None, out2) if again is None else (False, out2)
+        self.report_flaky(f"main {base[:8]} with {self.train_label(cars)} merged", failing)
+        return self.train_rest(wt, cars, failing, out)
+
+    def train_rest(self, wt: str, cars: list[dict], flaky: list[str], out: str) -> tuple[bool | None, str]:
+        """The train's check steps that flaky failures cut short, run with those tests
+        deselected (pytest --deselect, through PYTEST_ADDOPTS): the guard alone when the sweep
+        was green and only the guard failed, else the whole check (sweep, then guard). A red
+        sweep whose failures passed their reruns used to count as green with the guard never
+        run, and trains landed regressions the guard would have caught: main went red."""
+        env = deselect_env(flaky)
+        if GUARD_SECTION in out:
+            ok, guard = self.guard_tree(wt, env=env)
+            rest = out.split(GUARD_SECTION)[0] + (GUARD_SECTION + guard if guard else "")
+            step = "guard"
+        else:
+            ok, rest = self.train_check(wt, env=env)
+            step = "sweep and guard"
+        self.log("train_flaky_rest", prs=[c["pr"] for c in cars], deselected=flaky[:10], step=step, ok=ok,
+                 failing=failing_tests(rest)[:5] if ok is False else [])
+        if ok is False:
+            self.event(f"merge train of {self.train_label(cars)}: with the flaky tests deselected, the {step} "
+                       f"still fails ({', '.join(failing_tests(rest)[:2]) or 'no test named'})")
+        return ok, rest
 
     def train_red_at(self, wt: str, commit: str, failing: list[str]) -> tuple[bool | None, str]:
         """Whether the train's failing tests fail at one of its commits (None: unknown).
