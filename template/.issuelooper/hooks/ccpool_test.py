@@ -3158,8 +3158,37 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
     h.pool.book.issue_area, h.pool.book.issue_files = {41: "live", 42: "live"}, {41: ["src/live.py"], 42: ["src/live.py"]}
     first = h.step()
     check("one session holds the hot file", [u.number for u in first], [41])
-    h.st = state([iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)])
-    check("once its PR is open, the hot file is free (not until the merge)", [u.number for u in h.step()], [42])
+    h.st = state([iss(41, ["stage:pr", "P2"]), iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)])
+    check("its PR is open and the session still runs: it still holds it", [u.number for u in h.step()], [])
+    h.finish(first[0].key)
+    h.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": h.now, "files": ["src/live.py", "tests/t.py"]}
+    check("the session ended: its open PR, which changed the hot file, holds it while it waits to merge",
+          [u.number for u in h.step() if u.role == "worker"], [])
+    h.st = state([iss(41, ["stage:triage", "P2"], updated="2026-10-09T11:00:00Z"), iss(42, ["stage:triage", "P2"])],
+                 prs=[pr(141, 41)])
+    check("but not out of its own issue's next worker", [u.number for u in h.step() if u.role == "worker"], [41])
+    h.finish(h.running("worker")[0])
+    h.pool.book.convs[41]["t"] = h.now
+    h.st = state([iss(42, ["stage:triage", "P2"])])
+    check("merged (or closed): the hot file is free", [u.number for u in h.step()], [42])
+    held = Rig(state([iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)]), areas=AREAS, area_hot_hold_pr_s=7200,
+               global_cap=8)
+    held.pool.track_areas = lambda st: None
+    held.pool.book.issue_area, held.pool.book.issue_files = {42: "live"}, {42: ["src/live.py"]}
+    held.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": held.now, "files": ["src/live.py"]}
+    check("within POOL_AREA_HOT_HOLD_PR_S an open PR holds it", [u.number for u in held.step(60)], [])
+    check("past it, the hold ends", [u.number for u in held.step(7200)], [42])
+    off = Rig(state([iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)]), areas=AREAS, area_hot_hold_pr_s=0,
+              global_cap=8)
+    off.pool.track_areas = lambda st: None
+    off.pool.book.issue_area, off.pool.book.issue_files = {42: "live"}, {42: ["src/live.py"]}
+    off.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": off.now, "files": ["src/live.py"]}
+    check("POOL_AREA_HOT_HOLD_PR_S=0: an open PR holds nothing", [u.number for u in off.step()], [42])
+    restore = with_env({"POOL_AREA_HOT_HOLD_PR_S": ""})
+    check("two hours by default", ccpool.Config.from_env().area_hot_hold_pr_s, 7200)
+    os.environ["POOL_AREA_HOT_HOLD_PR_S"] = "0"
+    check("and 0 from the environment is off", ccpool.Config.from_env().area_hot_hold_pr_s, 0)
+    restore()
     h2 = Rig(state([iss(41, ["stage:triage", "P2"]), iss(42, ["stage:triage", "P2"])]), areas=AREAS,
              area_hot_hold_max_s=1800, global_cap=8)
     h2.pool.track_areas = lambda st: None
@@ -6692,6 +6721,31 @@ def test_a_train_can_wait_for_more_prs() -> None:
     h, queue, due = rig(train_wait_s=120)
     queue(9)
     check("a P0 PR starts at once", due(), [19])
+
+
+def test_a_split_of_a_hot_file_goes_first_and_is_not_handed_back_early() -> None:
+    """The split of the hottest file conflicted again and again while PRs touching that file
+    landed ahead of it, was handed back after three merger sessions and closed."""
+    split = iss(7, ["stage:pr", "P1"], body="<!-- merger -->\n<!-- split -->\n`src/live.py` conflicted",
+                title="Split src/live.py: it is where parallel work collides")
+    h = Rig(state([iss(5, ["stage:pr", "P1"]), split]), merge_train=True, train_size=1)
+    h.pool.prev = h.st
+    h.pool.book.train[15] = {"pr": 15, "issue": 5, "head": "b" * 40, "branch": "", "needs_live": False, "queued": 1}
+    h.pool.book.train[17] = {"pr": 17, "issue": 7, "head": "c" * 40, "branch": "", "needs_live": False, "queued": 2}
+    check("the split's PR goes first in the train, ahead of an older P1", [e["pr"] for e in h.pool.train_batch()], [17])
+    m = Rig(state([split, iss(5, ["stage:pr", "P1"])], prs=[pr(17, 7, mergeable="CONFLICTING"),
+                                                             pr(15, 5, mergeable="CONFLICTING")]), merger_max=3)
+    m.pool.book.merger_runs.update({17: 3, 15: 3})
+    m.pool.book.rebase_failed.update({17: "b" * 40, 15: "b" * 40})  # the mechanical rebase was tried
+    kinds = {u.number: u.kind for u in m.step()}
+    check("after POOL_MERGER_MAX merger sessions an ordinary PR goes back; the split gets another merger",
+          (kinds.get(15), kinds.get(17)), ("handback", "land"))
+    m.pool.book.merger_runs[17] = 6
+    m.st = state([split], prs=[pr(17, 7, head="d" * 40, mergeable="CONFLICTING")])
+    m.pool.book.pr_heads[17] = "d" * 40
+    m.pool.book.rebase_failed[17] = "d" * 40
+    m.finish(next(k for k in m.running() if ":17@" in k), "ok")
+    check("up to twice as many", {u.number: u.kind for u in m.step()}.get(17), "handback")
 
 
 def test_a_green_train_merges_its_batch_and_checks_main() -> None:

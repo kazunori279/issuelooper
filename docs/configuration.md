@@ -157,8 +157,9 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `second_at` | `POOL_AREA_SECOND_AT` | `3` | Open conversation `k` (from 0) when `k * second_at` issues are waiting in the area. |
 | `lend_at` | `POOL_AREA_LEND_AT` | `4` | When all conversations in an area are busy and this many issues wait, send extra non-hot issues to ordinary workers (`0` = always wait). |
 | `lend_free` | `POOL_AREA_LEND_FREE` | `true` | When pool slots are free, send an issue waiting only on a busy area conversation (not a hot file) to an ordinary worker immediately. |
-| `hot_lock` | `POOL_AREA_HOT_LOCK` | `true` | Allow only one session at a time to work an issue that names or touched a hot file, from start until its PR opens. |
+| `hot_lock` | `POOL_AREA_HOT_LOCK` | `true` | Allow only one session at a time to work an issue that names or touched a hot file, from its start until its PR merges or closes. |
 | `hot_hold_max_s` | `POOL_AREA_HOT_HOLD_MAX_S` | `1800` | Maximum seconds a hot-file lock is held by one session. |
+| `hot_hold_pr_s` | `POOL_AREA_HOT_HOLD_PR_S` | `7200` | After the session ends, its open PR holds the hot files its branch changed until it merges or closes, for at most this many seconds (`0`: the file is free once the PR is open). |
 | `auto_hot_at` | `POOL_AREA_AUTO_HOT_AT` | `4` | Promote a file in an area to hot after it conflicts in this many PRs within `POOL_SPLIT_WINDOW_S` (`0` = disabled); also marks new split-target files hot and cools a split file that shrank to `<= 60%`. |
 | `auto_hot_expire` | `POOL_AREA_AUTO_HOT_EXPIRE` | `30` | Expire an auto-hot file after this many conflict-free merges (`0` = never). |
 | `shared` | `POOL_AREA_SHARED` | `[]` | Files touched across many areas (such as string tables or global stylesheets) that area routing should ignore. |

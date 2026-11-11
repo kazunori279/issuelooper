@@ -149,6 +149,7 @@ second_at = 3                # POOL_AREA_SECOND_AT
 lend_at = 4                  # POOL_AREA_LEND_AT: run 12 queued 9 settings issues behind one conversation
 auto_hot_at = 4              # POOL_AREA_AUTO_HOT_AT: a file conflicting in 4 PRs becomes hot for its area
 hot_lock = true              # POOL_AREA_HOT_LOCK
+hot_hold_pr_s = 7200         # POOL_AREA_HOT_HOLD_PR_S: an open PR holds the hot files it changed until it merges
 shared = ["src/concierge/static/js/i18n.js", "src/concierge/static/js/feed.js", "src/concierge/static/style.css",
           "src/concierge/static/index.html", "src/concierge/static/js/app.js"]
                              # POOL_AREA_SHARED: files that name every card and tool; routing ignores them (run 12 sent

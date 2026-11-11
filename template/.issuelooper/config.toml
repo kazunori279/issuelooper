@@ -191,8 +191,10 @@ second_at = 3                # POOL_AREA_SECOND_AT: conversation k (from 0) star
 lend_at = 4                  # POOL_AREA_LEND_AT: with every conversation of the area busy, this many waiting there send
                              # the rest to ordinary workers (0 = they wait)
 hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file, from its
-                             # start until its PR is open
-hot_hold_max_s = 1800        # POOL_AREA_HOT_HOLD_MAX_S: and for this long at most
+                             # start until its PR merges or closes
+hot_hold_max_s = 1800        # POOL_AREA_HOT_HOLD_MAX_S: a session holds it for this long at most
+hot_hold_pr_s = 7200         # POOL_AREA_HOT_HOLD_PR_S: then its open PR holds the hot files it changed, for this long at
+                             # most after the session ended (0 = the file is free once the PR is open)
 auto_hot_at = 4              # POOL_AREA_AUTO_HOT_AT: a file of an area that conflicts in this many PRs (within
                              # POOL_SPLIT_WINDOW_S) becomes its hot file (0 = off); so do new source files a merge
                              # moves code into out of a hot file, and a hot file the move shrank to 60 % stops being hot

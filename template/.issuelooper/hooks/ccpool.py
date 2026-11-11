@@ -603,10 +603,15 @@ class Config:
     area_lend_at: int = 4  # with every slot of an area busy, this many waiting there lend the rest to ordinary workers
     # ... and with pool slots free, any issue that waits only for a busy area conversation is lent
     area_lend_free: bool = True
-    # A session holds the hot files its issue names from its start until its pull request is open
-    # (not past it) and for area_hot_hold_max_s at most. Without a cap, hot-file waits ran to
-    # hours, and some hot file was locked almost all the time.
+    # A session holds the hot files its issue names from its start until it ends, and for
+    # area_hot_hold_max_s at most. Without a cap, hot-file waits ran to hours, and some hot file
+    # was locked almost all the time.
     area_hot_hold_max_s: float = 1800
+    # Then its open pull request holds the hot files its branch changed, until it merges or
+    # closes, for area_hot_hold_pr_s at most after the session that opened it ended (0: the PR
+    # holds nothing). Released when the PR opened, the next worker on the file branched from a
+    # main without it while the PR waited in the merge queue, and the two conflicted.
+    area_hot_hold_pr_s: float = 7200
     # A file of an area that conflicts in this many pull requests within POOL_SPLIT_WINDOW_S
     # becomes one of its hot files for the rest of the run (0 = off). A file in no hot list
     # (settings.js) conflicted more than any other, many times as train skips.
@@ -824,6 +829,7 @@ class Config:
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
+            area_hot_hold_pr_s=float(e("POOL_AREA_HOT_HOLD_PR_S", "") or 7200),
             area_auto_hot_at=env_int("POOL_AREA_AUTO_HOT_AT", 4),
             area_auto_hot_expire=env_int("POOL_AREA_AUTO_HOT_EXPIRE", 30),
             edge_flag_at=env_int("POOL_EDGE_FLAG_AT", 8),
@@ -1691,10 +1697,12 @@ def plan(
                     info,
                 )
             )
-        elif cfg.merger_max and book.merger_runs[pr["number"]] >= cfg.merger_max:
+        elif cfg.merger_max and book.merger_runs[pr["number"]] >= cfg.merger_max * (2 if split_chore(issue) else 1):
             # Main kept moving while merger sessions resolved it, and it conflicted again
             # each time (one PR had four merger sessions before the monitor sent it back).
-            # A worker rebases it onto the current main and finishes it instead.
+            # A worker rebases it onto the current main and finishes it instead. A split of a
+            # hot file gets twice as many: it conflicts by its nature, and a split handed back
+            # after three merger sessions was closed, and its file stayed where work collides.
             units.append(
                 Unit(
                     "auto",
@@ -1896,21 +1904,27 @@ def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, sta
         f"it whole, in at most {cfg.notes_max_chars} characters.\n")
 
 
-def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: dict | None) -> set:
-    """The hot files sessions hold now: a worker's from its start until its pull request is
-    open (a hand-back, whose PR was open from the start, holds them to its end) and for
-    POOL_AREA_HOT_HOLD_MAX_S at most."""
+def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: dict | None,
+                but: int | None = None) -> set:
+    """The hot files held now: a worker session's from its start to its end, for
+    POOL_AREA_HOT_HOLD_MAX_S at most; then an open pull request's, the hot files its branch
+    changed (Book.convs files), until it merges or closes, for POOL_AREA_HOT_HOLD_PR_S at most
+    after its session ended. Freed once the PR was open, the file went to the next worker
+    while the PR still waited in the merge queue, and they conflicted. but: the issue being
+    placed, whose own PR does not hold it out."""
     held = set()
     for u in active:
         if u.role != "worker" or not u.info.get("hot"):
             continue
-        n = u.info.get("issue") if u.kind in ("resolve", "guard-fix") else u.number
-        if u.kind == "implement" and pr_of is not None and n in pr_of and not u.info.get("pr_at_start"):
-            continue  # its PR is open: the edit is done; the merge path takes it from here
         since = book.started_at.get(u.key)
         if cfg.area_hot_hold_max_s and since is not None and now - since > cfg.area_hot_hold_max_s:
             continue
         held.update(u.info["hot"])
+    for n in pr_of or {}:
+        rec = book.convs.get(n) or {}
+        if n == but or not cfg.area_hot_hold_pr_s or now - float(rec.get("t") or 0) > cfg.area_hot_hold_pr_s:
+            continue
+        held.update(f for f in rec.get("files") or [] if config.is_hot(f, cfg.areas))
     return held
 
 
@@ -1949,7 +1963,7 @@ def place_in_area(n: int, book: Book, cfg: Config, active: list[Unit], queue, no
     files = set(book.issue_files.get(n) or [])
     hot = {f for f in files if config.is_hot(f, cfg.areas)} if cfg.area_hot_lock else set()
     area = book.issue_area.get(n) or ""
-    held = hot & hot_holders(book, cfg, active, now, pr_of)
+    held = hot & hot_holders(book, cfg, active, now, pr_of, but=n)
     if held:
         book.waits_now[n] = {"why": "hot", "area": area, "files": sorted(held)}
         return None
@@ -2008,6 +2022,13 @@ def baseline_text(baseline: list[str]) -> str:
     return ("Leave the owner's baseline tests as they are: " + names + ". Merge per-issue tests into them or "
             "add cases to them, but never delete, rename or fold one of their test functions away (the merge gate "
             "refuses it). ")
+
+
+def split_chore(issue: dict | None) -> bool:
+    """A split issue the supervisor filed for a file where parallel work collides (its
+    <!-- split --> mark, or, filed before the mark, a `Split ...` title)."""
+    return bool(issue) and ("<!-- split -->" in str(issue.get("body") or "")
+                            or str(issue.get("title", "")).startswith("Split "))
 
 
 def test_only_chore(issue: dict) -> bool:
@@ -6952,9 +6973,10 @@ class Pool:
         self.train_until = self.clock() + self.cfg.hold_retry_s
 
     def train_batch(self) -> list[dict]:
-        """Up to POOL_TRAIN_SIZE queued PRs: P0 first, then in the order they were queued.
-        While main's full check is red, only PRs built on that main (as red_main_hold)."""
-        prio = {i["number"]: priority(i["labels"]) for i in (self.prev or {}).get("open", [])}
+        """Up to POOL_TRAIN_SIZE queued PRs: P0 and splits of hot files first (every PR that
+        touches the file lands after it and conflicts with it), then in the order they were
+        queued. While main's full check is red, only PRs built on that main (as red_main_hold)."""
+        prio = {i["number"]: 0 if split_chore(i) else priority(i["labels"]) for i in (self.prev or {}).get("open", [])}
         with self.lock:
             entries = sorted(self.book.train.values(), key=lambda e: (prio.get(e["issue"], 9), e["queued"], e["pr"]))
         last = self.main_check_last
