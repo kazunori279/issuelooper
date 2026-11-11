@@ -557,11 +557,15 @@ class Config:
     # works an issue that names an area's hot file. A PR once waited hours on live.py.
     area_refresh: int = 6
     area_refresh_tokens: int = 0
-    # An area conversation goes on with the area's next issue only while its last issue ended
-    # with the PR open and its context (the newest call's prompt) is under this many tokens;
-    # otherwise the next issue starts fresh, with the area notes (0 = off: area_refresh and
-    # area_refresh_tokens alone decide). Forked workers that started from ~107k inherited
-    # tokens cost more than cold ones; a small warm context is what pays.
+    # [pool] continue: an area conversation goes on with the area's next issue (resumed) at all.
+    # Off, every issue starts a fresh conversation with the area notes. A cap of 0 below once
+    # read as "off" and let conversations go on uncapped, issue after issue.
+    continue_area: bool = False
+    # With continue on, it goes on only while its last issue ended with the PR open and its
+    # context (the newest call's prompt) is under this many tokens; otherwise the next issue
+    # starts fresh, with the area notes (0 = no cap: area_refresh and area_refresh_tokens alone
+    # decide). Forked workers that started from ~107k inherited tokens cost more than cold
+    # ones; a small warm context is what pays.
     continue_max_tokens: int = 0
     area_conversations: int = 3
     area_second_at: int = 3
@@ -812,6 +816,7 @@ class Config:
             areas=config.areas(),
             area_refresh=env_int("POOL_AREA_REFRESH", 6),
             area_refresh_tokens=env_int("POOL_AREA_REFRESH_TOKENS", 0),
+            continue_area=env_flag("POOL_CONTINUE"),
             continue_max_tokens=env_int("POOL_CONTINUE_MAX_TOKENS", 0),
             area_conversations=env_int("POOL_AREA_CONVERSATIONS", 3),
             area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
@@ -1929,9 +1934,11 @@ def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: 
 
 
 def continue_refused(slot: dict, cfg: Config) -> str:
-    """Why an area conversation does not go on with the area's next issue under
-    POOL_CONTINUE_MAX_TOKENS ('' when it may, or when that is off): its last issue ended without
-    the PR open, or its context is not known to be under the cap."""
+    """Why an area conversation does not go on with the area's next issue ('' when it may):
+    POOL_CONTINUE is off; or, under a POOL_CONTINUE_MAX_TOKENS cap (0: none), its last issue
+    ended without the PR open, or its context is not known to be under the cap."""
+    if not cfg.continue_area:
+        return "continuing is off ([pool] continue)"
     if not cfg.continue_max_tokens:
         return ""
     if not slot.get("pr"):

@@ -196,8 +196,9 @@ merger_timeout = "45m"       # POOL_TIMEOUT_MERGER
 tester_timeout = "60m"       # POOL_TIMEOUT_TESTER
 fork = false                 # POOL_FORK: forks started at ~107k inherited tokens, their first call missed the cache,
                              # and they cost more than cold workers for the same quality
-continue_max_tokens = 60000  # POOL_CONTINUE_MAX_TOKENS: an area conversation takes the area's next issue only while
-                             # its context is under this and its last PR is open; else a fresh one with the notes
+continue = false             # POOL_CONTINUE: off, every issue starts a fresh conversation with the area notes
+continue_max_tokens = 60000  # POOL_CONTINUE_MAX_TOKENS: with continue on, an area conversation takes the area's next
+                             # issue only while its context is under this and its last PR is open (0 = no cap)
 area_notes = true            # POOL_AREA_NOTES: one notes file per area, updated by each worker after its PR is open
                              # and given to the next workers there (forked workers resent ~100k inherited tokens)
 notes_max_chars = 24000      # POOL_NOTES_MAX_CHARS

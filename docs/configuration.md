@@ -151,7 +151,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 
 | Key | Env var | Default | Description |
 |---|---|---|---|
-| `refresh_after` | `POOL_AREA_REFRESH` | `6` | Start a fresh area conversation (seeded with the old conversation's notes) after this many issues. |
+| `refresh_after` | `POOL_AREA_REFRESH` | `6` | With `[pool] continue` on, start a fresh area conversation (seeded with the old conversation's notes) after this many issues. |
 | `refresh_tokens` | `POOL_AREA_REFRESH_TOKENS` | `0` | Or refresh once the conversation context reaches this many tokens (`0` = disabled). |
 | `conversations` | `POOL_AREA_CONVERSATIONS` | `3` | Maximum concurrent conversations per area. |
 | `second_at` | `POOL_AREA_SECOND_AT` | `3` | Open conversation `k` (from 0) when `k * second_at` issues are waiting in the area. |
@@ -186,7 +186,8 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] tester_port_base` | `TST_PORT` | `8021`–`8099` (by path hash) | First port assigned to tester sessions (each tester steps by `100`). |
 | `[pool] run_dir` | `ISSUELOOPER_RUN` | `".issuelooper/run"` | Directory for supervisor logs, PID files, and session logs (must be git-ignored). |
 | `[pool] fork` | `POOL_FORK` | `false` | Save the first PR-opening worker conversation per area (and repo-wide) as a seed checkpoint and fork parallel workers, overflow workers, and busy authors from it. |
-| `[pool] continue_max_tokens` | `POOL_CONTINUE_MAX_TOKENS` | `0` | An area conversation takes the area's next issue only while its last issue ended with the PR open and its context is under this many tokens; otherwise the next issue starts fresh with the area notes (`0` disables the check). |
+| `[pool] continue` | `POOL_CONTINUE` | `false` | Let an area conversation go on with the area's next issue (resumed). Off, every issue starts a fresh conversation with the area notes. |
+| `[pool] continue_max_tokens` | `POOL_CONTINUE_MAX_TOKENS` | `0` | With `continue` on, an area conversation takes the area's next issue only while its last issue ended with the PR open and its context is under this many tokens; otherwise the next issue starts fresh with the area notes. `0` means no cap (`[areas] refresh_after` still ends a conversation). It has no effect while `continue` is off. |
 | `[pool] area_notes` | `POOL_AREA_NOTES` | `false` | Keep one notes file per area (`$ISSUELOOPER_TMP/areas/<area>.md`, `_repo.md` for issues in no area): a worker updates it after its PR is open, and the next workers there get it in their prompt. |
 | `[pool] notes_max_chars` | `POOL_NOTES_MAX_CHARS` | `24000` | Notes longer than this are stale and the next worker rebuilds them. |
 | `[pool] notes_stale_lines` | `POOL_NOTES_STALE_LINES` | `200` | Notes are stale once the files they name changed by more lines than this since the commit they describe. |

@@ -2663,7 +2663,8 @@ def test_areas_route_issues_to_their_conversations() -> None:
     old_cli = os.environ.get("CCROLE_WORKER_CLI")
     os.environ["CCROLE_WORKER_CLI"] = "claude"
     try:
-        h = Rig(state([iss(n, ["stage:triage", "P1"]) for n in (1, 2, 3, 4, 5)]), areas=AREAS, area_second_at=3)
+        h = Rig(state([iss(n, ["stage:triage", "P1"]) for n in (1, 2, 3, 4, 5)]), areas=AREAS, area_second_at=3,
+                continue_area=True)
         h.pool.track_areas = lambda st: None
         b = h.pool.book
         b.issue_area = {1: "live", 2: "live", 3: "cards", 4: "", 5: "live"}
@@ -2907,14 +2908,17 @@ def test_a_symbol_index_per_main_commit() -> None:
 
 
 def test_an_area_conversation_goes_on_only_while_small_and_its_pr_open() -> None:
-    """POOL_CONTINUE_MAX_TOKENS: forked workers started from ~107k inherited tokens and cost more
-    than cold ones; a warm conversation pays only while its context is small."""
-    restore = with_env({"CCROLE_WORKER_CLI": "claude", "POOL_CONTINUE_MAX_TOKENS": ""})
+    """POOL_CONTINUE and POOL_CONTINUE_MAX_TOKENS: forked workers started from ~107k inherited
+    tokens and cost more than cold ones; a warm conversation pays only while its context is
+    small. A cap of 0 was read as "off" and let conversations go on uncapped."""
+    restore = with_env({"CCROLE_WORKER_CLI": "claude", "POOL_CONTINUE_MAX_TOKENS": "", "POOL_CONTINUE": ""})
     try:
-        check("POOL_CONTINUE_MAX_TOKENS defaults to 0 (off)", ccpool.Config.from_env().continue_max_tokens, 0)
+        check("POOL_CONTINUE defaults to off, POOL_CONTINUE_MAX_TOKENS to 0 (no cap)",
+              (ccpool.Config.from_env().continue_area, ccpool.Config.from_env().continue_max_tokens), (False, 0))
 
         def placed(slot, n=2, area="live", **cfg):
-            h = Rig(state([iss(n, ["stage:triage", "P1"])]), areas=AREAS, **{"continue_max_tokens": 60000, **cfg})
+            h = Rig(state([iss(n, ["stage:triage", "P1"])]), areas=AREAS,
+                    **{"continue_area": True, "continue_max_tokens": 60000, **cfg})
             h.pool.track_areas = lambda st: None
             h.pool.book.issue_area, h.pool.book.issue_files = {n: area}, {n: []}
             h.pool.book.area_slots["live"] = [slot]
@@ -2931,8 +2935,11 @@ def test_an_area_conversation_goes_on_only_while_small_and_its_pr_open() -> None
         check("context size unknown: fresh", placed({**base, "pr": True}), ("live", None, "its context size is unknown"))
         check("the next issue in another area never gets this conversation",
               placed({**base, "pr": True, "tokens": 30000}, area="cards"), ("cards", None, ""))
-        check("off (0): the conversation goes on as before, whatever its PR or size",
+        check("no cap (0): the conversation goes on, whatever its PR or size (area_refresh still ends it)",
               placed({**base, "pr": False, "tokens": 90000}, continue_max_tokens=0)[1], "s-live")
+        check("POOL_CONTINUE off: every issue starts fresh with the notes, whatever the cap",
+              [placed({**base, "pr": True, "tokens": 3000}, continue_area=False, continue_max_tokens=cap)
+               for cap in (0, 60000)], [("live", None, "continuing is off ([pool] continue)")] * 2)
         # The slot remembers whether its session left the PR open, and its context size.
         h = Rig(state(), areas=AREAS, continue_max_tokens=60000)
         w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:1@x", "wrk:1", 1, (4,),

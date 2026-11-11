@@ -179,7 +179,8 @@ open_max = 12                # POOL_EXPLORE_OPEN_MAX: or this many explorer fili
 # Area ownership: named areas of the app, each with path globs (`*` crosses /) and its hot files
 # (`hot = true`: all of its paths). An issue goes to the area its `area:<name>` label names, else
 # the one its last branch or the names in its body point to, and is worked in that area's
-# conversation, resumed issue after issue. Issues with no clear area go to any worker. No
+# conversations (resumed issue after issue only with [pool] continue on). Issues with no clear
+# area go to any worker. No
 # [areas.<name>] table = off.
 [areas]
 refresh_after = 6            # POOL_AREA_REFRESH: a fresh conversation for the area after this many issues, seeded with
@@ -239,9 +240,11 @@ fork = false                 # POOL_FORK: the first worker to open a PR in an ar
                              # saves a seed conversation checkpoint; later workers, parallel area slots, overflow
                              # workers and busy authors fork from it (agy SQLite copy, claude --fork-session). Forks
                              # start with the seed's whole context, and their first call misses the prompt cache
-continue_max_tokens = 0      # POOL_CONTINUE_MAX_TOKENS: an area conversation goes on with the area's next issue only
-                             # while its last issue ended with the PR open and its context is under this many tokens;
-                             # otherwise the next issue starts fresh with the area notes (0 = off)
+continue = false             # POOL_CONTINUE: an area conversation goes on with the area's next issue (resumed); off,
+                             # every issue starts a fresh conversation with the area notes
+continue_max_tokens = 0      # POOL_CONTINUE_MAX_TOKENS: with continue on, it goes on only while its last issue ended
+                             # with the PR open and its context is under this many tokens; otherwise the next issue
+                             # starts fresh with the area notes (0 = no cap; [areas] refresh_after still applies)
 area_notes = false           # POOL_AREA_NOTES: one notes file per area ($ISSUELOOPER_TMP/areas/<area>.md; _repo.md for
                              # issues in no area). A worker updates it after its PR is open; the next workers there get it
                              # in their prompt. It goes stale when the files it names change by notes_stale_lines lines

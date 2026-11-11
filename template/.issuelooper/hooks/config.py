@@ -138,6 +138,7 @@ KEYS = {
     ("pool", "brief_max_chars"): "POOL_BRIEF_MAX_CHARS",
     ("pool", "research_share"): "POOL_RESEARCH_SHARE",
     ("pool", "research_min_files"): "POOL_RESEARCH_MIN_FILES",
+    ("pool", "continue"): "POOL_CONTINUE",
     ("pool", "continue_max_tokens"): "POOL_CONTINUE_MAX_TOKENS",
     ("pool", "park_on_quota"): "POOL_PARK_ON_QUOTA",
     ("pool", "park_max"): "POOL_PARK_MAX",

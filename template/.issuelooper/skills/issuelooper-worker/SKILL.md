@@ -301,7 +301,7 @@ and saves your worktree to `issue-$N` itself.
 ## 8. When the supervisor resumes your conversation
 
 The supervisor keeps your conversation and may resume it later for the same issue,
-or, with `[areas]` on, for your area's next issue. The prompt says which step:
+or, with `[areas]` and `[pool] continue` on, for your area's next issue. The prompt says which step:
 
 - **The area's next issue**: a new issue, worked from step 1 in a new worktree (the
   old one is gone). Before your last line, rewrite the area's notes file the prompt
