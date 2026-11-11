@@ -66,7 +66,7 @@ UNITS
           PR reads UNKNOWN, so the resolved head is merged before main moves again.
           A PR whose POOL_MERGER_MAX (3) merger sessions each ended without a merge
           (main moved on and it conflicted again) goes back to a worker instead
-          (handback, no agent). With POOL_AUTHOR_RESOLVE the author's recorded
+          (handback, no agent); a split of a hot file gets twice as many. With POOL_AUTHOR_RESOLVE the author's recorded
           conversation (Book.convs, owners.json) is resumed for it first: a worker
           "resolve" unit with the merger's steps and time limit; the merger comes when
           there is none to resume or after POOL_AUTHOR_RESOLVE_MAX author sessions.
@@ -122,7 +122,8 @@ to screen it (POOL_UX_SCREEN, on by default). A reopened issue is an open issue
 like any other; its newest comments say why it came back. The monitor is also told,
 once, of a claimable P0/P1 issue blocked for POOL_BLOCKED_REVIEW_MIN (60), and of an
 issue that has failed POOL_DECOMPOSE_AFTER (2; 0 is off) times, to split it: a worker
-session that held its claim and ended without a pull request, or a pull request handed
+session that held its claim and ended without a pull request (one that released the claim
+itself ends "released" and counts too), or a pull request handed
 back for red tests, the merged-tree check, a failed live-check replay or a review reject
 of a diff it read whole (not gate refusals, merger loops or review cuts).
 
