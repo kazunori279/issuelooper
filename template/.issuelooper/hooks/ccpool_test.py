@@ -1581,6 +1581,9 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               (["issue create --title Acceptance tests for #6"], True, False))
         check("the chore asks each guard to make its own fresh state (one assumed an empty feed after reload)",
               ("a fresh state the test makes itself" in created[0], "never an assumption that" in created[0]), (True, True))
+        check("no size limit QA could fail a chore on; the whole suite runs before the PR; isolation made explicitly",
+              ("100 lines" in created[0], "run the whole of `tests/accept/`" in created[0],
+               "never isolation the app happens to give each browser" in created[0]), (False, True, True))
         check("filed as a chore at P2 (P1 chores crowded out product work)",
               ("--label type:chore --label P2 --label stage:triage" in created[0]), True)
         # Batching: one chore per [accept] chore_batch scripts, appended while one is open and unclaimed.
@@ -2605,6 +2608,16 @@ def test_a_ux_run_gets_a_turn_to_write_its_report() -> None:
     check("majors only: 85 - 8, and at most 75 with a major", ccpool.score_cap(w.dir / "ux_report.md")[0], 75)
     (w.dir / "ux_report.md").write_text("Score: 66/100\nFindings: 0 blockers, 7 majors\n")
     check("0 blockers, 7 majors: 71", ccpool.score_cap(w.dir / "ux_report.md")[0], 71)
+    (w.dir / "ux_report.md").write_text("Score: 66/100\nJourneys: 9 of 30 steps passed\nFindings: 0 blockers, 1 majors\n")
+    check("fewer than half the journey steps passed: capped at the share that passed (30)",
+          ccpool.score_cap(w.dir / "ux_report.md"), (30, 0, 1))
+    (w.dir / "ux_report.md").write_text("Score: 66/100\nJourneys: 9 of 30 steps passed\n")
+    check("with no findings line too", ccpool.score_cap(w.dir / "ux_report.md")[0], 30)
+    (w.dir / "ux_report.md").write_text("Score: 66/100\nJourneys: 16 of 30 steps passed\nFindings: 0 blockers, 1 majors\n")
+    check("half or more passed: the findings decide", ccpool.score_cap(w.dir / "ux_report.md")[0], 75)
+    check("an explorer's report is not capped by journeys",
+          (w.dir / "ux_report.md").write_text("Score: 66/100\nJourneys: 1 of 30 steps passed\n")
+          and ccpool.score_cap(w.dir / "ux_report.md", "explore")[0], None)
     (w.dir / "ux_report.md").write_text("Score: 50/100\nFindings: 0 blockers, 7 majors\n")
     pool.finished(w, "stopped with the supervisor")
     rec = [json.loads(x) for x in (d / "pool" / "pool.jsonl").read_text().splitlines() if '"ux_score"' in x][-1]
@@ -5792,7 +5805,17 @@ def test_a_unit_out_of_quota_is_parked_and_goes_on_later() -> None:
         w4 = ccpool.Session(pool, ccpool.Unit("worker", "implement", "k", "wrk:6", 6, (4,), {}), 9)
         w4.dir.mkdir(parents=True)
         (w4.dir / "claim").write_text("{}")
+        pool.prev = state([iss(6, ["stage:doing", "P1"])])
         check("a unit with parks left may park", w4.park_allowed(), True)
+        pool.prev = state([iss(6, ["stage:pr", "P1"])])
+        check("not once its issue left stage:doing (its PR is open)", w4.park_allowed(), False)
+        pool.prev = state([])
+        check("nor once it is closed", w4.park_allowed(), False)
+        pool.prev = state([iss(6, ["stage:doing", "P1"])])
+        w4.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, "77\n", "")
+        check("nor while a pull request from its branch is open", w4.park_allowed(), False)
+        w4.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+        pool.prev = state([iss(6, ["stage:doing", "P1"]), iss(7, ["stage:doing", "P1"])])
         w4.parks = pool.cfg.park_max
         check("after POOL_PARK_MAX parks it ends as before", w4.park_allowed(), False)
         pool.cfg.park_on_quota = False

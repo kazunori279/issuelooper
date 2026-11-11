@@ -2902,6 +2902,8 @@ def score_detail(report: pathlib.Path) -> tuple[int | None, str]:
 
 
 FINDINGS_LINE = re.compile(r"(?i)\bfindings?\b\W*(\d+)\s*blockers?\W+(\d+)\s*majors?")
+# A UX report's `Journeys: P of N steps passed`, the scripted journeys' own count.
+JOURNEYS_LINE = re.compile(r"(?i)\bjourneys?\b\W*(\d+)\s*(?:of|/)\s*(\d+)\s*steps?\b")
 
 
 def score_cap(report: pathlib.Path, kind: str = "ux") -> tuple[int | None, int, int]:
@@ -2914,22 +2916,31 @@ def score_cap(report: pathlib.Path, kind: str = "ux") -> tuple[int | None, int, 
     major in the app, far more than one review does, and put the UX score well under the
     audits (with no cap at all, it had been well over them).
     An explorer (one focus, few findings) keeps 85 - 8 B - 5 M, at most 50 / 70: its scores
-    stayed close to the audits."""
+    stayed close to the audits.
+    A whole-app run whose line `Journeys: P of N steps passed` says fewer than half the
+    scripted journey's steps passed is capped at the share that passed (100 P / N), with or
+    without a findings line: a run scored the app well over an audit of a build whose
+    journeys mostly failed, and the findings cap never bound."""
     try:
         head = report.read_text(errors="replace")[:4000]
     except OSError:
         return None, 0, 0
+    cap, b, mj = None, 0, 0
     m = FINDINGS_LINE.search(head)
-    if not m:
-        return None, 0, 0
-    b, mj = int(m.group(1)), int(m.group(2))
-    per_major, with_blocker, with_major = (2, 60, 75) if kind == "ux" else (5, 50, 70)
-    cap = 85 - 8 * b - per_major * mj
-    if b:
-        cap = min(cap, with_blocker)
-    elif mj:
-        cap = min(cap, with_major)
-    return max(0, cap), b, mj
+    if m:
+        b, mj = int(m.group(1)), int(m.group(2))
+        per_major, with_blocker, with_major = (2, 60, 75) if kind == "ux" else (5, 50, 70)
+        cap = 85 - 8 * b - per_major * mj
+        if b:
+            cap = min(cap, with_blocker)
+        elif mj:
+            cap = min(cap, with_major)
+        cap = max(0, cap)
+    j = JOURNEYS_LINE.search(head) if kind == "ux" else None
+    if j and 0 <= int(j.group(1)) <= int(j.group(2)) and 2 * int(j.group(1)) < int(j.group(2)):
+        steps = 100 * int(j.group(1)) // int(j.group(2))
+        cap = steps if cap is None else min(cap, steps)
+    return cap, b, mj
 
 
 def ux_score(report: pathlib.Path) -> int | None:
@@ -3074,11 +3085,13 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         "the supervisor reads that line. Write the report at the start with the first line `Score: provisional` "
         "and update it as you go, so a run cut short still reports what it saw; replace that line with "
         "`Score: N/100` only after the journeys and your probes have run and you have read the screenshots, "
-        "followed by a line `Findings: B blockers, M majors` counting every blocker and major you saw in what "
+        "followed by a line `Journeys: P of N steps passed` (the journeys script's own count; a step it could not do "
+        "did not pass) and a line `Findings: B blockers, M majors` counting every blocker and major you saw in what "
         "exists, filed now or already tracked by an open issue (a feature that is there and broken is a major, a "
         "blocker when a user cannot do what they came for). A feature whose issue is still open (a seed issue, say) "
         "is missing scope, not a major: list it under `Missing scope:` in the report and leave it out of the count. "
-        "The supervisor caps the score at 85 - 8 per blocker - 2 per major (60 with a blocker, 75 with a major). "
+        "The supervisor caps the score at 85 - 8 per blocker - 2 per major (60 with a blocker, 75 with a major), "
+        "and at the share of journey steps that passed when fewer than half did. "
         "The loop's logs (.issuelooper/run, other sessions' reports) are not part of your unit: never read "
         "them, and never take a score from them."
         + (f" The previous UX run scored {previous['score']} at {str(previous.get('sha', ''))[:12]}: never copy it; "
@@ -3954,10 +3967,26 @@ class Session(threading.Thread):
 
     def park_allowed(self) -> bool:
         """Whether this unit may be parked for quota now (POOL_PARK_ON_QUOTA, POOL_PARK_MAX): an
-        implement unit (either stage) with parks left, while the supervisor runs."""
+        implement unit (either stage) with parks left, while the supervisor runs, whose issue is
+        still open at stage:doing with no pull request (issue_parkable)."""
         cfg = self.pool.cfg
         return (cfg.park_on_quota and self.unit.role == "worker" and self.unit.kind == "implement"
-                and self.parks < cfg.park_max and not self.pool.stopping and (self.dir / "claim").exists())
+                and self.parks < cfg.park_max and not self.pool.stopping and (self.dir / "claim").exists()
+                and self.issue_parkable())
+
+    def issue_parkable(self) -> bool:
+        """Whether the issue is still open at stage:doing (the supervisor's last read of GitHub)
+        with no open pull request from its branch (asked now). Units that timed out in their
+        wrap-up after the PR was open were parked, and could not go on: the issue had left
+        stage:doing."""
+        n = self.unit.number
+        st = self.pool.prev
+        if st is not None:
+            issue = next((i for i in st.get("open", []) if i["number"] == n), None)
+            if issue is None or claimlib.DOING not in issue["labels"]:
+                return False
+        r = self.gh("pr", "list", "--head", f"issue-{n}", "--state", "open", "--json", "number", "-q", ".[].number")
+        return r.returncode == 0 and not r.stdout.strip()
 
     def quota_bound(self, timed_out: bool) -> bool:
         """A timeout where quota waits took POOL_QUOTA_TIMEOUT_SHARE of the (stage's) time limit."""
@@ -8304,7 +8333,7 @@ class Pool:
         "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
         "`wait_for_selector`), never fixed sleeps;\n"
         "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
-        "- well under 100 lines, a few seconds to run.\n\n"
+        "- a few seconds to run. Its length is no requirement: keep every check of what the user sees.\n\n"
         "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
         "`Regression of #N`, so every test there costs every later merge: a suite whose files each started their "
         "own server and slept grew to many minutes. Only this chore's PR may add files there. Before the PR, run "

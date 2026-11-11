@@ -327,8 +327,11 @@ line and the owner follows it from run to run. Write the report at the start wit
 first line `Score: provisional`, and update it as you read and file: a run cut short (a
 quota wait, the time limit) still reports what it saw. Replace that line with
 `Score: N/100` only after the journeys and your probes ran and you read the screenshots,
-with the line `Findings: B blockers, M majors` under it (defects in what exists; the supervisor
-applies the cap), and a `Missing scope:` line naming the open issues for what is not built yet;
+with the lines `Journeys: P of N steps passed` (the journeys script's own count: a step it
+could not do did not pass) and `Findings: B blockers, M majors` under it (defects in what
+exists; the supervisor applies the caps, and with fewer than half the steps passed the score
+is at most the share that passed), and a `Missing scope:` line naming the open issues for what
+is not built yet;
 the supervisor logs nothing for a provisional line, and a number written before that
 (the previous run's, say) is not a score. Near the end of your budget the supervisor
 sends you a turn that asks for the report now; do that before anything else. Do not
