@@ -2787,8 +2787,15 @@ def test_area_notes_are_kept_per_area_and_go_stale() -> None:
         check("a lent area issue gets its area's notes too, and the research stage is not asked to write them",
               ("`live` area" in lent_text, "REPO-WIDE" in lent_text, "After your pull request is open" in lent_text),
               (True, False, False))
-        none_text = ccpool.Session(h.pool, none, 3).notes_prompt("implement")
-        check("an issue in no area gets the repository's notes", "REPO-WIDE NOTE" in none_text, True)
+        w3 = ccpool.Session(h.pool, none, 3)
+        check("with areas set, an issue in no area gets no notes and keeps none (repository-wide notes duplicated "
+              "the areas' with older line numbers)", (w3.notes_prompt("implement"), w3.notes_key), ("", None))
+        no_areas = Rig(state(), area_notes=True)
+        check("with no areas, the repository's notes are the only ones, and an issue gets them",
+              "REPO-WIDE NOTE" in ccpool.Session(no_areas.pool, none, 3).notes_prompt("implement"), True)
+        check("the request asks for the file map with line ranges and the pitfalls, from the code as it is now",
+              all(x in first for x in ("Two parts only: the file map", "line ranges", "pitfalls",
+                                       "never copied from older notes", "Notes without line ranges are not kept")), True)
 
         # The worker writes the notes after its PR is open; the supervisor records them.
         pathlib.Path(SCRATCH, "areas", "live.md").write_text("src/live.py: x0..x49 at lines 1-50. Test: tests/unit.\n")
@@ -2810,6 +2817,20 @@ def test_area_notes_are_kept_per_area_and_go_stale() -> None:
         check("a worker that did not touch them records nothing new",
               [json.loads(x)["kind"] for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
                if "notes_" in x][-1], "notes_not_updated")
+        good = pathlib.Path(SCRATCH, "areas", "live.md").read_text()
+        w4 = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:7@x", "wrk:7", 7, (4,),
+                                                {"area": "live", "slot": 0}), 7)
+        w4.notes_prompt("implement")
+        pathlib.Path(SCRATCH, "areas", "live.md").write_text("src/live.py holds the session loop. Run the unit tests.\n")
+        w4.left_pr, w4.branch_base = True, base
+        h.pool.record_notes(w4)
+        check("notes without line ranges are rejected: the ones they replaced are put back, the record kept",
+              (pathlib.Path(SCRATCH, "areas", "live.md").read_text(), b.notes["live"]["commit"],
+               [json.loads(x)["why"] for x in (h.pool.cfg.logdir / "pool.jsonl").read_text().splitlines()
+                if "notes_rejected" in x]), (good, base, ["no line ranges"]))
+        check("line ranges as notes write them", [bool(ccpool.NOTES_RANGE.search(t)) for t in (
+            "`run_turn` (120-180)", "src/a.py:12-40", "lines 3 - 9", "L5-L9", "on 2026-11-12", "1280x800")],
+              [True, True, True, True, False, False])
 
         # Main moves: a small change elsewhere keeps them fresh; a large one to a file they name makes them stale.
         (work / "src" / "other.py").write_text("".join(f"y{k} = {k}\n" for k in range(100)))
@@ -2839,6 +2860,9 @@ def test_area_notes_are_kept_per_area_and_go_stale() -> None:
         check("off (the default): the per-conversation notes as before",
               f"{SCRATCH}/areas/live-0.md" in ccpool.area_text(live, off.pool.cfg), True)
         check("POOL_AREA_NOTES defaults to off", ccpool.Config.from_env().area_notes, False)
+        restore_n = with_env({"POOL_NOTES_MAX_CHARS": ""})
+        check("POOL_NOTES_MAX_CHARS defaults to 8000", ccpool.Config.from_env().notes_max_chars, 8000)
+        restore_n()
     finally:
         restore()
         for f in ("live.md", "_repo.md"):
@@ -2896,6 +2920,19 @@ def test_a_symbol_index_per_main_commit() -> None:
               "the issue's files",
               (f"{SCRATCH}/index/{new}.txt" in text, "line ranges" in text, "src/app.py:1: def other" in text,
                "src/js/map.js:1: function drawMap" in text), (True, True, True, True))
+        named = w.index_prompt("", "Fix `Store.get` (gone from main now) and drawMap; `MapCard`")
+        check("the issue's names that main defines come looked up, with the lines to read, the class to its file's "
+              "end", [ln.strip() for ln in named.split("with the lines to read")[1].splitlines()[1:4]],
+              ["src/js/map.js:1-3: function drawMap", "src/js/map.js:5-11: class MapCard",
+               "Its lines for the files your issue concerns:"])
+        check("and the worker is not asked to grep the index for them", ("looked up for you" in named,
+              "Look a name up there" in named), (True, False))
+        check("ranges: a function ends before the next definition, a method at the next row, a class after its "
+              "methods, the last at the file's end",
+              ccpool.index_ranges(["a.py:4: def handle", "a.py:8: class Store", "a.py:9: def Store.get",
+                                   "a.py:12: def Store.put", "b.js:1: function f"],
+                                  {"handle", "Store", "Store.get", "f"}, lambda f: {"a.py": 14, "b.js": 3}[f]),
+              ["a.py:4-7: def handle", "a.py:8-14: class Store", "a.py:9-11: def Store.get", "b.js:1-3: function f"])
         check("CSS rules and HTML ids, with the functions in a page's script",
               (ccpool.symbols("a.css", ".card, .tile {\n  color: red;\n}\n#main .x {\n"),
                ccpool.symbols("a.html", '<div id="feed">\n<script>\nfunction boot() {}\n</script>\n')),

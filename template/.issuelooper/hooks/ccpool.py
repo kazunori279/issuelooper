@@ -576,7 +576,9 @@ class Config:
     # than notes_stale_lines since the commit they describe, or over notes_max_chars. About
     # 70% of a cold worker's cost was research, half of it re-sending the files it read.
     area_notes: bool = False
-    notes_max_chars: int = 24000
+    # Notes are sent with every call of every worker in the area: long ones (a median of about
+    # 11k characters) cost on each call and did not cut what workers read.
+    notes_max_chars: int = 8000
     notes_stale_lines: int = 200
     # A symbol index of origin/main (POOL_SYMBOL_INDEX): functions, classes and selectors with
     # file:line, made without a model and cached per main sha, named in the worker's prompt with
@@ -822,7 +824,7 @@ class Config:
             area_second_at=env_int("POOL_AREA_SECOND_AT", 3),
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
             area_notes=env_flag("POOL_AREA_NOTES"),
-            notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 24000),
+            notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 8000),
             notes_stale_lines=env_int("POOL_NOTES_STALE_LINES", 200),
             symbol_index=env_flag("POOL_SYMBOL_INDEX"),
             research_brief=env_flag("POOL_RESEARCH_BRIEF"),
@@ -1842,6 +1844,8 @@ def knowledge_path(key: str) -> str:
 
 
 NOTES_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+")
+# A line range in notes: `name (12-40)`, `path:12-40`, `lines 12-40`, `L12-L40`.
+NOTES_RANGE = re.compile(r"(?:\(|:|\blines?\s+|\bL)\d+\s*[-\u2013]\s*L?\d+")
 
 
 def notes_files(text: str, root: pathlib.Path, commit: str) -> list[str]:
@@ -1903,10 +1907,12 @@ def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, sta
     return out + (
         f"After your pull request is open (not before it, and not when you release the claim), as your last step "
         f"before your last line: {'rebuild' if stale or not text else 'update'} the notes at {path} for the next worker "
-        f"in {scope}. Cover the file map (paths, with line ranges for the parts that matter), the key functions and "
-        "classes, conventions, how to test (which test files, which commands) and pitfalls. Read the file again first "
-        "(another worker may have changed it), keep what is still true, drop what your change made wrong, and write "
-        f"it whole, in at most {cfg.notes_max_chars} characters.\n")
+        f"in {scope}. Two parts only: the file map (each file that matters, with the line ranges of its key functions "
+        "and classes, read from the symbol index or from the files on your branch as they are now, never copied from "
+        "older notes) and the pitfalls (traps you hit, conventions that are not obvious, which tests and commands to "
+        "run). Leave out what the code says plainly. Read the file again first (another worker may have changed it), "
+        f"keep what is still true, drop what your change made wrong, and write it whole, in at most "
+        f"{cfg.notes_max_chars} characters. Notes without line ranges are not kept.\n")
 
 
 def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: dict | None,
@@ -2375,19 +2381,69 @@ def symbol_index(root: pathlib.Path, sha: str, keep: int = 4) -> str:
     return str(path)
 
 
-def index_text(path: str, files: list[str], globs: list[str]) -> str:
-    """The prompt's note on the symbol index, with its lines for the issue's files (or its area's)."""
+INDEX_NAMES = 20  # definitions of the issue's names quoted with their line ranges
+CODE_WORD = re.compile(r"\b[A-Za-z_$][\w$]*(?:_[\w$]+|[a-z][A-Z][\w$]*)\b")  # snake_case or camelCase
+NOT_NAMES = {"py", "js", "ts", "css", "html", "md", "json", "toml", "txt", "src", "tests", "test"}
+
+
+def issue_names(text: str) -> set[str]:
+    """The code names an issue mentions: its backticked tokens and their parts (`a.b`, a path's
+    file stem), and the snake_case and camelCase words in its text."""
+    names = set(CODE_WORD.findall(text))
+    for tok in MAP_TOKEN.findall(text):
+        names.add(tok)
+        names.update(x for x in re.split(r"[/.:#()\[\]]+", tok) if len(x) >= 4)  # not `get` of `Store.get`
+    return {x for x in names if len(x) >= 3 and x.lower() not in NOT_NAMES and not x.isdigit()}
+
+
+def index_ranges(rows: list[str], names: set[str], length=None) -> list[str]:
+    """`path:A-B: kind name` for the index rows that define one of names: B is the line before
+    the next definition in the file at the same level (a method ends at the next row; a class or
+    function at the next row that is not one of its methods), or the file's last line from
+    length(path) for its last one. Source files first, at most INDEX_NAMES rows."""
+    parsed = []
+    for ln in rows:
+        m = re.match(r"(.+?):(\d+): (\S+) (.+)$", ln)
+        if m:
+            parsed.append((m.group(1), int(m.group(2)), m.group(3), m.group(4)))
+    out = []
+    for k, (path, line, kind, name) in enumerate(parsed):
+        keys = {name, name.rsplit(".", 1)[-1], name.lstrip(".#").split(",")[0]}
+        if not keys & names:
+            continue
+        nested = kind == "method" or (kind == "def" and "." in name)
+        end = None
+        for p2, l2, k2, n2 in parsed[k + 1:]:
+            if p2 != path:
+                break
+            if nested or not (k2 == "method" or (k2 == "def" and n2.startswith(name + "."))):
+                end = l2 - 1
+                break
+        if end is None and length is not None:
+            end = length(path)
+        out.append((is_test(path), f"{path}:{line}-{end if end else 'end'}: {kind} {name}"))
+    return [x for _, x in sorted(out, key=lambda t: t[0])][:INDEX_NAMES]
+
+
+def index_text(path: str, files: list[str], globs: list[str], text: str = "", length=None) -> str:
+    """The prompt's note on the symbol index, with the definitions of the issue's names (text)
+    and their line ranges, and its lines for the issue's files (or its area's)."""
     try:
         rows = pathlib.Path(path).read_text(errors="replace").splitlines()
     except OSError:
         return ""
     want = [ln for ln in rows if not ln.startswith("#")
             and (ln.split(":", 1)[0] in files or any(config.path_matches(ln.split(":", 1)[0], g) for g in globs))]
+    defined = index_ranges([ln for ln in rows if not ln.startswith("#")], issue_names(text), length) if text else []
     out = (f"\nA symbol index of origin/main is at {path}: one line per function, class, method, id or CSS rule, "
-           "`path:line: kind name`. Look a name up there (grep -n <name> on it) before you open a file, then read "
-           "only the line ranges you need (sed -n 'A,Bp' <file>, or your read tool with an offset and a limit) and "
-           "grep results, not whole files: everything you read is sent again with each later step of this "
-           "session.\n")
+           "`path:line: kind name`. Read only the line ranges you need (sed -n 'A,Bp' <file>, or your read tool with "
+           "an offset and a limit) and grep results, not whole files: everything you read is sent again with each "
+           "later step of this session. "
+           + ("The issue's names are looked up for you below; grep -n the index only for other names.\n" if defined
+              else "Look a name up there (grep -n <name> on it) before you open a file.\n"))
+    if defined:
+        out += ("Where the issue's names are defined, with the lines to read (`path:first-last: kind name`):\n"
+                + "\n".join("    " + ln for ln in defined) + "\n")
     if want:
         out += ("Its lines for the files your issue concerns:\n" + "\n".join("    " + ln for ln in want[:INDEX_EXCERPT])
                 + (f"\n    ... ({len(want) - INDEX_EXCERPT} more)" if len(want) > INDEX_EXCERPT else "") + "\n")
@@ -3427,6 +3483,7 @@ class Session(threading.Thread):
         self.branch_base = ""  # where its branch forked off origin/main (the commit its notes describe)
         self.notes_key: str | None = None  # the notes it keeps (POOL_AREA_NOTES), and their file's
         self.notes_mark: tuple | None = None  # (mtime_ns, size) when it started
+        self.notes_prev: str | None = None  # their text when it started (None: there were none)
         # The research stage (POOL_RESEARCH_BRIEF): which stage runs, its time limit, where its
         # events end in the stream (the implement stage's start), its usage, seconds and result.
         self.stage = ""
@@ -4386,7 +4443,8 @@ class Session(threading.Thread):
             staged = (cfg.research_brief and not u.info.get("resume") and not u.info.get("fork")
                       and research_wanted(u, list(u.info.get("files") or [])
                                           or [ln.split(" (", 1)[0] for ln in files.splitlines() if ln.strip()], cfg))
-            index = self.index_prompt(files) if cfg.symbol_index else ""
+            index = (self.index_prompt(files, claim.get("title", "") + "\n" + (thread.get("body") or ""))
+                     if cfg.symbol_index else "")
             knowledge = self.notes_prompt("implement") if cfg.area_notes else ""
 
             def build(timeout: str, skip_files: bool = False) -> str:
@@ -4555,9 +4613,10 @@ class Session(threading.Thread):
                 return r.stdout.strip()
         return ""
 
-    def index_prompt(self, files_text: str = "") -> str:
+    def index_prompt(self, files_text: str = "", issue: str = "") -> str:
         """index_text for this worker (POOL_SYMBOL_INDEX): the index of the current origin/main,
-        with its lines for the issue's files (the file map's, else the area's paths)."""
+        with the definitions of the issue's names (issue: its title and body) and its lines for
+        the issue's files (the file map's, else the area's paths)."""
         root = repo_root()
         sha = subprocess.run(["git", "-C", str(root), "rev-parse", "origin/main"], capture_output=True, text=True,
                              timeout=30).stdout.strip()
@@ -4571,17 +4630,29 @@ class Session(threading.Thread):
         files = list(self.unit.info.get("files") or []) + [ln.split(" (", 1)[0] for ln in files_text.splitlines()]
         area = notes_key(self.unit)
         globs = next((a.get("paths") or [] for a in self.pool.cfg.areas if a["name"] == area), []) if area else []
-        return index_text(path, files, globs)
+
+        def length(f: str) -> int | None:
+            r = subprocess.run(["git", "-C", str(root), "show", f"{sha}:{f}"], capture_output=True, text=True,
+                               timeout=30)
+            return r.stdout.count("\n") if r.returncode == 0 else None
+        return index_text(path, files, globs, issue, length)
 
     def notes_prompt(self, stage: str) -> str:
         """notes_text for this worker, remembering which notes it keeps and how their file
         stood, so Pool.record_notes can tell whether it updated them."""
-        key = self.notes_key = notes_key(self.unit)
+        key = notes_key(self.unit)
+        if not key and self.pool.cfg.areas:
+            # An issue in no area, with areas set: no repository-wide notes. They duplicated the
+            # areas' notes with older line numbers, and workers given them cost the most.
+            self.notes_key = None
+            return ""
+        self.notes_key = key
         try:
             st = pathlib.Path(knowledge_path(key)).stat()
             self.notes_mark = (st.st_mtime_ns, st.st_size)
+            self.notes_prev = pathlib.Path(knowledge_path(key)).read_text(errors="replace")
         except OSError:
-            self.notes_mark = None
+            self.notes_mark = self.notes_prev = None
         with self.pool.lock:
             rec = dict(self.pool.book.notes.get(key) or {})
         try:
@@ -6180,6 +6251,19 @@ class Pool:
             return
         if (st.st_mtime_ns, st.st_size) == w.notes_mark:
             self.log("notes_not_updated", area=w.notes_key, issue=w.unit.number, session=w.seq)
+            return
+        if not NOTES_RANGE.search(text):
+            # A file map without line ranges sends the next worker reading whole files: the
+            # notes it replaced are put back (or none kept).
+            try:
+                if w.notes_prev is None:
+                    path.unlink()
+                else:
+                    path.write_text(w.notes_prev)
+            except OSError:
+                pass
+            self.log("notes_rejected", area=w.notes_key, issue=w.unit.number, session=w.seq, size=len(text),
+                     why="no line ranges", restored=w.notes_prev is not None)
             return
         commit = w.branch_base or self.git("rev-parse", "origin/main").stdout.strip()
         try:
