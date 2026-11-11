@@ -201,6 +201,7 @@ def progress(m: dict) -> str:
         o = p["outcomes"]
         order = [
             "ok",
+            "released",
             "handed back",
             "timed out",
             "failed",

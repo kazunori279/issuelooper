@@ -567,6 +567,7 @@ def test_a_hub_is_never_parked_by_its_failures() -> None:
 
 
 def test_agent_release() -> None:
+    import claim as cl
     repo = Repo([issue(9, ["stage:triage", "P2"])])
     cf = repo.dir / "claim"
     claim = json.loads(repo.run("claim", "--loop", "5", "--claim-file", str(cf)).stdout)
@@ -585,11 +586,30 @@ def test_agent_release() -> None:
     check("release exits 0", res.returncode, 0)
     check("released to stage:owner", repo.labels(9), ["P2", "stage:owner"])
     check("claim file removed by release", cf.exists(), False)
+    check("no note asked: none written", any(cl.RELEASE_NOTE in c for c in repo.comments(9)), False)
     check(
         "finish afterwards is a no-op",
         repo.run("finish", "--claim-file", str(cf)).stdout.strip(),
         "no claim",
     )
+
+
+def test_release_note() -> None:
+    """The next worker on a released issue started over; the release now carries a note in a
+    fixed format that the supervisor puts in its prompt."""
+    import claim as cl
+    repo = Repo([issue(9, ["stage:triage", "P2"])])
+    cf = repo.dir / "claim"
+    claim = json.loads(repo.run("claim", "--loop", "5", "--claim-file", str(cf)).stdout)
+    res = repo.run("release", "9", "--token", claim["token"], "--reason", "tiles never load in tests",
+                   "--done", "tile layer\nand its test", "--blocked", "no tile proxy", "--next", "src/map.js (40-90)",
+                   WRK_CLAIM_FILE=cf, WRK_K=5)
+    body = [c for c in repo.comments(9) if "Claim released" in c][-1]
+    check("release with a note exits 0", res.returncode, 0)
+    check("the note follows the reason, one line per field",
+          body.split("Claim released (stage:triage): ")[1],
+          "tiles never load in tests\n\n" + cl.RELEASE_NOTE + "\n- Done: tile layer and its test\n"
+          "- Blocked by: no tile proxy\n- Next: src/map.js (40-90)")
 
 
 def test_stale_sweep() -> None:

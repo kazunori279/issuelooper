@@ -2149,6 +2149,24 @@ CLAIM_NOTICE = re.compile(r"^<!-- worker -->\s*<!-- (claim|release) loop=")
 ISSUE_BODY_MAX, ISSUE_COMMENTS, COMMENT_MAX = 4000, 6, 900
 
 
+def release_note(thread: dict) -> str:
+    """The issue's newest release by a worker, when it carries a release note (claim.py
+    release --done, --blocked, --next): its reason line and the note, for the next worker's
+    prompt; '' when the newest release has none. Release notices are left out of issue_text,
+    and the next worker started over from the issue."""
+    for c in reversed(thread.get("comments") or []):
+        b = str(c.get("b") or "")
+        m = CLAIM_NOTICE.match(b)
+        if not m or m.group(1) != "release":
+            continue
+        if claimlib.RELEASE_NOTE not in b:
+            return ""
+        reason, _, note = b.partition(claimlib.RELEASE_NOTE)
+        lines = [ln for ln in reason.splitlines() if ln.startswith("Claim released")][:1]
+        return "\n".join(lines + [ln.strip() for ln in note.splitlines() if ln.strip()][:3])[:2000]
+    return ""
+
+
 def issue_text(thread: dict) -> str:
     """The issue's body and its newest comments (claim and release notices left out),
     for the worker's prompt: workers on some models reread the issue with `gh issue
@@ -2350,7 +2368,8 @@ def index_text(path: str, files: list[str], globs: list[str]) -> str:
 
 def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live: bool = False,
                   wrap_min: int = 35, issue: str = "", files: str = "", devcheck: bool = False,
-                  accept: str = "", checklist: str = "", guard: bool = False, mode: str = "gate") -> str:
+                  accept: str = "", checklist: str = "", guard: bool = False, mode: str = "gate",
+                  note: str = "") -> str:
     n, token = c["issue"], c["token"]
     # Refs for needs:live only in "gate" mode with live checks on; with "after" or "off" the merge
     # closes it (Refs there left needs:live issues waiting at stage:owner).
@@ -2404,6 +2423,12 @@ def worker_prompt(c: dict, k: str, timeout: str, pool: str, wip: str = "", live:
             f"release comment on #{n}, and continue from there instead of starting over. Rebase\n"
             "onto origin/main before the sweep.\n"
         )
+    if note and not pr:
+        pr_text += (
+            f"\nThe last worker on #{n} released it with this note. Start from it (and from its branch, when\n"
+            "there is one): do not redo what it says is done, and begin where it says to begin.\n\n"
+            + "\n".join("    " + ln for ln in note.splitlines()) + "\n"
+        )
     if issue:
         pr_text += (
             f"\nIssue #{n} as of the claim (body, then the newest comments; claim notices left\n"
@@ -2435,8 +2460,11 @@ End in one of two states:
    cleared. Last line of your reply: WORKER-DONE pr #<number>
 2. You could not finish: commit what you have on {branch} (the supervisor pushes it for
    the next worker), say on #{n} what blocked you and what is left, then run
-   python3 .issuelooper/hooks/claim.py release {n} --token {token} --reason "<one line>"
-   (add --to stage:owner when it needs the owner's decision). Last line: WORKER-RELEASED
+   python3 .issuelooper/hooks/claim.py release {n} --token {token} --reason "<one line>" \\
+     --done "<what works now, on the branch>" --blocked "<what stopped you>" \\
+     --next "<where the next worker starts: files with line ranges, the first step>"
+   (add --to stage:owner when it needs the owner's decision). The next worker gets that note
+   in its prompt. Last line: WORKER-RELEASED
 
 The supervisor merges your PR once the merge gates and a review gate pass. The review
 gate rejects what {review_rules()} names, such as data made up and shown to users as
@@ -2455,7 +2483,7 @@ RESEARCH_DONE = "RESEARCH-DONE"
 
 
 def research_prompt(c: dict, k: str, timeout: str, brief: str, max_chars: int, wip: str = "", issue: str = "",
-                    files: str = "", extra: str = "") -> str:
+                    files: str = "", extra: str = "", note: str = "") -> str:
     """The research stage of a worker unit (POOL_RESEARCH_BRIEF): read, then write the brief the
     implement stage starts from. extra: the symbol index and the area notes."""
     n, token = c["issue"], c["token"]
@@ -2469,6 +2497,9 @@ def research_prompt(c: dict, k: str, timeout: str, brief: str, max_chars: int, w
     elif wip:
         where = (f"\nA previous worker on #{n} ended without a pull request; its work is on origin/{branch} ({wip}). "
                  f"Read what it did (git log and git diff origin/main...origin/{branch}) and the release comment on #{n}.\n")
+    if note and not pr:
+        where += (f"\nThe last worker on #{n} released it with this note; start from it:\n\n"
+                  + "\n".join("    " + ln for ln in note.splitlines()) + "\n")
     if issue:
         where += ("\nIssue #%s as of the claim (body, then the newest comments; claim notices left out):\n\n" % n
                   + "\n".join("    " + ln for ln in issue.splitlines()) + "\n")
@@ -3345,6 +3376,8 @@ def pid_alive(pid: int) -> bool:
 NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "timed out under quota",
                  "stopped with the supervisor", "cut off with its background task", "parked for quota",
                  "parked unit could not go on")
+# A worker that released its claim itself (claim.py release) and opened no pull request.
+RELEASED = "released"
 # A worker that ended with no pull request and no release of its own, while a sweep it had
 # started in the background still ran (Session.work): not the agent's failure.
 BG_CUT = "cut off with its background task running (no pull request)"
@@ -4315,6 +4348,7 @@ class Session(threading.Thread):
             n = int(claim["issue"])
             wip = "" if claim.get("pr") else self.wip_branch(n)
             thread = self.issue_thread(n)
+            note = release_note(thread) if thread else ""
             try:
                 files = file_map(repo_root(), (thread.get("body") or "") + "\n" + claim.get("title", ""),
                                  id_pattern=cfg.map_id_pattern)
@@ -4334,7 +4368,7 @@ class Session(threading.Thread):
                                                   // 60) or 35,
                                     issue_text(thread) if thread else "", "" if skip_files else files, cfg.devcheck,
                                     ", ".join(cfg.accept_paths) if cfg.accept else "", config.checklist_text(),
-                                    bool(cfg.accept_guard), cfg.accept_mode)
+                                    bool(cfg.accept_guard), cfg.accept_mode, note)
                 if index:
                     out += "\n" + index
                 if u.info.get("area") or u.info.get("hot") or knowledge:
@@ -4365,7 +4399,7 @@ class Session(threading.Thread):
                     f"{max(5, int(seconds(self.timeout()) * min(0.9, max(0.05, cfg.research_share))) // 60)}m",
                     scratch(f"wrk-{self.wk}-{n}-brief.md"), cfg.brief_max_chars, wip,
                     issue_text(thread) if thread else "", files,
-                    (index + (self.notes_prompt("research") if cfg.area_notes else "")))
+                    (index + (self.notes_prompt("research") if cfg.area_notes else "")), note)
         elif u.role == "worker" and u.kind == "own-accept":
             self.port = self.pool.take_port()
             env.update(TST_PORT=str(self.port))
@@ -4436,6 +4470,7 @@ class Session(threading.Thread):
             self.cleanup(scratch(f"wrk-{self.wk}-*-wt"))
             self.clear_scratch()
         elif u.role == "worker":
+            claimed = claim_file.exists() or (self.dir / "claim.out").exists()
             self.branch_files = self.changed_files(scratch(f"wrk-{self.wk}-*-wt"))
             self.branch_base = self.fork_point(scratch(f"wrk-{self.wk}-*-wt"))
             self.save_wip(scratch(f"wrk-{self.wk}-*-wt"))
@@ -4464,6 +4499,10 @@ class Session(threading.Thread):
                 # No pull request and no release of its own: finish had to release the claim.
                 # Recorded as "ok" before, which hid seven such endings in run 14.
                 outcome = BG_CUT if still else "ended without a pull request"
+            elif outcome == "ok" and not self.left_pr and finish.strip() == "no claim" and claimed:
+                # It released the claim itself (claim.py release, last line WORKER-RELEASED):
+                # an attempt that failed, not "ok", which hid the costliest units of a run.
+                outcome = RELEASED
             self.cleanup(scratch(f"wrk-{self.wk}-*-wt"))
             self.clear_scratch()
         elif u.role == "merger":
@@ -5881,7 +5920,7 @@ class Pool:
                 b.clean.add(u.key)
                 if u.kind == "live":
                     b.clean.add(u.info["base"])  # this entry into stage:live is checked
-            if outcome == "ok" and u.role != "auto":
+            if outcome in ("ok", RELEASED) and u.role != "auto":
                 b.quota_streak[group] = 0
             if outcome == "ok":
                 # Only failures count toward POOL_FAMILY_MAX: a merged PR that a live check
@@ -5944,8 +5983,10 @@ class Pool:
             # never got the claim, or ended on quota, a crash or a stop, says nothing about
             # the issue, and one that left a pull request delivered. Every one of seven
             # split requests in run 7 counted those (and gate 7 or merger-loop hand-backs).
-            if u.role == "worker" and u.number is not None and (w.dir / "claim").exists() and not w.left_pr \
-                    and not outcome.startswith(NOT_A_FAILURE):
+            if u.role == "worker" and u.number is not None and not w.left_pr and not outcome.startswith(NOT_A_FAILURE) \
+                    and ((w.dir / "claim").exists() or outcome == RELEASED):
+                # A unit that released its claim itself counts too: after POOL_DECOMPOSE_AFTER
+                # releases the monitor is asked to split the issue.
                 b.failed_tries[u.number] += 1
             # A hold has its own event, once, and is retried every POOL_HOLD_RETRY_S.
             if outcome not in ("ok", "unclaimable") and not outcome.startswith(("quota error", "transient error", "held",

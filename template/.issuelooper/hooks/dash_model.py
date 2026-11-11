@@ -94,6 +94,8 @@ def outcome_class(outcome: str) -> str:
     o = outcome or ""
     if o == "ok":
         return "ok"
+    if o == "released":
+        return "released"
     if "handed back" in o:
         return "handed back"
     if o.startswith("timed out"):

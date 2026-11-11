@@ -23,6 +23,7 @@ themselves as first once both writes are readable; `check` repeats the test late
                                               exit 3 if N is not claimable)
     claim.py check N --token T                exit 0 if T still holds N, 4 if not
     claim.py release N --loop K --token T --reason TEXT [--to stage:owner]
+                       [--done TEXT --blocked TEXT --next TEXT]   the release note
     claim.py finish --claim-file F --loop K   after a session: keep (PR open) or release
     claim.py stale [--release]                stage:doing claims older than STALE_MIN
                                               with no open PR (ccpool.py's reclaim)
@@ -566,8 +567,24 @@ def cmd_check(args) -> int:
     return 0 if ok else 4
 
 
+# Marks the fixed-format note a worker leaves when it releases its claim (release --done,
+# --blocked, --next); the next worker's prompt starts from it (ccpool.release_note).
+RELEASE_NOTE = "<!-- release-note -->"
+NOTE_FIELDS = (("done", "Done"), ("blocked", "Blocked by"), ("next", "Next"))
+
+
+def release_note(fields: dict) -> str:
+    """The release note for the comment: one line per field given, '' when none is."""
+    lines = []
+    for key, label in NOTE_FIELDS:
+        text = " ".join(str(fields.get(key) or "").split())[:600]
+        if text:
+            lines.append(f"- {label}: {text}")
+    return f"\n\n{RELEASE_NOTE}\n" + "\n".join(lines) if lines else ""
+
+
 def release(
-    n: int, loop: str, token: str, reason: str, to: str, fail: bool, role: str = "worker"
+    n: int, loop: str, token: str, reason: str, to: str, fail: bool, role: str = "worker", note: str = ""
 ) -> None:
     issue = gh_json("api", f"repos/{{owner}}/{{repo}}/issues/{n}") or {}
     names = labels_of(issue)
@@ -579,7 +596,7 @@ def release(
         (
             f"<!-- {role} -->\n"
             f"<!-- release{who} token={token} to={to}{' fail=1' if fail else ''} -->\n"
-            f"Claim released ({to}): {reason}"
+            f"Claim released ({to}): {reason}{note}"
         ),
     )
 
@@ -590,7 +607,8 @@ def cmd_release(args) -> int:
     if to != "stage:owner" and not HUB and failed_attempts(comments_of(args.issue)) + 1 >= MAX_ATTEMPTS:
         to = "stage:owner"
         reason += f"; {MAX_ATTEMPTS} attempts without a PR, so it leaves the pool until the owner or monitor looks"
-    release(args.issue, args.loop, args.token, reason, to, fail=True)
+    note = release_note({"done": args.done, "blocked": args.blocked, "next": args.next})
+    release(args.issue, args.loop, args.token, reason, to, fail=True, note=note)
     claim_file = os.environ.get("WRK_CLAIM_FILE")
     if claim_file:
         pathlib.Path(claim_file).unlink(missing_ok=True)
@@ -690,6 +708,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--to", default="stage:triage", choices=["stage:triage", "stage:ready", "stage:owner"]
     )
+    p.add_argument("--done", default="", help="release note: what works now, on the branch")
+    p.add_argument("--blocked", default="", help="release note: what stopped the session")
+    p.add_argument("--next", default="", help="release note: where the next worker starts")
     p = sub.add_parser("finish")
     p.add_argument("--claim-file", required=True)
     p.add_argument("--loop", default=os.environ.get("WRK_K", ""))

@@ -1712,6 +1712,17 @@ def test_monitor_is_asked_to_split_an_issue_that_keeps_failing() -> None:
     h.step()
     check("once", sum("has failed" in e for e in h.pool.events), 2)
     check("a closed issue is forgotten", sorted(h.pool.book.failed_tries), [9, 10, 11, 12])
+    rel = Rig(state([iss(14, ["stage:triage", "P2"])]))
+    for k in (1, 2):
+        w = ccpool.Session(rel.pool, ccpool.Unit("worker", "implement", f"wrk:14@{k}", "wrk:14", 14, (0, 14)), 40 + k)
+        w.dir.mkdir(parents=True)  # claim.py release removed the claim file
+        rel.pool.finished(w, ccpool.RELEASED)
+    rel.step()
+    ends = [json.loads(x) for x in (rel.pool.cfg.logdir / "pool.jsonl").read_text().splitlines() if '"end"' in x]
+    check("a unit that released its claim itself ends 'released', not ok, and two of them ask for a split",
+          ([e["outcome"] for e in ends], rel.pool.book.failed_tries[14],
+           [e.split(":")[0] for e in rel.pool.events if "has failed" in e]),
+          (["released", "released"], 2, ["#14 has failed 2 times and is not merged"]))
     off = Rig(state([iss(9, ["stage:triage"])]), decompose_after=0)
     off.pool.book.failed_tries[9] = 5
     off.step()
@@ -5382,6 +5393,7 @@ def test_a_worker_with_no_pull_request_is_not_ok() -> None:
         for finished, sweeping, want, no_fail in (("#5: pr #9", False, "ok", False),
                                                   ("#5: released to stage:triage", False, "ended without a pull request", False),
                                                   ("#5: released", False, "ok", False),
+                                                  ("no claim", False, "released", False),
                                                   ("#5: released to stage:triage", True, ccpool.BG_CUT, True)):
             pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh="true", kill_leftovers=False,
                                              caps={r: 0 for r in ccpool.ROLES}, timeouts={"worker": "45m"}),
@@ -5413,6 +5425,33 @@ def test_a_worker_with_no_pull_request_is_not_ok() -> None:
     finally:
         ccpool.Session.sh = real_sh
         restore()
+
+
+def test_the_next_worker_starts_from_the_release_note() -> None:
+    """Released units read as much as any other before their first edit, and the next worker
+    on the issue started over: release notices were left out of its prompt."""
+    note = ("<!-- worker -->\n<!-- release loop=7 token=t to=stage:triage fail=1 -->\n"
+            "Claim released (stage:triage): the map tiles never load in tests\n\n" + ccpool.claimlib.RELEASE_NOTE
+            + "\n- Done: the tile layer and its test, on issue-4\n- Blocked by: the test server has no tile proxy\n"
+              "- Next: src/map.js (40-90): mock the tile URL in tests/e2e/conftest.py")
+    claim = "<!-- worker -->\n<!-- claim loop=9 token=u -->\nClaimed"
+    thread = {"body": "Show the map", "comments": [{"a": "bot", "b": note}, {"a": "bot", "b": claim}]}
+    got = ccpool.release_note(thread)
+    check("the newest release's reason and note, without the markers",
+          got.splitlines(), ["Claim released (stage:triage): the map tiles never load in tests",
+                             "- Done: the tile layer and its test, on issue-4",
+                             "- Blocked by: the test server has no tile proxy",
+                             "- Next: src/map.js (40-90): mock the tile URL in tests/e2e/conftest.py"])
+    plain = "<!-- worker -->\n<!-- release loop=8 token=v to=stage:triage fail=1 -->\nClaim released (stage:triage): x"
+    check("a newer release without a note: none", ccpool.release_note({"comments": [{"b": note}, {"b": plain}]}), "")
+    c = {"issue": 4, "token": "tok", "title": "Map", "from": "stage:triage"}
+    prompt = ccpool.worker_prompt(c, "3", "45m", "8", wip="abc WIP", issue="Show the map", note=got)
+    check("the worker's prompt quotes it and says to start there; release asks for the note's three lines",
+          ("released it with this note" in prompt, "    - Next: src/map.js (40-90)" in prompt,
+           '--done "<what works now' in prompt and "--next" in prompt), (True, True, True))
+    check("not for a PR that came back (its comments say what to fix)",
+          "released it with this note" in ccpool.worker_prompt({**c, "pr": {"number": 9, "branch": "issue-4"}}, "3",
+                                                               "45m", "8", note=got), False)
 
 
 def test_research_then_a_fresh_implement_conversation() -> None:

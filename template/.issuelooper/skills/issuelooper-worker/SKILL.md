@@ -71,8 +71,8 @@ cd "$WT" || exit 1  # then run the worktree setup from .issuelooper/project.md
 
 - **Your prompt names an earlier worker's branch** (`origin/issue-$N`): start
   from it instead (`worktree add -B issue-$N "$WT" origin/issue-$N`), read its
-  commits and the release comment on #N, and continue. Rebase onto
-  `origin/main` before the sweep.
+  commits and the release note your prompt quotes (or the release comment on #N),
+  and continue from where it says. Rebase onto `origin/main` before the sweep.
 - **Your prompt names an open PR**: check out its branch the same way, read the
   newest comments on the PR, fix what they ask, and update that PR (step 6).
 - Never edit `$SHARED_REPO_PATH` itself: Gate 0 refuses every merge while it is
@@ -278,9 +278,15 @@ worker). Say once on the issue what blocked you and what is left
 `<!-- worker -->`), then give the claim back:
 
 ```bash
-python3 .issuelooper/hooks/claim.py release $N --token $T --reason "<one line>"                  # back to the pool
-python3 .issuelooper/hooks/claim.py release $N --token $T --reason "<one line>" --to stage:owner # needs a decision
+python3 .issuelooper/hooks/claim.py release $N --token $T --reason "<one line>" \
+  --done "<what works now, on the branch>" --blocked "<what stopped you>" \
+  --next "<where the next worker starts: files with line ranges, the first step>"   # back to the pool
+# add --to stage:owner when it needs the owner's decision
 ```
+
+The `--done`, `--blocked` and `--next` lines become a release note in a fixed format on
+the issue, and the next worker gets it in its prompt with your branch: write what it
+needs to go on without reading everything again.
 
 - The acceptance contradicts the spec or an existing test: `--to stage:owner`.
 - It needs another open issue first: record the dependency
