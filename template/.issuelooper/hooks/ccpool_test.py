@@ -911,7 +911,7 @@ def test_acceptance_batches_the_merged_issues_in_the_build() -> None:
                   iss(7, ["stage:accept", "hold:monitor"]), iss(8, ["stage:accept"])]
         h = Rig(state(issues), accept=True, accept_paths=["src/"], accept_batch=3, live=True)
         h.pool.track_accept = lambda st: None
-        h.pool.settle_accept = lambda *a: []  # settle_accept has its own case
+        h.pool.settle_accept = lambda *a, **k: []  # settle_accept has its own case
         b = h.pool.book
         b.accept_ready, b.accept_target = [4, 5, 6, 7], "d" * 40
         b.accept_merged = {4: {"pr": 14, "sha": "x", "live": False, "t": 0}, 6: {"pr": 16, "sha": "y", "live": False, "t": 0}}
@@ -953,7 +953,7 @@ def test_acceptance_units_run_side_by_side_and_never_share_an_issue() -> None:
         h = Rig(state([iss(n, ["stage:accept", "P1"]) for n in range(1, 10)]),
                 accept=True, accept_paths=["src/"], accept_batch=2, accept_units=3)
         h.pool.track_accept = lambda st: None
-        h.pool.settle_accept = lambda *a: []
+        h.pool.settle_accept = lambda *a, **k: []
         b = h.pool.book
         b.accept_ready, b.accept_target = [1, 2, 3, 4, 5], "d" * 40
         started = h.step()
@@ -1239,7 +1239,7 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     unit = ccpool.Unit("tester", "accept", "accept:x", "tst:accept", None, (2, 1, 0),
                        {"sha": "d" * 40, "issues": [{"n": 9, "title": "sheet", "live": False, "since": since}]})
 
-    def settle(comments, labels=("stage:accept",), finished=True):
+    def settle(comments, labels=("stage:accept",), finished=True, logdir=None):
         log = d / "gh.log"
         log.write_text("")
         pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", gh=str(gh), accept=True, accept_paths=["src/"]),
@@ -1247,7 +1247,7 @@ def test_acceptance_verdicts_settle_themselves() -> None:
         os.environ.update(FAKE_GH_LOG=str(log), ISSUELOOPER_LOGIN="loop-bot", FAKE_GH_VIEW=json.dumps(
             {"state": "OPEN", "labels": [{"name": x} for x in labels], "comments": comments}))
         try:
-            verified = pool.settle_accept(unit, started, finished)
+            verified = pool.settle_accept(unit, started, finished, logdir=logdir)
         finally:
             for k in ("FAKE_GH_LOG", "ISSUELOOPER_LOGIN", "FAKE_GH_VIEW"):
                 os.environ.pop(k, None)
@@ -1298,6 +1298,36 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     calls, pool, verified = settle([mark(ccpool.ACCEPT_RETRY), tester("rows: lang:ja\naccept-verified: script")])
     check("left out again: back to stage:triage", (verified, calls[0]),
           ([], "issue edit 9 --remove-label stage:accept --add-label stage:triage"))
+    # Every verdict listed the always rows and the saved script's header named them; nothing ran them.
+    logdir = d / "unit"
+    (logdir / "accept").mkdir(parents=True)
+    script = logdir / "accept" / "test_accept_9.py"
+    named = tester("rows: viewport:320x640 lang:ja always:reload-mid-task\naccept-verified: script")
+    script.write_text("# accept-rows: viewport:320x640 lang:ja always:reload-mid-task\ndef test_accept_9(page):\n"
+                      "    page.goto(url)\n    expect(page.locator('#feed')).to_be_visible()\n")
+    calls, pool, verified = settle([named], logdir=logdir)
+    check("the saved script names an always row only in its header: not verified, a fresh session checks again",
+          (verified, ccpool.ACCEPT_RETRY in calls[0], "always:reload-mid-task" in calls[0]), ([], True, True))
+    script.write_text("# accept-rows: viewport:320x640 lang:ja always:reload-mid-task\ndef test_accept_9(page):\n"
+                      "    # always:reload-mid-task: reload while a reply streams\n    page.reload()\n"
+                      "    expect(page.locator('.bubble')).to_have_count(1)\n    # viewport:320x640\n"
+                      "    page.set_viewport_size({'width': 320, 'height': 640})\n")
+    calls, pool, verified = settle([named], logdir=logdir)
+    check("a block for the row with an assertion in it: verified", verified, [9])
+    script.unlink()
+    calls, pool, verified = settle([named], logdir=logdir)
+    check("no script saved: its always rows are not checked", verified, [])
+    check("a row's comment with no assertion before the next row's block does not count",
+          ccpool.unasserted_rows("# always:a-b\npage.reload()\n# viewport:320x640\nassert ok\n# always:c-d\nassert x\n",
+                                 ["always:a-b", "viewport:320x640", "always:c-d"]), ["always:a-b"])
+    rows = unit.info["issues"][0]["rows"]
+    unit.info["issues"][0].update(rows=[], live=True)
+    calls, pool, verified = settle([tester("accept-verified: Playwright, scripted mode")], logdir=logdir)
+    check("an issue marked live, verified without saying live mode: not verified",
+          (verified, "live mode" in calls[0]), ([], True))
+    calls, pool, verified = settle([tester("accept-verified: Playwright in live mode, en and ja")], logdir=logdir)
+    check("verified in live mode: closed", verified, [9])
+    unit.info["issues"][0].update(rows=rows, live=False)
     restore = with_env({"ACCEPT_CHECKLIST": json.dumps({"languages": ["ja"], "viewports": ["320x640"],
                                                         "always": ["reload mid-task and after"], "no_skip": ["lang:ja"]})})
     try:
@@ -1322,7 +1352,7 @@ def test_the_author_accepts_and_a_tester_checks_a_sample() -> None:
         h = Rig(state(issues), accept=True, accept_paths=["src/"], author_accept=True,
                 timeouts={"worker": "60m", "merger": "45m", "tester": "50m"})
         h.pool.track_accept = lambda st: None
-        h.pool.settle_accept = lambda *a: []
+        h.pool.settle_accept = lambda *a, **k: []
         h.pool.settle_author = lambda *a, **k: None  # its own case below
         b = h.pool.book
         b.accept_ready, b.accept_target = [4, 5, 6], "d" * 40
@@ -1468,7 +1498,7 @@ def test_verdicts_settle_whatever_ended_the_session() -> None:
                           ("stopped with the supervisor", 1), ("ok", 1), ("startup crash (exit 1)", 0)):
         h = Rig(state([iss(9, ["stage:accept"])]), accept=True, accept_paths=["src/"])
         calls = []
-        h.pool.settle_accept = lambda u, started, finished, calls=calls: calls.append(finished) or []
+        h.pool.settle_accept = lambda u, started, finished, logdir=None, calls=calls: calls.append(finished) or []
         h.pool.accept_chore = lambda *a: None
         u = ccpool.Unit("tester", "accept", "accept:x", "tst:accept0", None, (2,),
                         {"sha": "d" * 40, "issues": [{"n": 9, "title": "t", "since": ""}]})

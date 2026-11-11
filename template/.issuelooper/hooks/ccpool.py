@@ -3005,10 +3005,13 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             "you could not run the check at all; neither when something is wrong or missing (say what). Before "
             "that line, name the checklist rows you ran on a line `rows: <ids>`, and a row that cannot apply on a "
             "line `skip: <id> <why>`: an accept-verified that leaves out a row listed for the issue counts as "
-            "not verified."
+            "not verified. For an issue marked live mode, run it in live mode and say `live mode` on the "
+            "accept-verified line; a verdict that does not counts as not verified."
             + (f"\n\n{cl}" if cl else "")
-            + "\n\nSave the script of each issue you verify as $LOGDIR/accept/test_accept_<N>.py, and write "
-            "$LOGDIR/accept_report.md, one line per issue: its number and verdict."
+            + "\n\nSave the script of each issue you verify as $LOGDIR/accept/test_accept_<N>.py, with each "
+            "`always:` row in a block of its own: a comment line naming the row id, then its steps and at least one "
+            "assertion (`expect(...)` or `assert`). A row named only in the `# accept-rows:` header counts as not "
+            "checked. Write $LOGDIR/accept_report.md, one line per issue: its number and verdict."
             + rules
         )
     where = (
@@ -3181,15 +3184,65 @@ ACCEPT_SKIP = re.compile(r"(?im)^[ \t>*-]*skip:[ \t]*(\S+?):?[ \t]+\S")
 ACCEPT_SKIP_LINE = re.compile(r"(?im)^[ \t>*-]*skip:.*$")
 
 
-def unchecked_rows(body: str, rows: list[str]) -> list[str]:
+def unchecked_rows(body: str, rows: list[str], script: str | None = None) -> list[str]:
     """The checklist rows (ids) a verdict comment neither names nor skips with a reason. A
     skip of a row in [accept] no_skip does not count. Verdicts that left rows out were
-    where verified issues later failed."""
+    where verified issues later failed. With script (the saved acceptance script, '' when
+    none was saved), also the `always:` rows it has no assertion block for (unasserted_rows):
+    verdicts listed every row, and the script's header line named them, while nothing ran them."""
     text = ACCEPT_SKIP_LINE.sub("", body).lower()  # a skip line names its row without running it
     no_skip = config.checklist()["no_skip"]
     skipped = {m.group(1).lower() for m in ACCEPT_SKIP.finditer(body)} - {r.lower() for r in no_skip}
     named = {r for r in rows if re.search(rf"(?<![\w:-]){re.escape(r.lower())}(?![\w-])", text)}
-    return [r for r in rows if r not in named and r.lower() not in skipped]
+    unasserted = set(unasserted_rows(script, rows)) if script is not None else set()
+    return [r for r in rows if (r not in named or r in unasserted) and r.lower() not in skipped]
+
+
+ROW_ASSERT = re.compile(r"\bassert\b|\bexpect\s*\(")
+
+
+def unasserted_rows(script: str, rows: list[str]) -> list[str]:
+    """The `always:` rows (ids) a saved acceptance script has no assertion block for: a
+    comment line naming the row, then at least one assertion (`assert`, `expect(`) before
+    the next comment that names a checklist row. The `# accept-rows:` and `# accept-skip:`
+    lines name rows without checking them."""
+    always = [r for r in rows if r.startswith("always:")]
+
+    def names(line: str, ids: list[str]) -> set[str]:
+        return {r for r in ids if re.search(rf"(?<![\w:-]){re.escape(r.lower())}(?![\w-])", line.lower())}
+    covered: set[str] = set()
+    block: set[str] = set()
+    for line in script.splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            if not re.match(r"#\s*accept-(?:rows|skip):", s) and names(s, rows):
+                block = names(s, always)
+            continue
+        if block and ROW_ASSERT.search(line):
+            covered |= block
+    return [r for r in always if r not in covered]
+
+
+LIVE_RUN = re.compile(r"(?im)^[ \t>*-]*(?:live-verified:|accept-verified:.*\blive\b)")
+
+
+def live_unproven(body: str, item: dict) -> bool:
+    """Whether a verified verdict on an issue marked live (needs:live, or a change to the
+    [accept.triggers] live paths) fails to say it ran in live mode: its `accept-verified:`
+    line must name it (or the verdict is `live-verified:`). Fewer than half of such verdicts
+    ran live mode, and live defects went out verified."""
+    return bool(item.get("live")) and not LIVE_RUN.search(body)
+
+
+def script_of(logdir: pathlib.Path | None, item: dict) -> str | None:
+    """The acceptance script the tester saved for item (its issue), '' when it saved none,
+    None when there is no unit directory to look in or the issue is a split (no script)."""
+    if logdir is None or str(item.get("title", "")).startswith("Split "):
+        return None
+    try:
+        return (logdir / "accept" / f"test_accept_{item['n']}.py").read_text(errors="replace")
+    except OSError:
+        return ""
 
 
 SHOT = re.compile(r"\S+\.(?:png|jpe?g|webp)\b", re.I)
@@ -6133,7 +6186,7 @@ class Pool:
                 # clean end).
                 if not outcome.startswith("startup crash"):
                     settle = self.settle_after if u.info.get("after") else self.settle_accept
-                    verified = settle(u, w.started, outcome == "ok")
+                    verified = settle(u, w.started, outcome == "ok", logdir=w.dir)
                     self.accept_chore(w.dir, verified, {x["n"]: x.get("title", "") for x in u.info["issues"]})
             finally:
                 with self.lock:
@@ -7758,7 +7811,7 @@ class Pool:
                 "skipped": states["skip"], "pending": states["wait"] + states["ready"] + states["new"],
                 "blocked": states["blocked"], **self.sample_stats()}
 
-    def settle_after(self, u: Unit, started: float, finished: bool) -> list[int]:
+    def settle_after(self, u: Unit, started: float, finished: bool, logdir: pathlib.Path | None = None) -> list[int]:
         """Act on the tester's verdict on each closed issue of an [accept] mode "after" unit:
         `accept-verified:` labels it accept:verified; `accept-blocked:` tells the monitor; any
         other verdict is checked once more by a fresh session before it counts (a false
@@ -7802,7 +7855,8 @@ class Pool:
                         self.book.accept_rounds[n] += 1
                 continue
             body, url = str(verdicts[-1].get("body", "")), verdicts[-1].get("url", "")
-            missing = unchecked_rows(body, x.get("rows") or []) if ACCEPT_VERIFIED.search(body) else []
+            missing = (unchecked_rows(body, x.get("rows") or [], script_of(logdir, x))
+                       + (["live mode"] if live_unproven(body, x) else [])) if ACCEPT_VERIFIED.search(body) else []
             retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
                           for c in comments)
             if ACCEPT_BLOCKED.search(body):
@@ -7816,7 +7870,9 @@ class Pool:
                 self.record_sample(n, True)
                 how = "verified"
             elif not retried:
-                why = (f"names no checklist row {', '.join(missing)}" if missing else "did not show the behavior")
+                why = (f"left out {', '.join(missing)} (each row named in the verdict and asserted in its own block "
+                       "of the saved script; live mode said on the verdict line)" if missing
+                       else "did not show the behavior")
                 self.gh("issue", "comment", str(n), "--body",
                         f"<!-- merger -->\n{ACCEPT_RETRY}\nThe post-merge check {why} ({url}). A fresh tester session "
                         "checks it once more before it counts.")
@@ -7986,7 +8042,7 @@ class Pool:
         return {"pr": p.get("number"), "sha": str((p.get("mergeCommit") or {}).get("oid") or ""),
                 "live": touches_live(files), "t": self.clock(), "files": files}
 
-    def settle_accept(self, u: Unit, started: float, finished: bool) -> list[int]:
+    def settle_accept(self, u: Unit, started: float, finished: bool, logdir: pathlib.Path | None = None) -> list[int]:
         """Act on the acceptance tester's verdict on each issue of its batch, as settle_live
         does: `accept-verified:` (or `live-verified:`) closes it, `accept-blocked:` sends it
         to the owner. A failure is checked once more by a fresh session before it counts:
@@ -8034,12 +8090,16 @@ class Pool:
                 self.event(f"#{n}: the acceptance check could not run (accept-blocked); moved to stage:owner. "
                            "Tell the owner what is missing.")
                 how = "blocked"
-            elif ACCEPT_VERIFIED.search(body) and unchecked_rows(body, x.get("rows") or []):
-                missing = unchecked_rows(body, x.get("rows") or [])
+            elif ACCEPT_VERIFIED.search(body) and (unchecked_rows(body, x.get("rows") or [], script_of(logdir, x))
+                                                   or live_unproven(body, x)):
+                missing = (unchecked_rows(body, x.get("rows") or [], script_of(logdir, x))
+                           + (["live mode"] if live_unproven(body, x) else []))
                 retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
                               for c in comments)
-                why = (f"The acceptance check says accept-verified ({url}) but does not name these checklist rows, "
-                       f"which the merged change needs: {', '.join(missing)}.")
+                why = (f"The acceptance check says accept-verified ({url}) but leaves out what the merged change "
+                       f"needs: {', '.join(missing)}. Each checklist row is named in the verdict and asserted in its "
+                       "own block of the saved script, and an issue marked live is checked in live mode, said on the "
+                       "accept-verified line.")
                 if not retried:
                     self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_RETRY}\n{why} A fresh "
                             "tester session checks it once more, through every row, before it counts.")

@@ -136,13 +136,18 @@ issue:
 accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en and ja, scripted mode>
 ```
 
-   only when every part works. `accept-blocked: <what is missing>` when you could
+   only when every part works. For an issue your prompt marks live mode, run it in live
+   mode and say `live mode` on that line: a verdict that does not counts as not verified. `accept-blocked: <what is missing>` when you could
    not run the check at all (credentials, a server that does not start). Neither
    line when something is wrong or missing: say what, and where. The supervisor
    closes, sends to the owner, or has a fresh session check the failure again
    before it goes back to a worker.
 4. For an issue you verified, save the script as `$LOGDIR/accept/test_accept_<N>.py`.
-   It becomes the issue's regression test, so keep only what a user sees: no reads of
+   Put each `always:` row in a block of its own: a comment line naming the row id
+   (`# always:reload-mid-task: ...`), then its steps and at least one assertion
+   (`expect(...)` or `assert`). The supervisor refuses a verified verdict whose script has
+   no such block for a row the issue needs; naming it in the `# accept-rows:` header is
+   not enough. It becomes the issue's regression test, so keep only what a user sees: no reads of
    source files, line counts or file structure (a split issue's script is not saved
    at all), one page, waits on what the page shows rather than fixed sleeps. It starts
    from a fresh state it makes itself: its own browser context, and a fresh server-side

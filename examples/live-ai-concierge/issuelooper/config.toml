@@ -101,6 +101,7 @@ no_skip = ["live:voice-and-typed"]   # rows a live check may not skip: the fake 
 [accept.triggers]
 "src/concierge/static/*" = ["viewports", "languages"]
 "src/concierge/main.py" = ["live"]
+"src/concierge/live*" = ["live"]  # the live session code split out of main.py: its post-merge checks run in live mode
 
 [ux]
 enabled = true               # POOL_UX: a tester walks the deployed app as a user and files findings
