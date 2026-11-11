@@ -157,6 +157,7 @@ KEYS = {
     ("accept", "batch"): "POOL_ACCEPT_BATCH",
     ("accept", "guard"): "ACCEPT_GUARD",
     ("accept", "guard_timeout_s"): "POOL_ACCEPT_GUARD_S",
+    ("accept", "guard_workers"): "POOL_ACCEPT_GUARD_WORKERS",
     ("accept", "units"): "POOL_ACCEPT_UNITS",
     ("accept", "chore_priority"): "POOL_ACCEPT_CHORE_PRIORITY",
     ("accept", "chore_batch"): "POOL_ACCEPT_CHORE_BATCH",

@@ -101,11 +101,15 @@ flowchart TD
     CheckMain -->|"main also fails"| MainRed["File P0 'main is red'<br/>Blame no PR in batch"]
     CheckMain -->|"main passes (or test is new)"| Bisect["Bisect intermediate trees by halving<br/>to find first breaking PR"]
     Bisect --> Split["• Earlier PRs merge (once full check passes on their tree)<br/>• Breaking PR handed back with failing test names<br/>• Later PRs wait for next train"]
+    Bisect -->|"earlier PRs fail their own check"| Inner["Bisect inside them<br/>(one PR: it goes back)"]
 ```
 
 Key details of the merge train:
 - **Batching (`[pool] train_size`, `train_wait_s`):** takes up to `train_size` (6) queued PRs, ordered by priority (`P0` first). If `train_wait_s` is set above 0, the supervisor waits up to that many seconds after the first PR enters the queue for others to join, unless the queue is already full or contains a `P0` PR.
-- **Guard isolation:** if acceptance guards (`[accept] guard`) fail when run together on the train tree but pass when run one at a time, the failure is treated as a test-isolation issue rather than blamed on the PR.
+- **Guard isolation:** if a few acceptance guards (`[accept] guard`) fail when run together on the train tree but pass when run one at a time, the failure is treated as a test-isolation issue rather than blamed on the PR. When more than 3 guards fail at once, the train skips the reruns and goes straight to the bisect: so many failures are a regression.
+- **Bisecting guard failures:** at each commit the bisect reruns the failing tests; when acceptance guards pass that rerun, it runs the whole guard there before it calls the commit green, because guards that break only beside each other (one PR changed state they all share) pass when rerun alone. The PR the halving finds goes back only after the PRs ahead of it pass their own full check. When they fail it, the bisect continues inside them, and a single PR that fails its own check goes back at once instead of leading the next train.
+- **Returning PRs:** a PR that a train handed back runs `[accept] guard` on its new head merged with `main` in its merge unit before it joins a train again. If the guard fails twice there, it goes back the same way (to its author with `[pool] author_guard`), and no train waits for it.
+- **Parallel guard (`[accept] guard_workers`):** a pytest guard runs on pytest-xdist workers when the project has xdist installed.
 - **Author guard recovery (`[pool] author_guard`):** when enabled, if a train's acceptance guard fails solely because of one PR, the supervisor resumes that PR's author conversation (up to `POOL_AUTHOR_GUARD_MAX` = 2 tries) to either fix the regression or document an intentional change with a `Guard change:` line in the PR body (verified by the review gate).
 
 ### When the merge train is off (`[pool] merge_train = false`)
@@ -170,7 +174,7 @@ flowchart LR
 
 When `[accept] guard` is set (for example `uv run pytest -q tests/accept`), the verification scripts from issues accepted by a tester are batched into a `P2` chore issue (`[accept] chore_priority`, one chore per `[accept] chore_batch` = 5 scripts or every `chore_every_s` = 3600 s; new scripts are appended to an unclaimed open chore when `chore_append = true`).
 
-1. A worker claims the chore and converts the scripts into compact, fast pytest tests under `tests/accept/test_accept_<N>.py` (using scripted mode, the shared app fixture, no fixed sleeps, and no source-text assertions).
+1. A worker claims the chore and converts the scripts into fast pytest tests under `tests/accept/test_accept_<N>.py` (using scripted mode, the shared app fixture only for checks that rely on no server-side state, a fresh-state fixture for the rest, no fixed sleeps, and no source-text assertions). Each test makes its own isolation through that fixture, never relying on isolation the app happens to give each browser today, and the worker runs the whole `tests/accept/` suite before the PR, so a test that passes alone but fails beside the others does not land.
 2. `role_guard.py` allows only acceptance-chore PRs to add files under `tests/accept/`, keeping ordinary workers' unit and e2e tests out of the deploy guard. Split issues do not generate guard tests.
 3. On every new build (and inside every merge-train run, with timeout `[accept] guard_timeout_s` = 1200 s), the supervisor runs `[accept] guard` directly with no model call. Any test that fails after 2-of-3 flake reruns automatically files a `P1` issue titled `Regression of #N: <test>`.
 

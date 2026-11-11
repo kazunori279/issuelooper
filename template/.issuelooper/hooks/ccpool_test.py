@@ -3244,7 +3244,8 @@ def test_a_train_prefix_merges_only_when_checked_and_guards_rerun_alone() -> Non
     cars = [{"pr": 126, "issue": 1, "head": "1" * 40, "commit": "c1" * 20},
             {"pr": 129, "issue": 2, "head": "2" * 40, "commit": "c2" * 20}]
     h.pool.train_red_at = lambda wt, commit, failing: (commit == "c2" * 20, "")  # PR 129's tree fails
-    h.pool.train_hand_back = lambda *a, **k: None
+    backs = []
+    h.pool.train_hand_back = lambda car, ahead, base, failing, out, *a, **k: backs.append((car["pr"], failing))
     h.pool.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
     landed = []
     h.pool.train_land = lambda base, cs, out, checked: landed.append(([c["pr"] for c in cs], checked))
@@ -3253,9 +3254,32 @@ def test_a_train_prefix_merges_only_when_checked_and_guards_rerun_alone() -> Non
     h.pool.train_bisect("/nowhere", "a" * 40, cars, "FAILED tests/e2e/test_x.py::t")
     check("the prefix fails its own full check (a broken guard): nothing lands, the monitor hears",
           (landed, any("failed its own full check" in e for e in h.pool.events)), ([], True))
+    check("a prefix of one PR that fails its own check goes back with what failed there; the PR after it is "
+          "not blamed (it waits for the next train)", backs, [(126, ["tests/accept/test_accept_50.py::t"])])
+    backs.clear()
     h.pool.train_check = lambda wt: (True, "green")
     h.pool.train_bisect("/nowhere", "a" * 40, cars, "FAILED tests/e2e/test_x.py::t")
-    check("checked green on exactly its tree: it lands as checked", landed, [([126], True)])
+    check("checked green on exactly its tree: it lands as checked, and only then is the PR after it blamed",
+          (landed, backs), ([([126], True)], [(129, ["tests/e2e/test_x.py::t"])]))
+    three = cars + [{"pr": 131, "issue": 3, "head": "3" * 40, "commit": "c3" * 20}]
+    m = Rig(state())
+    m.pool.git = h.pool.git
+    m.pool.train_land = lambda *a, **k: None
+    m.pool.train_second_look = lambda wt, base, cs, out: (False, out)
+    m.pool.train_hand_back = lambda car, ahead, base, failing, out, *a, **k: backs.append((car["pr"], failing))
+    # The first halving clears #126 and #129 and blames #131; the full check of [#126, #129] fails, and the
+    # halving inside it finds #126.
+    asked = []
+
+    def red_at(wt, commit, failing):
+        asked.append(commit)
+        return commit == "c1" * 20 and asked.count(commit) > 1, ""
+    m.pool.train_red_at = red_at
+    m.pool.train_check = lambda wt: (False, "FAILED tests/accept/test_accept_9.py::t")
+    backs.clear()
+    m.pool.train_bisect("/nowhere", "a" * 40, three, "FAILED tests/accept/test_accept_9.py::t")
+    check("a longer prefix that fails its own check is bisected in turn: its first failing PR goes back, the "
+          "blamed PR after it waits", [b[0] for b in backs], [126])
     g = Rig(state(), rerun_cmd="pytest {tests}")
     runs = []
     g.pool.rerun_tests = lambda wt, ids, env=None: (runs.append(list(ids)) or (len(ids) == 1, ""))
@@ -3273,6 +3297,118 @@ def test_a_train_prefix_merges_only_when_checked_and_guards_rerun_alone() -> Non
           "with those guards deselected (the sweep was green)",
           (ok, any("test isolation" in e for e in g.pool.events), rest),
           (True, True, [" ".join(f"--deselect {t}" for t in guards)]))
+
+
+def test_a_guard_regression_is_blamed_on_the_pr_that_breaks_it() -> None:
+    """One PR broke the shared state the acceptance guards use: many guards failed together and
+    passed alone. The bisect reran only the failing guards, cleared that PR, and blamed the PR
+    after it; the culprit led the next train and failed it again; the guard step made a
+    passing check several times longer."""
+    guards = [f"tests/accept/test_accept_{k}.py::t" for k in (1, 2, 3, 4)]
+    h = Rig(state(), rerun_cmd="pytest {tests}", accept_guard="pytest tests/accept")
+    h.pool.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+    reruns, whole = [], []
+    h.pool.rerun_tests = lambda wt, ids, env=None: (reruns.append(list(ids)) or (True, "4 passed"))
+    h.pool.guard_tree = lambda wt, sha="", env=None: (whole.append(sha), (False, "\n".join(f"FAILED {t}" for t in guards)))[1]
+    check("guards that pass their rerun at a commit run again as the whole guard there, and fail: red",
+          (h.pool.train_red_at("/wt", "c" * 40, guards[:2])[0], whole), (True, ["c" * 40]))
+    h.pool.guard_checked.add("a" * 40)
+    check("a main whose guard the train already ran green is not run again", (h.pool.train_red_at("/wt", "a" * 40,
+          guards[:2])[0], whole), (False, ["c" * 40]))
+    check("a failing test that is not a guard keeps its rerun", (h.pool.train_red_at("/wt", "d" * 40,
+          ["tests/e2e/test_x.py::t"])[0], whole), (False, ["c" * 40]))
+    reruns.clear()
+    ok, _ = h.pool.train_second_look("/wt", "a" * 40, [{"pr": 7}], "sweep green" + ccpool.GUARD_SECTION
+                                     + "\n".join(f"FAILED {t}" for t in guards))
+    check("more than 3 failing guards: a regression, no reruns or one-at-a-time runs before the bisect",
+          (ok, reruns, any("no second look" in e for e in h.pool.events)), (False, [], True))
+
+    # The guard on pytest-xdist workers when the project has xdist.
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-xdist-"))
+    (d / "tests" / "accept").mkdir(parents=True)
+    log = d / "addopts.log"
+    for knows_n in (False, True):
+        log.write_text("")
+        refuse = "" if knows_n else ('case "$PYTEST_ADDOPTS" in *-n*) echo "pytest: error: unrecognized arguments: '
+                                     '-n 4" >&2; exit 4;; esac; ')
+        p = ccpool.Pool(ccpool.Config(logdir=d / f"pool{knows_n}", accept_guard=f'echo "[$PYTEST_ADDOPTS]" >> {log}; '
+                                      f'{refuse}echo "1 passed"  # pytest'), fetcher=state, spawn=False)
+        first = p.guard_tree(str(d))
+        second = p.guard_tree(str(d), env={"PYTEST_ADDOPTS": "--deselect a::b"})
+        check(f"xdist {'there' if knows_n else 'missing'}: the guard passes, with -n 4 "
+              f"{'from then on' if knows_n else 'tried once'}",
+              (first[0], second[0], p.guard_xdist, log.read_text().split()),
+              (True, True, True, ["[-n", "4]", "[--deselect", "a::b", "-n", "4]"]) if knows_n else
+              (True, True, False, ["[-n", "4]", "[]", "[--deselect", "a::b]"]))
+    off = ccpool.Pool(ccpool.Config(logdir=d / "off", accept_guard_workers=0,
+                                    accept_guard=f'echo "[$PYTEST_ADDOPTS]" >> {log}; echo ok  # pytest'),
+                      fetcher=state, spawn=False)
+    log.write_text("")
+    off.guard_tree(str(d))
+    check("POOL_ACCEPT_GUARD_WORKERS=0: one process", log.read_text().split(), ["[]"])
+    restore = with_env({"POOL_ACCEPT_GUARD_WORKERS": ""})
+    check("4 workers by default", ccpool.Config.from_env().accept_guard_workers, 4)
+    restore()
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_pr_back_from_a_red_train_runs_its_guard_before_the_next_train() -> None:
+    """A PR the train handed back for guards it broke came back, led the next train and failed
+    it the same way: every PR queued behind it waited another full check."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-return-"))
+    work, g = git_repo(d)
+    (work / "tests" / "accept").mkdir(parents=True)
+    (work / "tests" / "accept" / "test_accept_1.py").write_text("def test_a(): pass\n")
+    g("add", "-A")
+    g("commit", "-qm", "base")
+    g("push", "-q", "origin", "HEAD:main")
+    g("checkout", "-qb", "issue-3")
+    (work / "pr3").write_text("x\n")
+    g("add", "pr3")
+    g("commit", "-qm", "pr 3")
+    g("push", "-q", "origin", "issue-3")
+    head = g("rev-parse", "HEAD")
+    g("checkout", "-q", "main")
+    restore = with_env({"SHARED_REPO_PATH": str(work)})
+    try:
+        pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", merge_train=True, accept_guard="pytest tests/accept"),
+                           fetcher=state, spawn=False)
+        w = ccpool.Session(pool, ccpool.Unit("auto", "merge", "merge:30@x", "mrg:30", 30, (0,),
+                                             {"issue": 3, "head": head, "branch": "issue-3"}), 1)
+        w.dir.mkdir(parents=True)
+        trees, backs = [], []
+        results = []
+        pool.guard_tree = lambda wt, sha="", env=None: (trees.append(sorted(p.name for p in pathlib.Path(wt).iterdir())),
+                                                        results.pop(0))[1]
+        pool.train_hand_back = lambda car, ahead, base, failing, out, *a, **k: backs.append((car["pr"], failing, k))
+        check("a PR no train has failed: no guard run here", (w.returning_guard(30, 3, head, "issue-3"), trees), ("", []))
+        pool.book.train_failed[30] = "e" * 40
+        results[:] = [(False, "FAILED tests/accept/test_accept_1.py::test_a"),
+                      (False, "FAILED tests/accept/test_accept_1.py::test_a")]
+        out = w.returning_guard(30, 3, head, "issue-3")
+        check("back from a red train: the guard runs on its head merged with main, fails twice, and it goes back "
+              "the way the train sends it, with no train held for it",
+              (out, "pr3" in trees[0], backs[0][:2], "acceptance guard" in backs[0][2].get("what", "")),
+              ("refused by the acceptance guard (handed back)", True,
+               (30, ["tests/accept/test_accept_1.py::test_a"]), True))
+        results[:] = [(False, "FAILED tests/accept/test_accept_1.py::test_a"), (True, "1 passed")]
+        check("red once and green once: a flake, it goes on to the train",
+              (w.returning_guard(30, 3, head, "issue-3"), 30 in pool.book.train_failed), ("", False))
+        pool.book.train_failed[30] = "e" * 40
+        results[:] = [(None, "No space left on device")]
+        check("a guard that could not run holds it", w.returning_guard(30, 3, head, "issue-3"),
+              "held (its acceptance guard could not run before the train)")
+    finally:
+        restore()
+        shutil.rmtree(d, ignore_errors=True)
+    h = Rig(state([iss(5, ["stage:pr"])], prs=[pr(50, 5)]), gh=gh_log())
+    h.pool.hand_back = lambda *a: None
+    h.pool.train_hand_back({"pr": 50, "issue": 5, "head": "b" * 40}, [], "a" * 40, ["tests/e2e/test_a.py::t"],
+                           "FAILED tests/e2e/test_a.py::t")
+    check("a train's hand-back remembers the head it failed", h.pool.book.train_failed, {50: "b" * 40})
+    h.st = state([iss(5, ["stage:triage"])])
+    h.step()
+    check("forgotten once the PR is gone", h.pool.book.train_failed, {})
 
 
 def test_leftover_processes_are_killed() -> None:

@@ -90,6 +90,7 @@ Configures post-merge acceptance (`"gate"`, `"after"`, or `"off"`), the shared w
 | `units` | `POOL_ACCEPT_UNITS` | `2` | Maximum concurrent acceptance tester units (a second starts only once a full batch is waiting). |
 | `guard` | `ACCEPT_GUARD` | `""` | Command that runs regression guard tests (such as `"uv run pytest -q tests/accept"`) on each deploy and in the merge train with no model call. |
 | `guard_timeout_s` | `POOL_ACCEPT_GUARD_S` | `1200` | Timeout in seconds for `guard`. |
+| `guard_workers` | `POOL_ACCEPT_GUARD_WORKERS` | `4` | A `guard` command that runs pytest gets `-n <this>` (through `PYTEST_ADDOPTS`) when the project has pytest-xdist; without xdist, the supervisor notices pytest's usage error once and runs the guard in one process from then on. `0` always runs one process. |
 | `author` | `POOL_AUTHOR_ACCEPT` | `false` | (`"gate"` mode only) Resume the author's conversation to accept its own issue on the deployed build, checked by independent testers. |
 | `sample` | `POOL_ACCEPT_SAMPLE` | `4` | In `"after"` mode (or `"gate"` with `author = true`), independent testers check all `sample_labels` issues (plus `P1` in `"after"` mode) and `1` in `sample` of the rest (`0` checks only labeled/P1 issues). |
 | `sample_labels` | `POOL_ACCEPT_SAMPLE_LABELS` | `["owner-request", "P0", "needs:live", "seed", "type:feature-request"]` | Labels (plus any `type:feature*` label) that are always checked by an independent tester. |

@@ -669,6 +669,8 @@ class Config:
     accept_batch: int = 6  # issues one acceptance unit checks at most
     accept_units: int = 2  # acceptance units side by side at most (one at a time fell an hour behind)
     accept_guard_s: float = 1200  # [accept] guard's time limit, in the train's check and after a deploy
+    # pytest-xdist workers for a pytest [accept] guard, when the project has xdist (0 = one process).
+    accept_guard_workers: int = 4
     accept_guard: str = ""  # [accept] guard: tests/accept run on each deploy (Pool.guard_due); empty = off
     # The priority acceptance chores are filed at. Run 11: four chores sat unclaimed at P2
     # behind the P1 queue (one also lacked type:chore, which the monitor added to the rest).
@@ -856,6 +858,7 @@ class Config:
             accept_batch=env_int("POOL_ACCEPT_BATCH", 6),
             accept_units=env_int("POOL_ACCEPT_UNITS", 2),
             accept_guard_s=float(e("POOL_ACCEPT_GUARD_S", "") or 1200),
+            accept_guard_workers=env_int("POOL_ACCEPT_GUARD_WORKERS", 4),
             accept_guard=e("ACCEPT_GUARD", "").strip(),
             accept_chore_priority=e("POOL_ACCEPT_CHORE_PRIORITY", "").strip() or "P2",
             accept_chore_batch=env_int("POOL_ACCEPT_CHORE_BATCH", 5),
@@ -1051,6 +1054,9 @@ def failing_tests(out: str) -> list[str]:
 
 
 FAST_TIMEOUT = "the fast check timed out after"
+# More acceptance guards than this failing in one train check: a regression, not flaky
+# tests, so the train skips its second look (train_second_look) and bisects at once.
+TRAIN_REGRESSION_GUARDS = 3
 # In a `Flaky test:` issue's body or comment: these tests failed and passed at one commit.
 FLAKY_MARK = "<!-- flaky: failed and passed at one commit -->"
 # In the body of the chore that turns verified acceptance scripts into tests/accept/: the
@@ -1281,6 +1287,9 @@ class Book:
         # author (POOL_AUTHOR_GUARD); PR -> guard-fix sessions on it since its last merge.
         self.guard_fix: dict[int, dict] = {}
         self.guard_runs: collections.Counter = collections.Counter()
+        # PR -> the head a merge train last failed: its next head runs the acceptance guard in its
+        # merge unit before it joins a train again (Session.returning_guard).
+        self.train_failed: dict[int, str] = {}
         # issue -> the conversation that last worked on it: {"conv", "cli", "t", "seq", "area", "slot",
         # "files" (what its branch changed)}; kept in owners.json across restarts (Pool.save_owners).
         self.convs: dict[int, dict] = {}
@@ -1734,6 +1743,8 @@ def plan(
         del book.handed_back[k]
     for k in set(book.train) - seen_prs:
         del book.train[k]  # merged or closed
+    for k in set(book.train_failed) - seen_prs:
+        del book.train_failed[k]
 
     # Never beside a running UX run: a slow run outlasts the gap, and the overlapping
     # runs test the same app and file the same findings.
@@ -4595,6 +4606,9 @@ class Session(threading.Thread):
         held = self.red_main_hold(pr, head, branch) or self.starve_hold(pr, head, branch)
         if held:
             return held  # before the sweep: a held PR costs none
+        held = self.returning_guard(pr, n, head, branch)
+        if held:
+            return held
         swept = None  # this unit's re-sweep of the head: None (none yet), True or False
         recheck = ""  # the earlier head whose live check gate 7 wants replayed on this one
         want_sweep = False  # the gates asked for a sweep
@@ -4703,6 +4717,53 @@ class Session(threading.Thread):
             return "held (the merge gates were not settled)"
         self.pool.after_merge(pr, n, head, bool(u.info.get("needs_live")), "the review gate and the merge gates passed")
         return "ok"
+
+    def returning_guard(self, pr: int, n: int, head: str, branch: str) -> str:
+        """'' unless a merge train failed this PR before (Book.train_failed) and the acceptance
+        guard, run here on its new head merged with main, fails twice: then it goes back the
+        way the train sends it (train_hand_back), and no train waits for it. A PR back from a
+        red train led the next train and failed it again, and every PR queued behind it waited."""
+        pool = self.pool
+        with pool.lock:
+            failed = pool.book.train_failed.get(pr)
+        if not (pool.cfg.merge_train and pool.cfg.accept_guard and failed):
+            return ""
+        root, wt = str(repo_root()), scratch(f"mrg-{pr}-guard")
+        remove_worktree(root, wt, pool.log)
+        try:
+            self.git(root, "fetch", "-q", "origin", "main", *([branch] if branch else []))
+            base = self.git(root, "rev-parse", "origin/main").stdout.strip()
+            if not base or self.git(root, "worktree", "add", "-q", "--detach", wt, base).returncode != 0:
+                return ""
+            m = self.git(wt, "-c", "user.name=ccpool", "-c", "user.email=ccpool@localhost", "merge", "-q", "--no-ff",
+                         "--no-edit", "-m", f"guard check: PR #{pr}", head)
+            if m.returncode != 0:
+                self.git(wt, "merge", "--abort")
+                return ""  # a conflict: the train skips it, and a merger or its author resolves it
+            ok, out = pool.guard_tree(wt, sha=head)
+            if ok is False:
+                ok, out = pool.guard_tree(wt, sha=head)  # once more: a single red run may be a flake
+            self.note(f"guard before the train: {'green' if ok else 'red' if ok is False else 'could not run'}")
+            pool.log("returning_guard", pr=pr, issue=n, head=head[:12], ok=ok,
+                     failing=failing_tests(out)[:5] if ok is False else [])
+            if ok is None:
+                return "held (its acceptance guard could not run before the train)"
+            if ok:
+                with pool.lock:
+                    pool.book.train_failed.pop(pr, None)
+                return ""
+            pool.train_hand_back({"pr": pr, "issue": n, "head": head}, [], base, failing_tests(out), out,
+                                 what="the acceptance guard (it failed a merge train before)")
+            with pool.lock:
+                to_author = pr in pool.book.guard_fix
+            pool.save_owners()
+            return ("held (its author fixes the acceptance guards it fails)" if to_author
+                    else "refused by the acceptance guard (handed back)")
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.note(f"guard before the train did not run: {exc!r}")
+            return ""
+        finally:
+            remove_worktree(root, wt, pool.log)
 
     def merge_checks(self, pr: int, n: int, head: str, branch: str, env: dict) -> str:
         """Before the gates: '' or the unit's outcome. A head swept on an older main says
@@ -5380,6 +5441,7 @@ class Pool:
         self.guard_sha = ""  # the last build the acceptance guard ran on (guard_due)
         self.guard_checked: set[str] = set()  # mains the train checked with the guard (no second run)
         self.guard_seconds = 0.0  # how long the acceptance guard last ran (consolidation_chore)
+        self.guard_xdist: bool | None = None  # whether the guard's pytest takes -n (None: not tried yet)
         self.main_green = ""  # the last main whose full check was green
         self.red_issue: int | None = None  # the open `main is red` issue
         self.red_looked = False  # whether GitHub was asked for one since this supervisor started
@@ -6063,7 +6125,7 @@ class Pool:
                  files=len(files), size=len(text), over=bool(self.cfg.notes_max_chars and len(text) > self.cfg.notes_max_chars))
         self.save_owners()
 
-    OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
+    OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "train_failed", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
              "area_seeds", "repo_seed", "area_wait_s", "notes", "parked")
 
     def save_owners(self) -> None:
@@ -6939,9 +7001,30 @@ class Pool:
             return True, ""
         t0 = time.time()
         config.link_shared_files(wt)
+        run_env = dict(os.environ, ACCEPT_SHA=sha, **(env or {}))
+        addopts = run_env.get("PYTEST_ADDOPTS", "")
+        # The guard grew to most of the train's check, one test after another. A pytest guard runs
+        # on POOL_ACCEPT_GUARD_WORKERS pytest-xdist workers when the project has xdist; a pytest
+        # that does not know -n says so once, and the guard runs in one process from then on.
+        xdist = bool(self.cfg.accept_guard_workers > 0 and self.guard_xdist is not False
+                     and re.search(r"\bpytest\b", self.cfg.accept_guard))
         try:
-            r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.accept_guard_s, cwd=wt,
-                               env=dict(os.environ, ACCEPT_SHA=sha, **(env or {})), stdin=subprocess.DEVNULL)
+            while True:
+                if xdist:
+                    run_env["PYTEST_ADDOPTS"] = f"{addopts} -n {self.cfg.accept_guard_workers}".strip()
+                r = self.run_owned(["bash", "-c", self.cfg.accept_guard], self.cfg.accept_guard_s, cwd=wt,
+                                   env=run_env, stdin=subprocess.DEVNULL)
+                if not xdist:
+                    break
+                xdist = False
+                self.guard_xdist = not (r.returncode == 4 and re.search(r"unrecognized arguments:.*-n\b",
+                                                                         r.stdout + r.stderr))
+                if self.guard_xdist:
+                    break
+                if addopts:
+                    run_env["PYTEST_ADDOPTS"] = addopts
+                else:
+                    run_env.pop("PYTEST_ADDOPTS", None)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, str(exc)
         self.guard_seconds = time.time() - t0
@@ -6973,6 +7056,13 @@ class Pool:
                 self.event(f"merge train of {self.train_label(cars)} failed only known flaky tests "
                            f"({', '.join(failing[:2])}); counted as green")
             return ok, rest
+        guards = [t for t in failing if "::" in t and t.startswith(ACCEPT_TESTS)]
+        if len(guards) > TRAIN_REGRESSION_GUARDS:
+            # Many guards failing at once are a regression, not flakiness: one PR broke the
+            # shared state they all use, and the reruns and one-at-a-time runs only took time.
+            self.event(f"merge train of {self.train_label(cars)}: {len(guards)} acceptance guards fail; "
+                       "no second look, it goes to the bisect")
+            return False, out
         again, out2 = self.two_of_three(lambda: self.rerun_tests(wt, failing))
         if again is False and self.passes_alone(wt, failing):
             # The failing tests are guards that pass one at a time on this very tree: they
@@ -7019,12 +7109,19 @@ class Pool:
         Failing means the same tests ran and failed there: a test that does not exist at
         that commit (pytest's "not found", a collection error) does not fail there, so
         it is the change of a PR after it. In run 10b a test only the PR had was "not
-        found" on main, and the train filed a false `main is red` and blamed nobody."""
+        found" on main, and the train filed a false `main is red` and blamed nobody.
+        Acceptance guards that passed their rerun are checked again with the whole guard at
+        that commit: guards that fail only beside the others (one PR changed state they all
+        share) pass when rerun alone, and the halving cleared the PR that broke them and
+        blamed the one after it."""
         if self.git("checkout", "-q", "--detach", commit, wt=wt).returncode != 0:
             return None, f"could not check out {commit[:12]}"
         ok, out = self.rerun_tests(wt, failing)
         if ok is None:
             ok, out = self.train_check(wt)
+        elif ok and self.cfg.accept_guard and commit not in self.guard_checked and \
+                [t for t in failing if "::" in t and t.startswith(ACCEPT_TESTS)]:
+            ok, out = self.guard_tree(wt, sha=commit)
         if ok is None or (ok is False and INFRA.search(out)):
             return None, out
         ids = {t for t in failing if "::" in t}
@@ -7034,8 +7131,10 @@ class Pool:
 
     def train_bisect(self, wt: str, base: str, cars: list[dict], out: str) -> None:
         """A red train: main alone first (its own failure blames no PR), then halve the
-        cars to find the first one whose tree fails. It goes back to its worker; the ones
-        before it merge (main's check covers them); the ones after it wait for the next."""
+        cars to find the first one whose tree fails. It goes back to its worker once the
+        ones before it pass their own full check, and those merge (main's check covers
+        them); the ones after it wait for the next. A prefix that fails its own check is
+        bisected in turn, and a prefix of one PR goes back itself."""
         failing = failing_tests(out)
         red, base_out = self.train_red_at(wt, base, failing)
         if red is None:
@@ -7071,38 +7170,53 @@ class Pool:
                 self.train_wait()
                 return
             lo, hi = (lo, mid) if red else (mid, hi)
-        self.train_hand_back(cars[hi - 1], cars[:hi - 1], base, failing, out, on_main)
-        if hi > 1:
-            # The PRs before it merge only after the full check (sweep and guard) passed on
-            # exactly their tree: the halving ran only the failing tests, and a guard runs only
-            # after a green sweep. Trains once merged unchecked prefixes, and one brought a guard
-            # that failed at its own commit: main went red.
-            prefix = cars[:hi - 1]
-            ok, pout = (None, f"could not check out {prefix[-1]['commit'][:12]}")
-            if self.git("checkout", "-q", "--detach", prefix[-1]["commit"], wt=wt).returncode == 0:
-                ok, pout = self.train_check(wt)
-                if ok is False:
-                    ok, pout = self.train_second_look(wt, base, prefix, pout)
-            if ok:
-                self.train_land(base, prefix, pout, checked=True)
-            else:
-                self.log("train_prefix_held", base=base[:12], prs=[c["pr"] for c in prefix], ok=ok,
-                         failing=failing_tests(pout)[:5])
-                self.event(f"merge train: {self.train_label(prefix)}, ahead of the PR handed back, "
-                           f"{'failed' if ok is False else 'could not run'} its own full check "
-                           f"({', '.join(failing_tests(pout)[:2]) or 'see pool.jsonl'}); they wait for the next train")
-                self.train_wait()
+        car, prefix = cars[hi - 1], cars[:hi - 1]
+        if not prefix:
+            self.train_hand_back(car, [], base, failing, out, on_main)
+            return
+        # The PRs before it merge only after the full check (sweep and guard) passed on
+        # exactly their tree: the halving ran only the failing tests, and a guard runs only
+        # after a green sweep. Trains once merged unchecked prefixes, and one brought a guard
+        # that failed at its own commit: main went red. The car is blamed only then too: a
+        # prefix that fails its own check holds the PR that broke the train.
+        ok, pout = (None, f"could not check out {prefix[-1]['commit'][:12]}")
+        if self.git("checkout", "-q", "--detach", prefix[-1]["commit"], wt=wt).returncode == 0:
+            ok, pout = self.train_check(wt)
+            if ok is False:
+                ok, pout = self.train_second_look(wt, base, prefix, pout)
+        if ok:
+            self.train_hand_back(car, prefix, base, failing, out, on_main)
+            self.train_land(base, prefix, pout, checked=True)
+            return
+        self.log("train_prefix_held", base=base[:12], prs=[c["pr"] for c in prefix], ok=ok,
+                 failing=failing_tests(pout)[:5], blamed=car["pr"])
+        why = ', '.join(failing_tests(pout)[:2]) or 'see pool.jsonl'
+        if ok is False and len(prefix) == 1:
+            # One PR on main that fails its own full check is the culprit. Left in the queue,
+            # it led the next train and failed it the same way.
+            self.event(f"merge train: {self.train_label(prefix)}, ahead of PR #{car['pr']}, failed its own full "
+                       f"check ({why}); it goes back, and PR #{car['pr']} waits for the next train")
+            self.train_hand_back(prefix[0], [], base, failing_tests(pout), pout)
+        elif ok is False:
+            self.event(f"merge train: {self.train_label(prefix)}, ahead of PR #{car['pr']}, failed its own full "
+                       f"check ({why}); the PR that breaks it is looked for among them, and PR #{car['pr']} waits")
+            self.train_bisect(wt, base, prefix, pout)
+        else:
+            self.event(f"merge train: {self.train_label(prefix)}, ahead of PR #{car['pr']}, could not run its own "
+                       f"full check ({why}); they wait for the next train")
+            self.train_wait()
 
     def train_hand_back(self, car: dict, ahead: list[dict], base: str, failing: list[str], out: str,
-                        on_main: list[str] | tuple = ()) -> None:
+                        on_main: list[str] | tuple = (), what: str = "the full check suite") -> None:
         pr, n, head = car["pr"], car["issue"], car["head"]
         with self.lock:
             self.book.train.pop(pr, None)
+            self.book.train_failed[pr] = head
         after = f", after {self.train_label(ahead)}, which pass without it" if ahead else ""
         guards = [t for t in failing if t.startswith("tests/accept/")]
         report = (
-            f"The supervisor merged this head ({head[:8]}) onto main {base[:8]}{after} and ran the full check "
-            "suite on the result. These fail with this PR merged and pass on main alone:\n\n"
+            f"The supervisor merged this head ({head[:8]}) onto main {base[:8]}{after} and ran {what} on the "
+            "result. These fail with this PR merged and pass on main alone:\n\n"
             + ("\n".join(f"- `{t}`" + (" (an acceptance guard of a verified issue)" if t in guards else "")
                          for t in failing[:20]) or "- (no test named; see the output)")
             + ("\n\nThese fail on main alone too, so they are not yours: "
@@ -7179,6 +7293,7 @@ class Pool:
                         self.book.merger_runs.pop(c["pr"], None)
                         self.book.author_runs.pop(c["pr"], None)
                         self.book.guard_runs.pop(c["pr"], None)
+                        self.book.train_failed.pop(c["pr"], None)
                     merged.append(c["pr"])
                     final = self.fetch_main(final)
                     self.after_merge(c["pr"], c["issue"], c["head"], c["needs_live"],
@@ -7967,6 +8082,9 @@ class Pool:
         "- a fresh state the test makes itself: its own browser context, never another test's leftovers, never an "
         "assumption that history is empty or that a reload starts blank (a guard that cleared localStorage, "
         "reloaded and expected an empty feed broke when history moved to the server);\n"
+        "- isolation it makes itself through that fixture, never isolation the app happens to give each browser "
+        "today (a cookie or a per-browser id): a correct change that dropped one made many guards fail together "
+        "while each passed alone, and the merge train stalled on it;\n"
         "- no endpoint only tests use (a `DELETE /api/history` to reset state) and no monkeypatched navigation "
         "(`page.goto`, `page.reload`): the review gate rejects both;\n"
         "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
@@ -7975,7 +8093,9 @@ class Pool:
         "- well under 100 lines, a few seconds to run.\n\n"
         "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
         "`Regression of #N`, so every test there costs every later merge: a suite whose files each started their "
-        "own server and slept grew to many minutes. Only this chore's PR may add files there.\n"
+        "own server and slept grew to many minutes. Only this chore's PR may add files there. Before the PR, run "
+        "the whole of `tests/accept/` with your files in it, not only your files: a test that passes alone and "
+        "fails beside the others is not done.\n"
     )
 
     def accept_chore(self, logdir: pathlib.Path, verified: list[int], titles: dict[int, str] | None = None) -> None:

@@ -86,6 +86,7 @@ chore_priority = "P2"        # POOL_ACCEPT_CHORE_PRIORITY: P1 chores crowded out
 chore_batch = 5              # POOL_ACCEPT_CHORE_BATCH: one chore per 5 verified scripts (or per hour)
 guard = "uv run pytest -q -p no:cacheprovider tests/accept"   # ACCEPT_GUARD: the accepted issues' Playwright
                              # scripts, run on each deploy with no model; a failure files `Regression of #N`
+guard_workers = 4            # POOL_ACCEPT_GUARD_WORKERS: pytest-xdist workers for the guard when the app has xdist
 # The acceptance checklist (ids: viewport:<size>, lang:<code>, always:/live:<first three
 # words>). Live-check scripts declare `# accept-rows: <ids>`, or `# accept-skip: <id> <why>`;
 # gate 7 refuses a record that misses a row the PR's paths trigger. Most reopened issues

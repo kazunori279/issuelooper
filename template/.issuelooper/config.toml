@@ -105,6 +105,8 @@ chore_every_s = 3600         # POOL_ACCEPT_CHORE_EVERY_S
 chore_append = true          # POOL_ACCEPT_CHORE_APPEND: append to an open chore nobody claimed instead of filing another
 guard_timeout_s = 1200       # POOL_ACCEPT_GUARD_S: the guard's time limit (the train's check: the sweep's
                              # POOL_MAIN_CHECK_S plus this)
+guard_workers = 4            # POOL_ACCEPT_GUARD_WORKERS: a pytest guard runs on this many pytest-xdist workers
+                             # (`-n`) when the project has pytest-xdist, else in one process (0 = always one)
 # The acceptance checklist the worker's live check (devcheck.py, merge gate 7) and the
 # tester share. Rows have ids (viewport:<size>, lang:<code>, always:<first three words>,
 # live:<first three words>); a live-check script declares the rows it covers with a line

@@ -147,7 +147,10 @@ accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en 
    at all), one page, waits on what the page shows rather than fixed sleeps. It starts
    from a fresh state it makes itself: its own browser context, and a fresh server-side
    conversation or user when the app keeps them (`.issuelooper/project.md` names the
-   fixture); never another test's leftovers or an empty history taken for granted.
+   fixture); never another test's leftovers or an empty history taken for granted. Make
+   that isolation explicit: a script that relies on the app keeping each browser apart
+   today (a cookie, a per-browser id) breaks when a correct change drops it, and the
+   guards then fail together while each passes alone.
 
 Write `$LOGDIR/accept_report.md`, one line per issue: its number and verdict
 (`verified`, `failed: <what>`, `blocked: <what>`). Then stop the server and remove `$T`.
