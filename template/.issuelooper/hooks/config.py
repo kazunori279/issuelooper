@@ -117,6 +117,7 @@ KEYS = {
     ("review", "production_paths"): "REVIEW_PATHS",
     ("review", "max_rejects"): "REVIEW_MAX_REJECTS",
     ("review", "test_removal_min"): "REVIEW_TEST_REMOVAL_MIN",
+    ("review", "guard_max_lines"): "REVIEW_GUARD_MAX_LINES",
     ("review", "fixtures"): "REVIEW_FIXTURES",
     ("review", "spec_paths"): "REVIEW_SPEC_PATHS",
     ("pool", "max_sessions"): "POOL_MAX_WORKERS",
@@ -164,6 +165,7 @@ KEYS = {
     ("accept", "guard"): "ACCEPT_GUARD",
     ("accept", "guard_timeout_s"): "POOL_ACCEPT_GUARD_S",
     ("accept", "guard_workers"): "POOL_ACCEPT_GUARD_WORKERS",
+    ("accept", "screenshot_paths"): "ACCEPT_SCREENSHOT_PATHS",
     ("accept", "units"): "POOL_ACCEPT_UNITS",
     ("accept", "chore_priority"): "POOL_ACCEPT_CHORE_PRIORITY",
     ("accept", "chore_batch"): "POOL_ACCEPT_CHORE_BATCH",
@@ -179,9 +181,10 @@ KEYS = {
     ("accept", "author_wait_s"): "POOL_AUTHOR_WAIT_S",
 }
 # [accept] keys that make up the checklist, carried together in $ACCEPT_CHECKLIST.
-CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "triggers", "no_skip")
+CHECKLIST_KEYS = ("viewports", "languages", "always", "live", "reload", "triggers", "no_skip")
 # Each row group and the prefix of its rows' ids.
-CHECKLIST_GROUPS = (("viewports", "viewport"), ("languages", "lang"), ("always", "always"), ("live", "live"))
+CHECKLIST_GROUPS = (("viewports", "viewport"), ("languages", "lang"), ("always", "always"), ("live", "live"),
+                    ("reload", "reload"))
 # [agents.<role>] cli / model -> CCROLE_<ROLE>_CLI / CCROLE_MODEL_<ROLE>.
 ROLE_KEYS = {"cli": "CCROLE_{ROLE}_CLI", "model": "CCROLE_MODEL_{ROLE}"}
 

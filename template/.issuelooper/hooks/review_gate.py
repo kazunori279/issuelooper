@@ -28,6 +28,9 @@ Settings (environment, or .issuelooper/config.toml through config.py):
     REVIEW_TEST_REMOVAL_MIN  a test-only diff that removes this many test functions more
                          than it adds (`def test_` lines, net) is reviewed, not skipped;
                          the judge names each removed test's replacement. Default 5, 0 = off.
+    REVIEW_GUARD_MAX_LINES  an acceptance chore whose guard file (tests/accept/test_*.py)
+                         is over this many lines is rejected without the model. Default
+                         200, 0 = off.
     REVIEW_MAX_ERRORS    failed reviews (the judge failed or answered nonsense) of one
                          head before its issue goes to stage:owner, default 3.
     REVIEW_DIR           where records go, default $ISSUELOOPER_TMP/review (records in
@@ -135,6 +138,9 @@ MAX_ERRORS = int(os.environ.get("REVIEW_MAX_ERRORS", "3"))
 # A test-only diff that removes this many `def test_` functions more than it adds is reviewed,
 # not skipped (0 = never): a consolidation chore once cut 29 e2e tests (99 asserts) unreviewed.
 TEST_REMOVAL_MIN = int(os.environ.get("REVIEW_TEST_REMOVAL_MIN", "5") or 0)
+# The longest file under tests/accept/ an acceptance chore may add (0 = no limit): chores copied
+# the testers' scripts in close to whole, and every guard runs on every merge.
+GUARD_MAX_LINES = int(os.environ.get("REVIEW_GUARD_MAX_LINES", "200") or 0)
 LONG_FN = int(os.environ.get("REVIEW_LONG_FN", "150"))
 REFACTOR_LINES = int(os.environ.get("REVIEW_REFACTOR_LINES", "300"))
 PROMPT = pathlib.Path(os.environ.get("REVIEW_PROMPT") or HERE / "review_prompt.md")
@@ -911,6 +917,28 @@ def tests_removed(files: list[tuple[str, str]]) -> tuple[int, list[str]]:
     return net, names
 
 
+def oversized_guards(files: list[tuple[str, str]], content_at, limit: int = GUARD_MAX_LINES) -> list[dict]:
+    """Findings for the acceptance guards (tests/accept/test_*.py) a PR leaves over limit lines:
+    a file's length at the head (content_at), or at least the lines the diff adds to it when
+    that cannot be read (a new file's whole length)."""
+    if not limit:
+        return []
+    found = []
+    for path, part in files:
+        if not re.match(r"tests/accept/(?:.*/)?test_[^/]*\.py$", path):
+            continue
+        n = sum(1 for ln in part.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+        if "\n--- /dev/null" not in "\n" + part:
+            text = content_at(path)
+            if text:
+                n = max(n, text.count("\n") + (0 if text.endswith("\n") else 1))
+        if n > limit:
+            found.append({"kind": "guard", "file": path, "what": f"{n} lines, over the {limit}-line limit for an "
+                          "acceptance guard: keep the issue's own checks (a block per checklist row, setup shared "
+                          "through the suite's fixtures), not the tester's whole script"})
+    return found
+
+
 def removal_text(net: int, names: list[str]) -> str:
     """The prompt's account of a test-only diff that removes tests ('' when it does not)."""
     if net < TEST_REMOVAL_MIN or not TEST_REMOVAL_MIN:
@@ -1143,23 +1171,34 @@ def review(pr: int, hand: bool = True) -> int:
 
     files = split_files(diff)
     static = structure_tests(files)
-    if static:
-        v = {"verdict": "reject", "findings": static,
-             "reason": "it adds tests that check structure, not behavior: delete them, or drive the behavior instead."}
+    issue_text = issue_body(repo, issue)
+
+    def raw_at(path: str) -> str:
+        try:
+            return gh_get(f"repos/{repo}/contents/{path}?ref={head}", accept="application/vnd.github.raw")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            return ""
+    big = oversized_guards(files, raw_at) if ACCEPT_CHORE_MARK in issue_text else []
+    if static or big:
+        v = {"verdict": "reject", "findings": static + big,
+             "reason": " ".join(x for x in (
+                 "it adds tests that check structure, not behavior: delete them, or drive the behavior instead."
+                 if static else "",
+                 f"it adds acceptance guards over {GUARD_MAX_LINES} lines: cut each to the issue's own checks."
+                 if big else "") if x)}
         rejects = sum(1 for r in records_for(pr) if r.get("verdict") == "reject"
                       or (r.get("verdict") == "owner" and r.get("why") == "rejects"))
         if rejects >= MAX_REJECTS:
-            rc = done("owner", why="rejects", by="static check", reason=v["reason"], findings=static, round=rejects + 1)
+            rc = done("owner", why="rejects", by="static check", reason=v["reason"], findings=v["findings"], round=rejects + 1)
             if hand:
                 park_for_owner(repo, pr, issue, head, f"This is reject {rejects + 1} of this pull request "
                                f"(`{v['reason']}`), more than the {MAX_REJECTS} handed back to workers.")
             return rc
-        rc = done("reject", by="static check", reason=v["reason"], findings=static, round=rejects + 1)
+        rc = done("reject", by="static check", reason=v["reason"], findings=v["findings"], round=rejects + 1)
         if hand:
             hand_back(repo, pr, issue, v)
         return rc
     prod = [p for p, _ in files if is_prod(p)]
-    issue_text = issue_body(repo, issue)
     # A change to an acceptance guard outside an acceptance chore (an author updating a guard its
     # issue changes the behavior of) is reviewed against the issue and the spec, test-only or not.
     guards = [] if ACCEPT_CHORE_MARK in issue_text else [p for p, _ in files if p.startswith("tests/accept/")]

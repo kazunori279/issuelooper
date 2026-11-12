@@ -116,7 +116,11 @@ issue:
    drives every part the issue asks for, from a fresh start, through the checklist
    rows in your prompt that the change needs: each viewport and each language for a
    UI change, the live rows for a live one, and always a reload mid-task and after,
-   Tab, Enter and Escape, and every entry point the issue names. Partial
+   Tab, Enter and Escape, and every entry point the issue names. A row that asks for a
+   second or different request takes it from the issue: an input of another kind that
+   the issue or the spec it cites names (another mode or option, a place or item unlike
+   the first, the other language), and it asserts on that second result's own content
+   (its map drawn, its values), not only that it appeared. Partial
    implementations are what this check exists for: the narrow phone, Escape
    closing too much, a half-translated second language, voice but not typed (or
    the reverse), scripted but not live.
@@ -143,11 +147,17 @@ accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en 
    closes, sends to the owner, or has a fresh session check the failure again
    before it goes back to a worker.
 4. For an issue you verified, save the script as `$LOGDIR/accept/test_accept_<N>.py`.
-   Put each `always:` row in a block of its own: a comment line naming the row id
-   (`# always:reload-mid-task: ...`), then its steps and at least one assertion
-   (`expect(...)` or `assert`). The supervisor refuses a verified verdict whose script has
-   no such block for a row the issue needs; naming it in the `# accept-rows:` header is
-   not enough. It becomes the issue's regression test, so keep only what a user sees: no reads of
+   Put each `always:` and `reload:` row in a block of its own: a comment line naming the
+   row id (`# always:reload-mid-task: ...`), then what the user does for it (a click, a
+   reload, input, a resize) and after that at least one assertion (`expect(...)` or
+   `assert`). The supervisor refuses a verified verdict whose script has no such block for
+   a row the issue needs; naming it in the `# accept-rows:` header, or asserting on what an
+   earlier step left on the page, is not enough. For an issue your prompt marks with a
+   screenshot check, take a screenshot of each map and image the change shows and check its
+   pixels, for example
+   `assert len(Image.open(BytesIO(loc.screenshot())).convert("RGB").getcolors(1 << 20)) > 8`
+   (Pillow) for a map, and `naturalWidth > 0` for an `<img>`: a grey map or a broken image
+   passes every DOM check. It becomes the issue's regression test, so keep only what a user sees: no reads of
    source files, line counts or file structure (a split issue's script is not saved
    at all), one page, waits on what the page shows rather than fixed sleeps. It starts
    from a fresh state it makes itself: its own browser context, and a fresh server-side

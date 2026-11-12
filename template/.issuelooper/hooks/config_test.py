@@ -158,9 +158,11 @@ viewports = ["1280x800", "320x640"]
 languages = ["en", "ja"]
 always = ["reload mid-task and after", "keyboard: Tab, Enter, Escape"]
 live = ["voice and typed interruption"]
+reload = ["restored cards keep their maps and images after a page reload"]
 [accept.triggers]
 "src/static/*" = ["viewports", "languages"]
 "src/live.py" = ["live"]
+"src/static/js/cards/*" = ["reload"]
 """
 saved = dict(os.environ)
 try:
@@ -170,7 +172,11 @@ try:
     os.environ.update(ACCEPT_CHECKLIST=values["ACCEPT_CHECKLIST"], ACCEPT_PATHS="src/")
     check("rows with ids, commas kept", [r[0] for r in config.checklist()["rows"]],
           ["viewport:1280x800", "viewport:320x640", "lang:en", "lang:ja", "always:reload-mid-task",
-           "always:keyboard-tab-enter", "live:voice-and-typed"])
+           "always:keyboard-tab-enter", "live:voice-and-typed", "reload:restored-cards-keep"])
+    check("a card file needs the reload rows too; another UI file does not",
+          ([r[0] for r in config.required_rows(["src/static/js/cards/map.js"]) if r[1] == "reload"],
+           [r[0] for r in config.required_rows(["src/static/js/app.js"]) if r[1] == "reload"]),
+          (["reload:restored-cards-keep"], []))
     check("a UI file needs the viewports, the languages and the always rows",
           [r[0] for r in config.required_rows(["src/static/js/app.js"])],
           ["viewport:1280x800", "viewport:320x640", "lang:en", "lang:ja", "always:reload-mid-task",

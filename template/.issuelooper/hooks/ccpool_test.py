@@ -1317,9 +1317,32 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     script.unlink()
     calls, pool, verified = settle([named], logdir=logdir)
     check("no script saved: its always rows are not checked", verified, [])
-    check("a row's comment with no assertion before the next row's block does not count",
-          ccpool.unasserted_rows("# always:a-b\npage.reload()\n# viewport:320x640\nassert ok\n# always:c-d\nassert x\n",
-                                 ["always:a-b", "viewport:320x640", "always:c-d"]), ["always:a-b"])
+    check("a row's comment with no assertion before the next row's block does not count, nor an assertion with "
+          "no action of the row's own before it",
+          ccpool.unasserted_rows("# always:a-b\npage.reload()\n# viewport:320x640\nassert ok\n# always:c-d\nassert x\n"
+                                 "# always:e-f\npage.locator('#send').click()\nexpect(card).to_have_count(2)\n",
+                                 ["always:a-b", "viewport:320x640", "always:c-d", "always:e-f"]),
+          ["always:a-b", "always:c-d"])
+    check("reload rows need a block of their own too",
+          ccpool.unasserted_rows("# reload:restored-cards-keep\npage.reload()\nassert img_ok\n",
+                                 ["reload:restored-cards-keep", "always:x-y"]), ["always:x-y"])
+    # Maps that stayed grey and images that never drew went out verified on DOM text alone.
+    unit.info["issues"][0]["shots"] = True
+    script.write_text("# always:reload-mid-task\npage.reload()\nexpect(page.locator('.map')).to_be_visible()\n")
+    calls, pool, verified = settle([named], logdir=logdir)
+    check("a change that needs a screenshot check, verified without one: not verified, and the retry says so",
+          (verified, ccpool.SHOTS_GAP in calls[0]), ([], True))
+    script.write_text("from io import BytesIO\nfrom PIL import Image\n# always:reload-mid-task\npage.reload()\n"
+                      "shot = Image.open(BytesIO(page.locator('.map').screenshot()))\n"
+                      "assert len(shot.convert('RGB').getcolors(1 << 20)) > 8\n")
+    calls, pool, verified = settle([named], logdir=logdir)
+    check("with a screenshot whose pixels it checks: verified", verified, [9])
+    unit.info["issues"][0]["shots"] = False
+    restore = with_env({"ACCEPT_SCREENSHOT_PATHS": "src/static/js/cards/*,src/static/js/feed.js"})
+    check("[accept] screenshot_paths decides which changes need it",
+          (ccpool.needs_shots(["src/static/js/cards/map.js"]), ccpool.needs_shots(["src/static/js/feed.js", "x"]),
+           ccpool.needs_shots(["src/api.py"])), (True, True, False))
+    restore()
     rows = unit.info["issues"][0]["rows"]
     unit.info["issues"][0].update(rows=[], live=True)
     calls, pool, verified = settle([tester("accept-verified: Playwright, scripted mode")], logdir=logdir)
@@ -1337,6 +1360,9 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     finally:
         restore()
     prompt = ccpool.tester_prompt(unit, 8021, "60m")
+    check("the second request comes from the issue, asserted on its own content; screenshots checked for blankness",
+          ("takes it from the issue itself" in prompt, "that second result's own content" in prompt,
+           "neither blank nor broken" in prompt, "with no action of its own" in prompt), (True, True, True, True))
     check("the prompt lists each issue's rows and asks for the rows line",
           ("rows: viewport:320x640 lang:ja always:reload-mid-task" in prompt, "`rows: <ids>`" in prompt), (True, True))
     del unit.info["issues"][0]["rows"]

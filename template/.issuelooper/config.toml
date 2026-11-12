@@ -116,6 +116,10 @@ viewports = []               # e.g. ["1280x800", "390x844", "320x640"]
 languages = []               # e.g. ["en", "ja"]
 always = []                  # e.g. ["reload mid-task and after", "keyboard: Tab, Enter, Escape"]
 live = []                    # rows for a change to the live mode, e.g. ["a Japanese turn"]
+reload = []                  # rows for a change to what a page reload restores, e.g. ["restored items keep their images
+                             # after a reload"]; like always rows, each needs its own block in the tester's saved script
+screenshot_paths = []        # ACCEPT_SCREENSHOT_PATHS: path globs whose change needs, in the tester's saved script, a
+                             # screenshot of each map and image it shows with its pixels checked (not blank, not broken)
 no_skip = []                 # rows a live check may not skip, as ids, texts or groups (e.g. ["live:voice-and-typed"]):
                              # gate 7 refuses such a skip and points to project.md for how to run the row
 # Path globs (`*` crosses /; a trailing / is a directory) and the row groups a change to
@@ -123,6 +127,7 @@ no_skip = []                 # rows a live check may not skip, as ids, texts or 
 [accept.triggers]
 # "src/static/*" = ["viewports", "languages"]
 # "src/live.py" = ["live"]
+# "src/static/js/cards/*" = ["reload"]
 
 [deploy]
 command = ""                 # POOL_DEPLOY_CMD: run from the shared checkout after main moves; empty = no deploys
@@ -221,6 +226,8 @@ spec_paths = ["spec/"]       # REVIEW_SPEC_PATHS: where the spec is; names the d
 max_rejects = 2              # REVIEW_MAX_REJECTS: rejects handed back to workers; the next one waits for the owner
 test_removal_min = 5         # REVIEW_TEST_REMOVAL_MIN: a test-only PR that removes this many test functions more than it
                              # adds is reviewed, not skipped, and merges only on a review pass (0 = off)
+guard_max_lines = 200        # REVIEW_GUARD_MAX_LINES: an acceptance chore whose guard file (tests/accept/test_*.py) is over
+                             # this many lines is rejected without the model (0 = no limit)
 # fixtures = ["tests/fixtures/**/*.json"]   # REVIEW_FIXTURES: fixture files whose values in production code are flagged for the reviewer
 
 [pool]

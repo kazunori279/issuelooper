@@ -363,6 +363,20 @@ try:
                                                       "    assert subprocess.run(['ruff', 'format', '--check', '.']).returncode == 0"])])
     check("a formatter run as a test: rejected", (rg.review(7, hand=False), record("c7" * 20)["verdict"]), (1, "reject"))
 
+    # Acceptance chores copied the testers' scripts in close to whole: tests/accept tripled.
+    long_guard = [("tests/accept/test_accept_70.py", ["def test_accept_70(page):"] + ["    page.reload()"] * 230)]
+    serve(60, "ab60" * 10, long_guard)
+    (GHDIR / "issue-160.json").write_text(json.dumps({"body": "<!-- merger -->\n<!-- accept-chore -->\nScripts"}))
+    check("an acceptance chore whose guard file is over REVIEW_GUARD_MAX_LINES (200): rejected, judge not asked",
+          (rg.review(60, hand=False), record("ab60" * 10)["verdict"], record("ab60" * 10)["findings"][0]["kind"], PROMPTS),
+          (1, "reject", "guard", []))
+    serve(61, "ab61" * 10, [("tests/accept/test_accept_71.py", ["def test_accept_71(page):", "    page.reload()"])])
+    (GHDIR / "issue-161.json").write_text(json.dumps({"body": "<!-- merger -->\n<!-- accept-chore -->\nScripts"}))
+    check("a short one is skipped as before", (rg.review(61), record("ab61" * 10)["verdict"]), (0, "skipped"))
+    check("the limit counts a new file's lines from its diff; 0 turns it off",
+          (len(rg.oversized_guards(rg.split_files(diff_for(long_guard)), lambda p: "", 300)),
+           rg.oversized_guards(rg.split_files(diff_for(long_guard)), lambda p: "", 0)), (0, []))
+
     # A consolidation chore cut 29 e2e tests (99 asserts) in a test-only PR the review skipped.
     def removal(n, sha, removed, added):
         serve(n, sha, [])

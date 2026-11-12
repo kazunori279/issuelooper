@@ -90,6 +90,7 @@ Configures post-merge acceptance (`"gate"`, `"after"`, or `"off"`), the shared w
 | `units` | `POOL_ACCEPT_UNITS` | `2` | Maximum concurrent acceptance tester units (a second starts only once a full batch is waiting). |
 | `guard` | `ACCEPT_GUARD` | `""` | Command that runs regression guard tests (such as `"uv run pytest -q tests/accept"`) on each deploy and in the merge train with no model call. |
 | `guard_timeout_s` | `POOL_ACCEPT_GUARD_S` | `1200` | Timeout in seconds for `guard`. |
+| `screenshot_paths` | `ACCEPT_SCREENSHOT_PATHS` | `[]` | Path globs whose change needs, in the tester's saved acceptance script, a screenshot of each map and image it shows with its pixels checked (not blank, not broken); a verified verdict without one is checked again. |
 | `guard_workers` | `POOL_ACCEPT_GUARD_WORKERS` | `4` | A `guard` command that runs pytest gets `-n <this>` (through `PYTEST_ADDOPTS`) when the project has pytest-xdist; without xdist, the supervisor notices pytest's usage error once and runs the guard in one process from then on. `0` always runs one process. |
 | `author` | `POOL_AUTHOR_ACCEPT` | `false` | (`"gate"` mode only) Resume the author's conversation to accept its own issue on the deployed build, checked by independent testers. |
 | `sample` | `POOL_ACCEPT_SAMPLE` | `4` | In `"after"` mode (or `"gate"` with `author = true`), independent testers check all `sample_labels` issues (plus `P1` in `"after"` mode) and `1` in `sample` of the rest (`0` checks only labeled/P1 issues). |
@@ -103,7 +104,7 @@ Configures post-merge acceptance (`"gate"`, `"after"`, or `"off"`), the shared w
 | `chore_batch` | `POOL_ACCEPT_CHORE_BATCH` | `5` | Number of verified scripts batched into one acceptance-test chore. |
 | `chore_every_s` | `POOL_ACCEPT_CHORE_EVERY_S` | `3600` | Maximum seconds the oldest verified script waits before a chore is filed. |
 | `chore_append` | `POOL_ACCEPT_CHORE_APPEND` | `true` | Append newly verified scripts to an existing unclaimed open chore instead of filing a second chore. |
-| `viewports`, `languages`, `always`, `live`, `no_skip`, `[accept.triggers]` | `ACCEPT_CHECKLIST` | empty | Shared checklist rows (`viewport:<size>`, `lang:<code>`, `always:<first-3-words>`, `live:<first-3-words>`), unskippable row IDs/groups (`no_skip`), and path-glob triggers mapping changed files to required row groups. |
+| `viewports`, `languages`, `always`, `live`, `reload`, `no_skip`, `[accept.triggers]` | `ACCEPT_CHECKLIST` | empty | Shared checklist rows (`viewport:<size>`, `lang:<code>`, `always:<first-3-words>`, `live:<first-3-words>`, `reload:<first-3-words>` for what a page reload restores), unskippable row IDs/groups (`no_skip`), and path-glob triggers mapping changed files to required row groups. Each `always` and `reload` row needs a block of its own in the tester's saved script: a comment naming the row, a page action, then an assertion. |
 
 ### `[deploy]`, `[live]`, and `[devcheck]`
 
@@ -174,6 +175,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[review] production_paths` | `REVIEW_PATHS` | `["src/"]` | Path prefixes reviewed by `review_gate.py`; diffs outside these paths skip Gate 5. |
 | `[review] spec_paths` | `REVIEW_SPEC_PATHS` | `["spec/"]` | Specification paths scanned so identifiers defined in the spec are not mistaken for test-specific hooks (`[]` disables). |
 | `[review] max_rejects` | `REVIEW_MAX_REJECTS` | `2` | Maximum review hand-backs before parking the issue at `stage:owner`. |
+| `[review] guard_max_lines` | `REVIEW_GUARD_MAX_LINES` | `200` | An acceptance chore whose guard file (`tests/accept/test_*.py`) is over this many lines is rejected without the model; the chore's body states the limit (`0` disables). |
 | `[review] test_removal_min` | `REVIEW_TEST_REMOVAL_MIN` | `5` | A test-only PR that removes this many `def test_` functions more than it adds is reviewed (the reviewer names each removed test's replacement), and merges only on a review pass, never on a skip or a waived live check (`0` disables). |
 | `[review] fixtures` | `REVIEW_FIXTURES` | `[]` | Fixture file globs whose literal values are flagged if copied into production code. |
 | `[pool] max_sessions` | `POOL_MAX_WORKERS` | `8` | Maximum concurrent agent sessions across all roles (`worker`, `merger`, `tester`, `explorer`). |

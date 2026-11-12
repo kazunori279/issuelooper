@@ -2161,14 +2161,15 @@ def accept_item(book: Book, open_by: dict, n: int, live: bool) -> dict:
     m = book.accept_merged.get(n) or {}
     return {"n": n, "title": open_by[n]["title"], "live": live, "since": book.live_entry.get(n, ""), "pr": m.get("pr"),
             # the checklist rows its merged change needs, as gate 7 counts them
-            "rows": [r[0] for r in config.required_rows(m.get("files") or [])]}
+            "rows": [r[0] for r in config.required_rows(m.get("files") or [])],
+            "shots": needs_shots(m.get("files") or [])}
 
 
 def after_item(book: Book, n: int, live: bool) -> dict:
     """A closed issue as an [accept] mode "after" unit's prompt lists it."""
     e = book.after[n]
     return {"n": n, "title": e.get("title", ""), "live": live, "since": e.get("closed", ""), "pr": e.get("pr"),
-            "rows": [r[0] for r in config.required_rows(e.get("files") or [])]}
+            "rows": [r[0] for r in config.required_rows(e.get("files") or [])], "shots": needs_shots(e.get("files") or [])}
 
 
 def plan_author_accept(st: dict, book: Book, cfg: Config, now: float, ready: list[int], live_of: dict,
@@ -3123,6 +3124,7 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
         rows = "\n".join(
             f"  #{x['n']} \"{x['title']}\"" + (f", merged in PR #{x['pr']}" if x.get("pr") else "")
             + (", in live mode" if x.get("live") else "")
+            + (", with a screenshot check" if x.get("shots") else "")
             + (f"; rows: {' '.join(x['rows'])}" if x.get("rows") else "")
             for x in u.info["issues"])
         cl = config.checklist_text()
@@ -3152,12 +3154,20 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
             "that line, name the checklist rows you ran on a line `rows: <ids>`, and a row that cannot apply on a "
             "line `skip: <id> <why>`: an accept-verified that leaves out a row listed for the issue counts as "
             "not verified. For an issue marked live mode, run it in live mode and say `live mode` on the "
-            "accept-verified line; a verdict that does not counts as not verified."
+            "accept-verified line; a verdict that does not counts as not verified. A row that asks for a second or "
+            "different request or flow takes it from the issue itself: a second input of another kind that the "
+            "issue or the spec it cites names (another mode or option, a place or item unlike the first, the other "
+            "language), never a generic one, and its block asserts on that second result's own content (its map "
+            "drawn, its values), not only that it appeared. For an issue marked with a screenshot check, take a "
+            "screenshot of each map and image the change shows (`locator.screenshot()`) and assert it is neither "
+            "blank nor broken (more than a few colors, with Pillow's `Image.getcolors`; for an `<img>`, "
+            "`naturalWidth > 0`)."
             + (f"\n\n{cl}" if cl else "")
             + "\n\nSave the script of each issue you verify as $LOGDIR/accept/test_accept_<N>.py, with each "
-            "`always:` row in a block of its own: a comment line naming the row id, then its steps and at least one "
-            "assertion (`expect(...)` or `assert`). A row named only in the `# accept-rows:` header counts as not "
-            "checked. Write $LOGDIR/accept_report.md, one line per issue: its number and verdict."
+            "`always:` and `reload:` row in a block of its own: a comment line naming the row id, then what the user "
+            "does for it (a click, a reload, input, a resize) and after that at least one assertion (`expect(...)` "
+            "or `assert`). A row named only in the `# accept-rows:` header, or asserted with no action of its own, "
+            "counts as not checked. Write $LOGDIR/accept_report.md, one line per issue: its number and verdict."
             + rules
         )
     where = (
@@ -3347,30 +3357,73 @@ def unchecked_rows(body: str, rows: list[str], script: str | None = None) -> lis
 
 
 ROW_ASSERT = re.compile(r"\bassert\b|\bexpect\s*\(")
+# What the user does in a row's block before its assertion: navigation, input, a resize, a
+# message sent (Playwright's page, locator and keyboard calls; a WebSocket send).
+ROW_ACTION = re.compile(r"\.(?:goto|reload|go_back|go_forward|click|dblclick|tap|fill|type|press|press_sequentially|"
+                        r"select_option|check|uncheck|set_checked|hover|drag_to|set_input_files|set_viewport_size|"
+                        r"dispatch_event|send|send_text|send_json)\s*\(")
+# Row groups whose rows need a block of their own in the saved script.
+BLOCK_ROWS = ("always:", "reload:")
 
 
 def unasserted_rows(script: str, rows: list[str]) -> list[str]:
-    """The `always:` rows (ids) a saved acceptance script has no assertion block for: a
-    comment line naming the row, then at least one assertion (`assert`, `expect(`) before
-    the next comment that names a checklist row. The `# accept-rows:` and `# accept-skip:`
-    lines name rows without checking them."""
-    always = [r for r in rows if r.startswith("always:")]
+    """The `always:` and `reload:` rows (ids) a saved acceptance script has no assertion block
+    for: a comment line naming the row, then a page action (ROW_ACTION: a click, a reload,
+    input) and after it at least one assertion (`assert`, `expect(`), before the next
+    comment that names a checklist row. The `# accept-rows:` and `# accept-skip:` lines name
+    rows without checking them, and assertions on what one setup left on the page checked
+    every row at once."""
+    need = [r for r in rows if r.startswith(BLOCK_ROWS)]
 
     def names(line: str, ids: list[str]) -> set[str]:
         return {r for r in ids if re.search(rf"(?<![\w:-]){re.escape(r.lower())}(?![\w-])", line.lower())}
     covered: set[str] = set()
     block: set[str] = set()
+    acted = False
     for line in script.splitlines():
         s = line.strip()
         if s.startswith("#"):
             if not re.match(r"#\s*accept-(?:rows|skip):", s) and names(s, rows):
-                block = names(s, always)
+                block, acted = names(s, need), False
             continue
-        if block and ROW_ASSERT.search(line):
+        if block and ROW_ACTION.search(line):
+            acted = True
+        if block and acted and ROW_ASSERT.search(line):
             covered |= block
-    return [r for r in always if r not in covered]
+    return [r for r in need if r not in covered]
 
 
+# A screenshot whose pixels the script checks: Pillow's colors, extrema, statistics or pixels,
+# the browser's canvas pixels, an image's natural size, or the size of the screenshot's bytes.
+SHOT_TAKEN = re.compile(r"\.screenshot\s*\(")
+SHOT_CHECKED = re.compile(r"getcolors|getextrema|ImageStat|getpixel|histogram|getImageData|naturalWidth|"
+                          r"len\(\s*[\w.]*screenshot")
+
+
+def guard_max_lines() -> int:
+    """[review] guard_max_lines: the longest acceptance guard file an acceptance chore may add."""
+    try:
+        return int(os.environ.get("REVIEW_GUARD_MAX_LINES", "") or 200)
+    except ValueError:
+        return 200
+
+
+def needs_shots(files) -> bool:
+    """Whether a change to these files needs a non-blank screenshot check in its acceptance
+    script ([accept] screenshot_paths, $ACCEPT_SCREENSHOT_PATHS)."""
+    globs = [g.strip() for g in os.environ.get("ACCEPT_SCREENSHOT_PATHS", "").split(",") if g.strip()]
+    return any(config.path_matches(f, g) for f in files for g in globs)
+
+
+def shots_unchecked(script: str | None, item: dict) -> bool:
+    """Whether a verified issue whose change needs it (item["shots"]) has a saved script with no
+    non-blank screenshot check (SHOT_TAKEN and SHOT_CHECKED). Scripts asserted the text on the
+    page, and maps that stayed grey or images that never drew went out verified."""
+    return bool(item.get("shots")) and script is not None and not (SHOT_TAKEN.search(script)
+                                                                    and SHOT_CHECKED.search(script))
+
+
+SHOTS_GAP = "a non-blank screenshot check of its maps and images"
 LIVE_RUN = re.compile(r"(?im)^[ \t>*-]*(?:live-verified:|accept-verified:.*\blive\b)")
 
 
@@ -8103,7 +8156,8 @@ class Pool:
                 continue
             body, url = str(verdicts[-1].get("body", "")), verdicts[-1].get("url", "")
             missing = (unchecked_rows(body, x.get("rows") or [], script_of(logdir, x))
-                       + (["live mode"] if live_unproven(body, x) else [])) if ACCEPT_VERIFIED.search(body) else []
+                       + (["live mode"] if live_unproven(body, x) else [])
+                       + ([SHOTS_GAP] if shots_unchecked(script_of(logdir, x), x) else [])) if ACCEPT_VERIFIED.search(body) else []
             retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
                           for c in comments)
             if ACCEPT_BLOCKED.search(body):
@@ -8338,9 +8392,10 @@ class Pool:
                            "Tell the owner what is missing.")
                 how = "blocked"
             elif ACCEPT_VERIFIED.search(body) and (unchecked_rows(body, x.get("rows") or [], script_of(logdir, x))
-                                                   or live_unproven(body, x)):
+                                                   or live_unproven(body, x) or shots_unchecked(script_of(logdir, x), x)):
                 missing = (unchecked_rows(body, x.get("rows") or [], script_of(logdir, x))
-                           + (["live mode"] if live_unproven(body, x) else []))
+                           + (["live mode"] if live_unproven(body, x) else [])
+                           + ([SHOTS_GAP] if shots_unchecked(script_of(logdir, x), x) else []))
                 retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
                               for c in comments)
                 why = (f"The acceptance check says accept-verified ({url}) but leaves out what the merged change "
@@ -8551,7 +8606,9 @@ class Pool:
         "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
         "`wait_for_selector`), never fixed sleeps;\n"
         "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
-        "- a few seconds to run. Its length is no requirement: keep every check of what the user sees.\n\n"
+        "- the issue's own checks, not the tester's whole script: one test per issue, a block per checklist row, "
+        "setup shared through the suite's fixtures, a few seconds to run, and at most "
+        "$REVIEW_GUARD_MAX_LINES lines per file (the review gate refuses a longer one).\n\n"
         "The supervisor runs `tests/accept/` on each merge batch and deploy with no model, and a failure files "
         "`Regression of #N`, so every test there costs every later merge: a suite whose files each started their "
         "own server and slept grew to many minutes. Only this chore's PR may add files there. Before the PR, run "
@@ -8638,7 +8695,7 @@ class Pool:
         if not due:
             return
         body = (f"<!-- merger -->\n{ACCEPT_CHORE}\nThe tester verified {names} on the deployed build with these scripts. "
-                + self.CHORE_RULES + self.chore_scripts(items))
+                + self.CHORE_RULES.replace("$REVIEW_GUARD_MAX_LINES", str(guard_max_lines())) + self.chore_scripts(items))
         r = self.file_issue(f"Acceptance tests for {names}", ["type:chore", self.cfg.accept_chore_priority,
                                                               "stage:triage"], body)
         m = re.search(r"/issues/(\d+)", r.stdout)

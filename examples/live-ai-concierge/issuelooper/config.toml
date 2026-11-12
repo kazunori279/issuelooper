@@ -96,12 +96,17 @@ viewports = ["1280x800", "390x844", "320x640"]
 languages = ["en", "ja"]
 always = ["reload mid-task and after", "keyboard: Tab, Enter, Escape", "every entry point named in the issue"]
 live = ["set a location, then 'near here'", "voice and typed interruption", "a Japanese turn"]
+reload = ["restored cards keep their maps and images after a page reload"]   # R-HIST-1: the feed comes back whole
+screenshot_paths = ["src/concierge/static/js/cards/*", "src/concierge/static/js/feed.js"]   # ACCEPT_SCREENSHOT_PATHS:
+                             # maps and images there are checked by their pixels, not the DOM
 no_skip = ["live:voice-and-typed"]   # rows a live check may not skip: the fake microphone covers voice
                              # (project.md, Live check). Run 10b: 96 % of records skipped it as "no microphone"
 [accept.triggers]
 "src/concierge/static/*" = ["viewports", "languages"]
 "src/concierge/main.py" = ["live"]
-"src/concierge/live*" = ["live"]  # the live session code split out of main.py: its post-merge checks run in live mode
+"src/concierge/live*" = ["live"]
+"src/concierge/static/js/cards/*" = ["reload"]
+"src/concierge/static/js/feed.js" = ["reload"]  # the live session code split out of main.py: its post-merge checks run in live mode
 
 [ux]
 enabled = true               # POOL_UX: a tester walks the deployed app as a user and files findings
@@ -188,6 +193,7 @@ enabled = true               # REVIEW_GATE: a second model reads each diff befor
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project
 production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these skips the review
 test_removal_min = 5         # REVIEW_TEST_REMOVAL_MIN: ... unless it only removes tests (a consolidation once cut 29 unreviewed)
+guard_max_lines = 200        # REVIEW_GUARD_MAX_LINES: a longer acceptance guard file is rejected
 fixtures = ["spec/fixtures/*.json", "ux/ux_script.json"]   # REVIEW_FIXTURES: fixture files whose values in production code are flagged for the reviewer
 
 [pool]
