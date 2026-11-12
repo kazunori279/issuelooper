@@ -57,6 +57,8 @@ link_files = []              # SWEEP_LINK_FILES: files linked from the shared ch
                              # They must be ignored by git. Empty = none
 env_id = ""                  # SWEEP_ENV_ID: a non-secret name for the test environment (tool versions, say),
                              # written into each sweep record; a record is reused only under the same one
+workers = 4                  # SWEEP_WORKERS: a full sweep in the main lane (the merge train's, the main check's) runs pytest
+                             # on this many pytest-xdist workers (`-n`) when the project has pytest-xdist (0 = one process)
 junit = false                # SWEEP_JUNIT: a pytest suite: each pytest run in a sweep also writes a junit XML
                              # (per-test times and results) beside sweep/runs.jsonl, which records every run
 fast_command = ""            # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit

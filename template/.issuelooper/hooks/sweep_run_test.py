@@ -267,6 +267,29 @@ def test_junit_per_pytest_run() -> None:
     check("a suite that is not pytest: green, no XML", (rc, runs(records)[0]["junit"]), (0, []))
 
 
+def test_main_lane_sweeps_use_xdist_when_pytest_has_it() -> None:
+    """The guard ran on pytest-xdist workers and the e2e sweep became the slow step of the
+    merge train's check."""
+    repo = make_repo()
+    knows = "echo \"[$PYTEST_ADDOPTS]\"; echo '3 passed in 0.10s'"
+    rc, out, _ = sweep(repo, knows, SWEEP_LANE="main", ISSUELOOPER_TMP=tempfile.mkdtemp(prefix="sweep-xdist-"))
+    check("a full sweep in the main lane asks pytest for 4 workers", (rc, "[-n 4]" in out), (0, True))
+    rc, out, _ = sweep(repo, knows, SWEEP_LANE="worker", ISSUELOOPER_TMP=tempfile.mkdtemp(prefix="sweep-xdist-"))
+    check("a worker's sweep does not (sweeps there run side by side)", (rc, "[]" in out, "-n 4" in out), (0, True, False))
+    rc, out, _ = sweep(repo, knows, SWEEP_LANE="main", SWEEP_WORKERS="0",
+                       ISSUELOOPER_TMP=tempfile.mkdtemp(prefix="sweep-xdist-"))
+    check("SWEEP_WORKERS=0: one process", "-n " in out.split("command:")[1], False)
+    refuses = ("case \"$PYTEST_ADDOPTS\" in *-n*) echo 'pytest: error: unrecognized arguments: -n 4'; exit 4;; esac; "
+               "echo \"[$PYTEST_ADDOPTS]\"; echo '3 passed in 0.10s'")
+    tmp = tempfile.mkdtemp(prefix="sweep-xdist-")
+    rc, out, records = sweep(repo, refuses, SWEEP_LANE="main", ISSUELOOPER_TMP=tmp)
+    check("no pytest-xdist: the sweep runs again in one process, green, and the record is that run's",
+          (rc, "runs again in one process" in out, " green" in last_line(out), runs(records)[0]["outcome"],
+           runs(records)[0]["exit"]), (0, True, True, "green", 0))
+    rc, out, _ = sweep(repo, refuses, SWEEP_LANE="main", ISSUELOOPER_TMP=tmp)
+    check("remembered: the next sweep does not try -n", (rc, "xdist:" in out, "runs again" in out), (0, False, False))
+
+
 def test_affected_selection() -> None:
     """Workers' and mergers' full sweeps were most of the sweep time, while a merged PR
     touched only a few of the e2e files."""

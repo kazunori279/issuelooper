@@ -72,6 +72,7 @@ Controls how worktrees run the test suite and how `main` is verified.
 | `rerun` | `SWEEP_RERUN` | `""` | Command with `{tests}` (pytest node IDs) used to rerun only failing tests during flake checks and re-sweeps (for example `"uv run pytest -q {tests}"`). |
 | `link_files` | `SWEEP_LINK_FILES` | `[]` | Git-ignored files symlinked from the shared checkout into every sweep, quick-check, rerun, or guard worktree (such as `[".env"]`). |
 | `env_id` | `SWEEP_ENV_ID` | `""` | Optional non-secret environment identifier written into sweep records; records are reused only when `env_id` matches. |
+| `workers` | `SWEEP_WORKERS` | `4` | A full sweep in the main lane (the merge train's check and the main check, one at a time) gives pytest `-n <this>` through `PYTEST_ADDOPTS` when the project has pytest-xdist. Without it, pytest's usage error makes the sweep run again in one process, and that is remembered until the project's dependency files change. `0` always runs one process. |
 | `junit` | `SWEEP_JUNIT` | `false` | Write JUnit XML per pytest run alongside `$ISSUELOOPER_TMP/sweep/runs.jsonl` (used to measure per-directory test runtime for consolidation chores). |
 | `fast_command` | `POOL_FAST_CHECK_CMD` | `""` | Quick check (timeout `POOL_FAST_CHECK_S` = 120 s) run on a PR merged with `main` before landing when `merge_train = false`. |
 | `main_check` | `POOL_MAIN_CHECK` | `true` | Run the full suite on `main` in the background after `main` moves (when not already checked by a merge train); files a `P0` `main is red` issue on failure. |

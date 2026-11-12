@@ -37,6 +37,7 @@ rerun = "uv run pytest -q -p no:cacheprovider {tests}"   # SWEEP_RERUN: the fail
 link_files = [".env"]        # SWEEP_LINK_FILES: devcheck links .env into a worker's tree and its sweeps keep it, so
                              # every sweep, train, main check and guard gets it too (run 11: test_issue_13 passed only
                              # without .env, red in workers' sweeps and green in the train, and merged)
+workers = 4                  # SWEEP_WORKERS: the merge train's and main check's sweeps on pytest-xdist workers, when installed
 junit = true                 # SWEEP_JUNIT: each pytest run in a sweep writes a junit XML beside sweep/runs.jsonl
 fast_command = "uv sync --frozen -q && uv run python -c 'import concierge.main' && uv run pytest -q -x -p no:cacheprovider tests/unit"
                              # POOL_FAST_CHECK_CMD: a quick check (seconds to a minute: the app imports, the unit

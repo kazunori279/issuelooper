@@ -291,6 +291,20 @@ def test_agy_call_seconds() -> None:
     check("a stream that does not time its calls gives none", CLAUDE.call_seconds(events, {}), [])
 
 
+def test_agy_stale_stream_idle_error() -> None:
+    """A conversation's later turns all read ERROR after one stream idle timeout, though
+    each answered."""
+    old = {"event": "result", "result": {
+        "status": "ERROR", "response": "Rebased the branch and pushed; the sweep is green.",
+        "error": "API error (attempt 1): request failed: stream idle timeout (5m0s): context deadline exceeded",
+        "num_turns": 3}}
+    r = AGY.read(old)
+    check("an earlier turn's stream idle timeout next to this turn's answer: a success, the error kept",
+          (r["status"], r["stale_error"] is not None, r["quota"]), ("SUCCESS", True, False))
+    now = {"event": "result", "result": dict(old["result"], response="")}
+    check("the same error with no answer: the turn failed", AGY.read(now)["status"], "ERROR")
+
+
 def test_claude_stream() -> None:
     check(
         "session id: the newest one seen",

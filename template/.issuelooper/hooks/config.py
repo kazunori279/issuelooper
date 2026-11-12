@@ -59,6 +59,7 @@ KEYS = {
     ("sweep", "slots"): "SWEEP_SLOTS",
     ("sweep", "record_dir"): "SWEEP_RECORD_DIR",
     ("sweep", "junit"): "SWEEP_JUNIT",
+    ("sweep", "workers"): "SWEEP_WORKERS",
     ("sweep", "rerun"): "SWEEP_RERUN",
     ("sweep", "format"): "SWEEP_FORMAT",
     ("sweep", "affected"): "SWEEP_AFFECTED",

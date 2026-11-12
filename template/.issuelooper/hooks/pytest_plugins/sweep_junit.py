@@ -10,8 +10,8 @@ import pytest
 @pytest.hookimpl(tryfirst=True)  # before pytest's own junitxml plugin reads the option
 def pytest_configure(config):
     prefix = os.environ.get("SWEEP_JUNIT_PREFIX")
-    if not prefix or getattr(config.option, "xmlpath", None):
-        return  # not in a recorded sweep, or the project names its own XML
+    if not prefix or getattr(config.option, "xmlpath", None) or hasattr(config, "workerinput"):
+        return  # not in a recorded sweep, the project names its own XML, or a pytest-xdist worker
     n = 1
     while True:
         try:

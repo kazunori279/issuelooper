@@ -42,6 +42,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT = "agy"
 
 
+# agy's error for a model stream that went quiet; it retries the call itself.
+STREAM_IDLE = re.compile(r"(?i)stream idle timeout")
+
+
 def parse(lines) -> list[dict]:
     """The JSON objects among stream lines; anything else is skipped."""
     out = []
@@ -566,11 +570,14 @@ class Agy(Cli):
             r = dict(e.get("result") or {})
             quota = self.quota_result(e)
             # A stale 429 from a retried call next to a full answer is not a failed
-            # turn: report it as a success, with the error kept.
+            # turn: report it as a success, with the error kept. So is a stream idle
+            # timeout next to an answer: agy keeps an earlier turn's error on the
+            # conversation, and every later turn of a resumed conversation read as failed.
             if (
                 r.get("status") == "ERROR"
                 and not quota
-                and self.quota.search(json.dumps(r))
+                and (self.quota.search(json.dumps(r))
+                     or (STREAM_IDLE.search(str(r.get("error") or "")) and str(r.get("response") or "").strip()))
             ):
                 r["stale_error"] = r.pop("error", None)
                 r["status"] = "SUCCESS"

@@ -65,7 +65,11 @@ SWEEP_PR; sweep_locked.py passes SWEEP_LANE and SWEEP_WAIT_S. red-lint is a fail
 command with no failing test in a pytest summary (in practice the lint step). With
 SWEEP_JUNIT=1 (`[sweep] junit`, for a pytest suite) each pytest run in the command
 also writes `<run_id>-<n>.xml` beside runs.jsonl, through the plugin in
-pytest_plugins/ (PYTEST_ADDOPTS); other suites ignore it.
+pytest_plugins/ (PYTEST_ADDOPTS); other suites ignore it. A full sweep in the main lane (the
+merge train's and the main check's) runs pytest on SWEEP_WORKERS (`[sweep] workers`, 4)
+pytest-xdist workers (`-n`, through PYTEST_ADDOPTS) when the project has pytest-xdist: a pytest
+that does not know -n makes the sweep run again in one process, and that is remembered (in the
+scratch directory) until the project's dependency files change.
 """
 
 from __future__ import annotations
@@ -272,6 +276,44 @@ def junit_env(env: dict[str, str], prefix: Path) -> dict[str, str]:
     env["SWEEP_JUNIT_PREFIX"] = str(prefix)
     env["PYTHONDONTWRITEBYTECODE"] = "1"  # no __pycache__ beside the plugin: the tree must not change
     return env
+
+
+NO_XDIST = re.compile(r"unrecognized arguments:.*-n\b")
+DEP_FILES = ("pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "requirements-dev.txt", "setup.cfg")
+
+
+def deps_key() -> str:
+    """A key for the project's dependency files as they are now."""
+    import hashlib
+    h = hashlib.sha256()
+    for name in DEP_FILES:
+        try:
+            h.update(name.encode() + b"\0" + (ROOT / name).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
+def xdist_note() -> Path:
+    return config.scratch_root() / "sweep-no-xdist"
+
+
+def xdist_workers(kind: str) -> int:
+    """How many pytest-xdist workers this sweep asks for (0: none): only a full sweep in the
+    main lane, where one sweep runs at a time and the merge train waits for it, and not once
+    pytest here was found to lack -n for these dependency files."""
+    try:
+        n = int(os.environ.get("SWEEP_WORKERS", "") or 4)
+    except ValueError:
+        n = 4
+    if n <= 0 or kind != "full" or os.environ.get("SWEEP_LANE", "") != "main":
+        return 0
+    try:
+        if xdist_note().read_text().strip() == deps_key():
+            return 0
+    except OSError:
+        pass
+    return n
 
 
 def sweep_line(counts: dict[str, int], before: int | None) -> str:
@@ -509,7 +551,23 @@ def sweep(argv, run: dict) -> int:
         print("git:            (not a git checkout)")
     print(flush=True)
 
-    returncode, output = run_command(command, env, run["output"])
+    workers = xdist_workers(kind)
+    if workers:
+        xenv = dict(env, PYTEST_ADDOPTS=(env.get("PYTEST_ADDOPTS", "") + f" -n {workers}").strip())
+        print(f"xdist:          pytest -n {workers}\n", flush=True)
+        returncode, output = run_command(command, xenv, run["output"])
+        if returncode != 0 and NO_XDIST.search(output):
+            print("\nnote: pytest here does not know -n (no pytest-xdist): the sweep runs again in one process\n",
+                  flush=True)
+            try:
+                xdist_note().parent.mkdir(parents=True, exist_ok=True)
+                xdist_note().write_text(deps_key() + "\n")
+            except OSError:
+                pass
+            run["output"].clear()
+            returncode, output = run_command(command, env, run["output"])
+    else:
+        returncode, output = run_command(command, env, run["output"])
     run["exit"], run["outcome"] = returncode, "red"
 
     counts, problems = parse_suites(output)
