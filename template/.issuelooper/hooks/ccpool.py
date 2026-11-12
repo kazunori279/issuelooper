@@ -580,6 +580,9 @@ class Config:
     # Notes are sent with every call of every worker in the area: long ones (a median of about
     # 11k characters) cost on each call and did not cut what workers read.
     notes_max_chars: int = 8000
+    # With symbol_index: characters of the code the issue's names point at (their definitions,
+    # and the lines around them in source files) quoted in the worker's prompt (0 = pointers only).
+    index_code_chars: int = 6000
     notes_stale_lines: int = 200
     # A symbol index of origin/main (POOL_SYMBOL_INDEX): functions, classes and selectors with
     # file:line, made without a model and cached per main sha, named in the worker's prompt with
@@ -826,6 +829,7 @@ class Config:
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
             area_notes=env_flag("POOL_AREA_NOTES"),
             notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 8000),
+            index_code_chars=env_int("POOL_INDEX_CODE_CHARS", 6000),
             notes_stale_lines=env_int("POOL_NOTES_STALE_LINES", 200),
             symbol_index=env_flag("POOL_SYMBOL_INDEX"),
             research_brief=env_flag("POOL_RESEARCH_BRIEF"),
@@ -1881,10 +1885,46 @@ def notes_stale(rec: dict, size: int, cfg: "Config", root: pathlib.Path, ref: st
     return ""
 
 
-def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, stage: str = "implement") -> str:
+NOTES_CLAIM = re.compile(r"(`?)([A-Za-z_$][\w$.]*)\1\s*\((\d+)\s*[-\u2013]\s*(\d+)\)")
+
+
+def reanchor_notes(text: str, spans: list[tuple[str, int, int | None, str, str]]) -> tuple[str, int]:
+    """The notes with each `` `name` (A-B) `` claim's lines re-read from the symbol index of the
+    main the reader gets (spans: index_spans of it), and how many changed. A name defined once
+    is taken; one defined in several files only where the notes line names one of them. A
+    name the index does not know keeps its numbers. Writers read the numbers on their own
+    branch, before it merged, and a fifth of them were wrong for the next worker."""
+    by_name: dict[str, list[tuple[str, int, int | None]]] = {}
+    for path, first, last, _kind, name in spans:
+        for key in {name, name.rsplit(".", 1)[-1]}:
+            by_name.setdefault(key, []).append((path, first, last))
+    changed = 0
+    out = []
+    for line in text.splitlines(keepends=True):
+        def fix(m: re.Match) -> str:
+            nonlocal changed
+            found = by_name.get(m.group(2)) or []
+            if len(found) > 1:
+                found = [x for x in found if x[0] in line or x[0].rsplit("/", 1)[-1] in line]
+            if len(found) != 1:
+                return m.group(0)
+            _, first, last = found[0]
+            last = last if last is not None else first + int(m.group(4)) - int(m.group(3))
+            if (first, last) == (int(m.group(3)), int(m.group(4))):
+                return m.group(0)
+            changed += 1
+            return f"{m.group(1)}{m.group(2)}{m.group(1)} ({first}-{last})"
+        out.append(NOTES_CLAIM.sub(fix, line))
+    return "".join(out), changed
+
+
+def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, stage: str = "implement",
+               spans: list | None = None, sha: str = "") -> str:
     """The notes a worker gets and keeps (POOL_AREA_NOTES): their text (not for a conversation
-    resumed in its area, which has the area in context), whether they are stale, and, in the
-    implement stage, the request to update them once the pull request is open."""
+    resumed in its area, which has the area in context), with the line ranges of the names
+    they claim re-read from the index of origin/main at sha (spans, reanchor_notes), whether
+    they are stale, and, in the implement stage, the request to update them once the pull
+    request is open."""
     key = notes_key(u)
     path = knowledge_path(key)
     scope = f"the `{key}` area" if key else "this repository (issues outside any area)"
@@ -1897,6 +1937,11 @@ def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, sta
     if text and not u.info.get("resume"):
         at = f", describing origin/main at {rec['commit'][:8]}" if (rec or {}).get("commit") else ""
         cut = text[:cfg.notes_max_chars] if cfg.notes_max_chars else text
+        moved = 0
+        if spans:
+            cut, moved = reanchor_notes(cut, spans)
+            if moved:
+                at += f"; the line ranges of {moved} names they cite re-read from origin/main at {sha[:8]}"
         out += (f"\nNotes on {scope} from earlier workers{at} ({path}). Use them to find your way before you search:\n"
                 + "\n".join("    " + ln for ln in cut.splitlines()) + "\n")
     elif not text:
@@ -1908,9 +1953,9 @@ def notes_text(u: Unit, cfg: "Config", rec: dict | None, root: pathlib.Path, sta
     return out + (
         f"After your pull request is open (not before it, and not when you release the claim), as your last step "
         f"before your last line: {'rebuild' if stale or not text else 'update'} the notes at {path} for the next worker "
-        f"in {scope}. Two parts only: the file map (each file that matters, with the line ranges of its key functions "
-        "and classes, read from the symbol index or from the files on your branch as they are now, never copied from "
-        "older notes) and the pitfalls (traps you hit, conventions that are not obvious, which tests and commands to "
+        f"in {scope}. Two parts only: the file map (each file that matters, with its key functions and classes written "
+        "as `name` (first-last), read from the symbol index or from the files as they are now, never copied from "
+        "older notes; the supervisor re-reads those ranges on the main the next worker gets) and the pitfalls (traps you hit, conventions that are not obvious, which tests and commands to "
         "run). Leave out what the code says plainly. Read the file again first (another worker may have changed it), "
         f"keep what is still true, drop what your change made wrong, and write it whole, in at most "
         f"{cfg.notes_max_chars} characters. Notes without line ranges are not kept.\n")
@@ -2221,7 +2266,9 @@ def issue_text(thread: dict) -> str:
 MAP_TOKEN = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./:-]{2,60})`")
 MAP_FILES, MAP_TOKENS = 8, 12
 # The framework's own files, never what an issue is about.
-MAP_EXCLUDE = (":!.claude", ":!.agents", ":!.issuelooper", ":!.githooks", ":!*.lock")
+# Nor the acceptance guards: viewport sizes and other common tokens put them in most maps, and
+# workers opened two or three of the eight files a map named.
+MAP_EXCLUDE = (":!.claude", ":!.agents", ":!.issuelooper", ":!.githooks", ":!*.lock", ":!tests/accept")
 
 
 def name_hits(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern: str = "") -> dict[str, dict[str, int]]:
@@ -2255,7 +2302,7 @@ def file_map(root: pathlib.Path, text: str, ref: str = "origin/main", id_pattern
     rereads, and ran 8 searches."""
     hits = name_hits(root, text, ref, id_pattern)
     rows = []
-    for path, names in sorted(hits.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:MAP_FILES]:
+    for path, names in sorted(hits.items(), key=lambda kv: (is_test(kv[0]), -len(kv[1]), kv[0]))[:MAP_FILES]:
         r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{path}"], capture_output=True,
                            text=True, timeout=30)
         n = r.stdout.count("\n") if r.returncode == 0 else "?"
@@ -2397,11 +2444,11 @@ def issue_names(text: str) -> set[str]:
     return {x for x in names if len(x) >= 3 and x.lower() not in NOT_NAMES and not x.isdigit()}
 
 
-def index_ranges(rows: list[str], names: set[str], length=None) -> list[str]:
-    """`path:A-B: kind name` for the index rows that define one of names: B is the line before
-    the next definition in the file at the same level (a method ends at the next row; a class or
+def index_spans(rows: list[str], length=None) -> list[tuple[str, int, int | None, str, str]]:
+    """(path, first, last, kind, name) per index row: last is the line before the next
+    definition in the file at the same level (a method ends at the next row; a class or
     function at the next row that is not one of its methods), or the file's last line from
-    length(path) for its last one. Source files first, at most INDEX_NAMES rows."""
+    length(path) for its last one (None when length is not given or cannot tell)."""
     parsed = []
     for ln in rows:
         m = re.match(r"(.+?):(\d+): (\S+) (.+)$", ln)
@@ -2409,9 +2456,6 @@ def index_ranges(rows: list[str], names: set[str], length=None) -> list[str]:
             parsed.append((m.group(1), int(m.group(2)), m.group(3), m.group(4)))
     out = []
     for k, (path, line, kind, name) in enumerate(parsed):
-        keys = {name, name.rsplit(".", 1)[-1], name.lstrip(".#").split(",")[0]}
-        if not keys & names:
-            continue
         nested = kind == "method" or (kind == "def" and "." in name)
         end = None
         for p2, l2, k2, n2 in parsed[k + 1:]:
@@ -2422,20 +2466,88 @@ def index_ranges(rows: list[str], names: set[str], length=None) -> list[str]:
                 break
         if end is None and length is not None:
             end = length(path)
-        out.append((is_test(path), f"{path}:{line}-{end if end else 'end'}: {kind} {name}"))
+        out.append((path, line, end, kind, name))
+    return out
+
+
+def index_ranges(rows: list[str], names: set[str], length=None) -> list[str]:
+    """`path:A-B: kind name` for the index rows that define one of names (index_spans).
+    Source files first, at most INDEX_NAMES rows."""
+    out = []
+    for path, line, end, kind, name in index_spans(rows, length):
+        keys = {name, name.rsplit(".", 1)[-1], name.lstrip(".#").split(",")[0]}
+        if keys & names:
+            out.append((is_test(path), f"{path}:{line}-{end if end else 'end'}: {kind} {name}"))
     return [x for _, x in sorted(out, key=lambda t: t[0])][:INDEX_NAMES]
 
 
-def index_text(path: str, files: list[str], globs: list[str], text: str = "", length=None) -> str:
+INDEX_CODE_LINES = 60  # lines of one definition's code quoted at most; the rest is read from the file
+HIT_CONTEXT = 8  # lines quoted on each side of a name found in a source file outside any definition
+
+
+def code_excerpt(text: str, first: int, last: int) -> list[str]:
+    """Lines first..last of text (1-based), numbered as the index numbers them."""
+    lines = text.splitlines()
+    return [f"{k:>5}  {lines[k - 1][:200]}" for k in range(max(1, first), min(last, len(lines)) + 1)]
+
+
+def names_code(defined: list[str], hits: dict, source, cap: int) -> str:
+    """The code the issue's names point at, at most cap characters: the body of each
+    definition in defined (`path:A-B: kind name`, cut at INDEX_CODE_LINES lines), then the
+    lines around each name found in a source file (hits: path -> {name: line}) that no quoted
+    definition covers. Workers told where the names were still opened the files and read as
+    much as before; a worker given a concrete starting point read about half as much."""
+    out, used, shown = [], 0, {}  # shown: path -> [(first, last)] quoted
+    blocks = []
+    for row in defined:
+        m = re.match(r"(.+?):(\d+)-(\d+|end): (.+)$", row)
+        if m:
+            first = int(m.group(2))
+            last = int(m.group(3)) if m.group(3) != "end" else first + INDEX_CODE_LINES - 1
+            blocks.append((m.group(1), first, last, first, row))
+    for path, names in hits.items():
+        if is_test(path) or os.path.splitext(path)[1].lower() not in SOURCE_EXT:
+            continue
+        for name, line in sorted(names.items(), key=lambda kv: kv[1]):
+            blocks.append((path, max(1, line - HIT_CONTEXT), line + HIT_CONTEXT, line, f"{path}:{line}: `{name}`"))
+    for path, first, last, at, title in blocks:
+        if any(a <= at <= b for a, b in shown.get(path, [])):
+            continue  # its line is quoted already (a name inside a quoted definition, a method of a quoted class)
+        text = source(path)
+        if not text:
+            continue
+        cut = min(last, first + INDEX_CODE_LINES - 1)
+        lines = code_excerpt(text, first, cut)
+        if cut < last:
+            lines.append(f"       ... ({last - cut} more lines to {last})")
+        block = "    " + title + "\n" + "\n".join("    " + ln for ln in lines) + "\n"
+        if used + len(block) > cap:
+            break
+        out.append(block)
+        used += len(block)
+        shown.setdefault(path, []).append((first, cut))
+    return "".join(out)
+
+
+def index_text(path: str, files: list[str], globs: list[str], text: str = "", source=None,
+               hits: dict | None = None, code_chars: int = 0) -> str:
     """The prompt's note on the symbol index, with the definitions of the issue's names (text)
-    and their line ranges, and its lines for the issue's files (or its area's)."""
+    and their line ranges, the code they point at (names_code, up to code_chars characters,
+    from source(path), the file's text on origin/main), and its lines for the issue's files
+    (or its area's)."""
     try:
         rows = pathlib.Path(path).read_text(errors="replace").splitlines()
     except OSError:
         return ""
     want = [ln for ln in rows if not ln.startswith("#")
             and (ln.split(":", 1)[0] in files or any(config.path_matches(ln.split(":", 1)[0], g) for g in globs))]
-    defined = index_ranges([ln for ln in rows if not ln.startswith("#")], issue_names(text), length) if text else []
+
+    def length(f: str) -> int | None:
+        body = source(f) if source else None
+        return body.count("\n") if body is not None else None
+    defined = (index_ranges([ln for ln in rows if not ln.startswith("#")], issue_names(text),
+                            length if source else None) if text else [])
+    code = names_code(defined, hits or {}, source, code_chars) if source and code_chars > 0 else ""
     out = (f"\nA symbol index of origin/main is at {path}: one line per function, class, method, id or CSS rule, "
            "`path:line: kind name`. Read only the line ranges you need (sed -n 'A,Bp' <file>, or your read tool with "
            "an offset and a limit) and grep results, not whole files: everything you read is sent again with each "
@@ -2445,6 +2557,9 @@ def index_text(path: str, files: list[str], globs: list[str], text: str = "", le
     if defined:
         out += ("Where the issue's names are defined, with the lines to read (`path:first-last: kind name`):\n"
                 + "\n".join("    " + ln for ln in defined) + "\n")
+    if code:
+        out += ("The code those names point at on origin/main, numbered as in the file. Start from it, and open a "
+                "file only for what it leaves out:\n" + code)
     if want:
         out += ("Its lines for the files your issue concerns:\n" + "\n".join("    " + ln for ln in want[:INDEX_EXCERPT])
                 + (f"\n    ... ({len(want) - INDEX_EXCERPT} more)" if len(want) > INDEX_EXCERPT else "") + "\n")
@@ -4714,11 +4829,20 @@ class Session(threading.Thread):
         area = notes_key(self.unit)
         globs = next((a.get("paths") or [] for a in self.pool.cfg.areas if a["name"] == area), []) if area else []
 
-        def length(f: str) -> int | None:
-            r = subprocess.run(["git", "-C", str(root), "show", f"{sha}:{f}"], capture_output=True, text=True,
-                               timeout=30)
-            return r.stdout.count("\n") if r.returncode == 0 else None
-        return index_text(path, files, globs, issue, length)
+        shown: dict[str, str | None] = {}
+
+        def source(f: str) -> str | None:
+            if f not in shown:
+                r = subprocess.run(["git", "-C", str(root), "show", f"{sha}:{f}"], capture_output=True, text=True,
+                                   timeout=30)
+                shown[f] = r.stdout if r.returncode == 0 else None
+            return shown[f]
+        cfg = self.pool.cfg
+        try:
+            hits = name_hits(root, issue, id_pattern=cfg.map_id_pattern) if issue and cfg.index_code_chars else {}
+        except (OSError, subprocess.SubprocessError):
+            hits = {}
+        return index_text(path, files, globs, issue, source, hits, cfg.index_code_chars)
 
     def notes_prompt(self, stage: str) -> str:
         """notes_text for this worker, remembering which notes it keeps and how their file
@@ -4738,8 +4862,20 @@ class Session(threading.Thread):
             self.notes_mark = self.notes_prev = None
         with self.pool.lock:
             rec = dict(self.pool.book.notes.get(key) or {})
+        root = repo_root()
+        spans, sha = None, ""
+        if self.notes_prev:
+            try:
+                sha = subprocess.run(["git", "-C", str(root), "rev-parse", "origin/main"], capture_output=True,
+                                     text=True, timeout=30).stdout.strip()
+                if sha:
+                    rows = [ln for ln in pathlib.Path(symbol_index(root, sha)).read_text(errors="replace").splitlines()
+                            if not ln.startswith("#")]
+                    spans = index_spans(rows)  # a file's last definition keeps the width the notes gave it
+            except (OSError, subprocess.SubprocessError):
+                spans = None
         try:
-            return notes_text(self.unit, self.pool.cfg, rec, repo_root(), stage)
+            return notes_text(self.unit, self.pool.cfg, rec, root, stage, spans, sha)
         except (OSError, subprocess.SubprocessError):
             return ""
 

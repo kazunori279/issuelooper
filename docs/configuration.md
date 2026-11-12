@@ -192,6 +192,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] notes_max_chars` | `POOL_NOTES_MAX_CHARS` | `8000` | Notes longer than this are stale and the next worker rebuilds them. |
 | `[pool] notes_stale_lines` | `POOL_NOTES_STALE_LINES` | `200` | Notes are stale once the files they name changed by more lines than this since the commit they describe. |
 | `[pool] symbol_index` | `POOL_SYMBOL_INDEX` | `false` | Give workers a symbol index of `origin/main` (functions, classes, ids and CSS rules with `file:line`, made without a model, cached per main sha in `$ISSUELOOPER_TMP/index/`), the definitions of the names the issue mentions with their line ranges, and its lines for the issue's files. |
+| `[pool] index_code_chars` | `POOL_INDEX_CODE_CHARS` | `6000` | With `symbol_index`, quote the code the issue's names point at in the worker's prompt, up to this many characters: each definition's body (up to 60 lines), then the lines around each name found in a source file. `0` gives line ranges only. |
 | `[pool] research_brief` | `POOL_RESEARCH_BRIEF` | `false` | Run a worker that starts cold in two conversations under one claim: research writes a brief outside the repository, then a fresh conversation implements from the issue, the brief and the area notes. |
 | `[pool] brief_max_chars` | `POOL_BRIEF_MAX_CHARS` | `16000` | A longer research brief is cut at this length (and logged). |
 | `[pool] research_share` | `POOL_RESEARCH_SHARE` | `0.25` | The research stage's share of the worker timeout. |

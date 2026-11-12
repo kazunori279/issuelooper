@@ -2899,6 +2899,21 @@ def test_area_notes_are_kept_per_area_and_go_stale() -> None:
               "x0..x49" in ccpool.notes_text(ccpool.Unit("worker", "implement", "k", "f", 6, (4,),
                                                          {"area": "live", "resume": "c1"}), h.pool.cfg, rec, work),
               False)
+        spans = ccpool.index_spans(["src/live.py:4: def run_turn", "src/live.py:30: class Session",
+                                    "src/live.py:31: def Session.open", "src/live.py:60: def Session.close",
+                                    "src/other.py:3: def run_turn"])
+        notes = ("src/live.py: `run_turn` (2-20), `Session.open` (25-40)\n"
+                 "src/other.py: `run_turn` (3-9) and `missing_fn` (1-4)\n`run_turn` (5-6) somewhere\n")
+        check("notes' line ranges are re-read from the reader's main: a name defined once, or where the line "
+              "names its file; unknown or ambiguous names keep theirs",
+              ccpool.reanchor_notes(notes, spans),
+              ("src/live.py: `run_turn` (4-29), `Session.open` (31-59)\n"
+               "src/other.py: `run_turn` (3-9) and `missing_fn` (1-4)\n`run_turn` (5-6) somewhere\n", 2))
+        pathlib.Path(SCRATCH, "areas", "live.md").write_text(notes)
+        text = ccpool.notes_text(live, h.pool.cfg, rec, work, "implement", spans, "f" * 40)
+        check("the worker gets the re-read ranges, and is told so",
+              ("`run_turn` (4-29)" in text, "the line ranges of 2 names they cite re-read from origin/main at ffffffff"
+               in text), (True, True))
         off = Rig(state(), areas=AREAS)
         check("off (the default): the per-conversation notes as before",
               f"{SCRATCH}/areas/live-0.md" in ccpool.area_text(live, off.pool.cfg), True)
@@ -2967,7 +2982,29 @@ def test_a_symbol_index_per_main_commit() -> None:
         check("the issue's names that main defines come looked up, with the lines to read, the class to its file's "
               "end", [ln.strip() for ln in named.split("with the lines to read")[1].splitlines()[1:4]],
               ["src/js/map.js:1-3: function drawMap", "src/js/map.js:5-11: class MapCard",
-               "Its lines for the files your issue concerns:"])
+               "The code those names point at on origin/main, numbered as in the file. Start from it, and open a "
+               "file only for what it leaves out:"])
+        code = named.split("open a file only for what it leaves out:")[1].split("Its lines for")[0]
+        check("with their code, numbered as in the file: the worker starts from it instead of opening the files",
+              [ln.strip() for ln in code.splitlines() if ln.strip()][:5],
+              ["src/js/map.js:1-3: function drawMap", "1  export function drawMap(el) {", "2    return el;", "3  }",
+               "src/js/map.js:5-11: class MapCard"])
+        h.pool.cfg.index_code_chars = 0
+        check("POOL_INDEX_CODE_CHARS=0: pointers only", "point at on origin/main" in w.index_prompt("", "drawMap"), False)
+        h.pool.cfg.index_code_chars = 6000
+        body = "\n".join(f"line {k}" for k in range(1, 201)) + "\n"
+        src = {"src/big.py": body, "tests/test_big.py": body}.get
+        got = ccpool.names_code(["src/big.py:10-150: def big"], {"src/big.py": {"fooBar": 170, "big": 12},
+                                                                  "tests/test_big.py": {"fooBar": 3}}, src, 10000)
+        check("a long definition is cut at 60 lines; a name found outside it gets the lines around it; test files "
+              "and lines already shown get none",
+              ([ln.strip() for ln in got.splitlines() if ln.strip().startswith(("...", "src/", "tests/"))],
+               "line 69" in got, "line 70" in got, "line 162" in got, "line 178" in got, "line 161" in got),
+              (["src/big.py:10-150: def big", "... (81 more lines to 150)", "src/big.py:170: `fooBar`"],
+               True, False, True, True, False))
+        check("the whole is capped (POOL_INDEX_CODE_CHARS): what does not fit stays a pointer",
+              ccpool.names_code(["src/big.py:10-150: def big"], {"src/big.py": {"fooBar": 170}}, src, 900).count("src/big.py"),
+              0)
         check("and the worker is not asked to grep the index for them", ("looked up for you" in named,
               "Look a name up there" in named), (True, False))
         check("ranges: a function ends before the next definition, a method at the next row, a class after its "
@@ -6511,6 +6548,7 @@ def test_worker_prompt_carries_the_issue_and_a_file_map() -> None:
     work, g = git_repo(pathlib.Path(tempfile.mkdtemp(prefix="ccpool-map-")))
     for path, body in (("src/settings.js", "a\nconst b = 'forget-history';\n"),
                        ("docs/REQUIREMENTS.md", "R-SET-7 Forget my history\n"),
+                       ("tests/accept/test_accept_3.py", "forget-history R-SET-7\n"),  # guards: never in the map
                        (".issuelooper/hooks/x.py", "forget-history\n")):  # the framework's own files
         (work / path).parent.mkdir(parents=True, exist_ok=True)
         (work / path).write_text(body)
@@ -6522,6 +6560,14 @@ def test_worker_prompt_carries_the_issue_and_a_file_map() -> None:
     m = ccpool.file_map(work, thread["body"], ref="main", id_pattern=r"\bR-[A-Z]+-\d+\b")
     check("and the requirement ids the project's pattern matches", m.splitlines(),
           ["docs/REQUIREMENTS.md (1 lines): R-SET-7@1", "src/settings.js (2 lines): forget-history@2"])
+    (work / "tests" / "e2e").mkdir(parents=True)
+    (work / "tests" / "e2e" / "test_settings.py").write_text("forget-history R-SET-7\n")
+    g("add", "-f", ".")
+    g("commit", "-qm", "y")
+    check("a test that names more of them comes after the files it tests",
+          [ln.split(" (")[0] for ln in ccpool.file_map(work, thread["body"], ref="main",
+                                                         id_pattern=r"\bR-[A-Z]+-\d+\b").splitlines()],
+          ["docs/REQUIREMENTS.md", "src/settings.js", "tests/e2e/test_settings.py"])
     prompt = ccpool.worker_prompt({"issue": 5, "token": "t", "from": "stage:triage", "title": "x"},
                                   "1", "45m", "u", issue=text, files=m)
     check("both in the worker's prompt", ("Issue #5 as of the claim" in prompt, "    src/settings.js" in prompt),
