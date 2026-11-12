@@ -617,11 +617,12 @@ class Config:
     # area_hot_hold_max_s at most. Without a cap, hot-file waits ran to hours, and some hot file
     # was locked almost all the time.
     area_hot_hold_max_s: float = 1800
-    # Then its open pull request holds the hot files its branch changed, until it merges or
-    # closes, for area_hot_hold_pr_s at most after the session that opened it ended (0: the PR
-    # holds nothing). Released when the PR opened, the next worker on the file branched from a
-    # main without it while the PR waited in the merge queue, and the two conflicted.
-    area_hot_hold_pr_s: float = 7200
+    # Then its open pull request holds the hot files its branch changed while it is in the merge
+    # path, until it merges or closes, for area_hot_hold_pr_s at most after the session that
+    # opened it ended (0: the PR holds nothing). Released when the PR opened, the next worker on
+    # the file branched from a main without it while the PR waited in the merge queue, and the
+    # two conflicted; held for two hours, issues waited a median of well over an hour for it.
+    area_hot_hold_pr_s: float = 2700
     # A file of an area that conflicts in this many pull requests within POOL_SPLIT_WINDOW_S
     # becomes one of its hot files for the rest of the run (0 = off). A file in no hot list
     # (settings.js) conflicted more than any other, many times as train skips.
@@ -841,7 +842,7 @@ class Config:
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
-            area_hot_hold_pr_s=float(e("POOL_AREA_HOT_HOLD_PR_S", "") or 7200),
+            area_hot_hold_pr_s=float(e("POOL_AREA_HOT_HOLD_PR_S", "") or 2700),
             area_auto_hot_at=env_int("POOL_AREA_AUTO_HOT_AT", 4),
             area_auto_hot_expire=env_int("POOL_AREA_AUTO_HOT_EXPIRE", 30),
             edge_flag_at=env_int("POOL_EDGE_FLAG_AT", 8),
@@ -1512,11 +1513,15 @@ def plan(
         if cfg.hub_at and deps[n] >= cfg.hub_at:
             prio = max(0, prio - 1)
         return (prio, -deps[n], n)
+    # The PRs that may hold hot files: those whose issue is at stage:pr (a review reject or a
+    # hand-back moved it on).
+    at_pr = {i["number"] for i in st["open"] if "stage:pr" in i["labels"]}
+    holding_prs = {n: p for n, p in pr_of.items() if n in at_pr}
     for i in sorted(claimable, key=claim_rank):
         n = i["number"]
         free = (cfg.global_cap - sum(1 for u in book.running.values() if u.role != "auto")
                 - sum(1 for u in units if u.role != "auto" and not book.why_not(u, cfg, now))) if cfg.global_cap else 0
-        where = (place_in_area(n, book, cfg, holding(book, cfg, now, units), queue, now=now, pr_of=pr_of,
+        where = (place_in_area(n, book, cfg, holding(book, cfg, now, units), queue, now=now, pr_of=holding_prs,
                                free=free) if cfg.areas else
                  ({"fork": conv_forkable(book.repo_seed)} if cfg.fork and conv_forkable(book.repo_seed) else {}))
         if where is None:
@@ -1967,8 +1972,10 @@ def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: 
     POOL_AREA_HOT_HOLD_MAX_S at most; then an open pull request's, the hot files its branch
     changed (Book.convs files), until it merges or closes, for POOL_AREA_HOT_HOLD_PR_S at most
     after its session ended. Freed once the PR was open, the file went to the next worker
-    while the PR still waited in the merge queue, and they conflicted. but: the issue being
-    placed, whose own PR does not hold it out."""
+    while the PR still waited in the merge queue, and they conflicted. A PR handed back (to a
+    worker, or to its author for the guards it fails) holds nothing: its rework can take hours,
+    and its next session holds the files while it runs. pr_of: issue -> its open PR, only those
+    whose issue is at stage:pr. but: the issue being placed, whose own PR does not hold it out."""
     held = set()
     for u in active:
         if u.role != "worker" or not u.info.get("hot"):
@@ -1977,9 +1984,11 @@ def hot_holders(book: Book, cfg: Config, active: list[Unit], now: float, pr_of: 
         if cfg.area_hot_hold_max_s and since is not None and now - since > cfg.area_hot_hold_max_s:
             continue
         held.update(u.info["hot"])
-    for n in pr_of or {}:
+    for n, pr in (pr_of or {}).items():
         rec = book.convs.get(n) or {}
         if n == but or not cfg.area_hot_hold_pr_s or now - float(rec.get("t") or 0) > cfg.area_hot_hold_pr_s:
+            continue
+        if pr.get("number") in book.handed_back or pr.get("number") in book.guard_fix:
             continue
         held.update(f for f in rec.get("files") or [] if config.is_hot(f, cfg.areas))
     return held
@@ -7284,11 +7293,18 @@ class Pool:
 
     def train_batch(self) -> list[dict]:
         """Up to POOL_TRAIN_SIZE queued PRs: P0 and splits of hot files first (every PR that
-        touches the file lands after it and conflicts with it), then in the order they were
+        touches the file lands after it and conflicts with it), then PRs that hold hot files
+        (issues wait for them to land: hot_holders), then by priority and in the order they were
         queued. While main's full check is red, only PRs built on that main (as red_main_hold)."""
         prio = {i["number"]: 0 if split_chore(i) else priority(i["labels"]) for i in (self.prev or {}).get("open", [])}
+
+        def holds_hot(n: int) -> bool:
+            return bool(self.cfg.areas and self.cfg.area_hot_lock and self.cfg.area_hot_hold_pr_s) and any(
+                config.is_hot(f, self.cfg.areas) for f in (self.book.convs.get(n) or {}).get("files") or [])
         with self.lock:
-            entries = sorted(self.book.train.values(), key=lambda e: (prio.get(e["issue"], 9), e["queued"], e["pr"]))
+            entries = sorted(self.book.train.values(), key=lambda e: (
+                0 if prio.get(e["issue"], 9) == 0 else 1 if holds_hot(e["issue"]) else 2,
+                prio.get(e["issue"], 9), e["queued"], e["pr"]))
         last = self.main_check_last
         red = str(last.get("sha") or "") if last.get("ok") is False and self.cfg.red_hold else ""
         if red:

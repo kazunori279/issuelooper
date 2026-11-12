@@ -3295,13 +3295,27 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
     h.pool.book.convs[41]["t"] = h.now
     h.st = state([iss(42, ["stage:triage", "P2"])])
     check("merged (or closed): the hot file is free", [u.number for u in h.step()], [42])
-    held = Rig(state([iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)]), areas=AREAS, area_hot_hold_pr_s=7200,
-               global_cap=8)
-    held.pool.track_areas = lambda st: None
-    held.pool.book.issue_area, held.pool.book.issue_files = {42: "live"}, {42: ["src/live.py"]}
-    held.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": held.now, "files": ["src/live.py"]}
-    check("within POOL_AREA_HOT_HOLD_PR_S an open PR holds it", [u.number for u in held.step(60)], [])
-    check("past it, the hold ends", [u.number for u in held.step(7200)], [42])
+    def held_rig(labels=("stage:pr", "P2")):
+        r = Rig(state([iss(41, list(labels)), iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)]), areas=AREAS,
+                global_cap=8)
+        r.pool.track_areas = lambda st: None
+        r.pool.book.issue_area, r.pool.book.issue_files = {42: "live"}, {42: ["src/live.py"]}
+        r.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": r.now, "files": ["src/live.py"]}
+        return r
+
+    def workers(r, dt=1.0):
+        return [u.number for u in r.step(dt) if u.role == "worker"]
+    held = held_rig()
+    check("within POOL_AREA_HOT_HOLD_PR_S an open PR holds it", workers(held, 60), [])
+    check("past it (45 min by default), the hold ends", workers(held, 2700), [42])
+    back = held_rig()
+    back.pool.book.handed_back[141] = ["b" * 40, False]
+    check("a PR handed back to a worker holds nothing: its rework can take hours", workers(back), [42])
+    author = held_rig()
+    author.pool.book.guard_fix[141] = {"head": "b" * 40, "issue": 41}
+    check("nor one whose author is resumed for the guards it fails", workers(author), [42])
+    check("nor one whose issue left stage:pr (a review reject): both issues start",
+          sorted(workers(held_rig(("stage:triage", "P2")))), [41, 42])
     off = Rig(state([iss(42, ["stage:triage", "P2"])], prs=[pr(141, 41)]), areas=AREAS, area_hot_hold_pr_s=0,
               global_cap=8)
     off.pool.track_areas = lambda st: None
@@ -3309,7 +3323,7 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
     off.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": off.now, "files": ["src/live.py"]}
     check("POOL_AREA_HOT_HOLD_PR_S=0: an open PR holds nothing", [u.number for u in off.step()], [42])
     restore = with_env({"POOL_AREA_HOT_HOLD_PR_S": ""})
-    check("two hours by default", ccpool.Config.from_env().area_hot_hold_pr_s, 7200)
+    check("45 minutes by default", ccpool.Config.from_env().area_hot_hold_pr_s, 2700)
     os.environ["POOL_AREA_HOT_HOLD_PR_S"] = "0"
     check("and 0 from the environment is off", ccpool.Config.from_env().area_hot_hold_pr_s, 0)
     restore()
@@ -6876,6 +6890,14 @@ def test_a_split_of_a_hot_file_goes_first_and_is_not_handed_back_early() -> None
     h.pool.book.train[15] = {"pr": 15, "issue": 5, "head": "b" * 40, "branch": "", "needs_live": False, "queued": 1}
     h.pool.book.train[17] = {"pr": 17, "issue": 7, "head": "c" * 40, "branch": "", "needs_live": False, "queued": 2}
     check("the split's PR goes first in the train, ahead of an older P1", [e["pr"] for e in h.pool.train_batch()], [17])
+    hot = Rig(state([iss(5, ["stage:pr", "P1"]), iss(6, ["stage:pr", "P2"])]), merge_train=True, train_size=1,
+              areas=AREAS)
+    hot.pool.prev = hot.st
+    hot.pool.book.train[15] = {"pr": 15, "issue": 5, "head": "b" * 40, "branch": "", "needs_live": False, "queued": 1}
+    hot.pool.book.train[16] = {"pr": 16, "issue": 6, "head": "c" * 40, "branch": "", "needs_live": False, "queued": 2}
+    hot.pool.book.convs[6] = {"files": ["src/live.py"]}
+    check("a PR that holds a hot file goes before older PRs that hold none: issues wait for it to land",
+          [e["pr"] for e in hot.pool.train_batch()], [16])
     m = Rig(state([split, iss(5, ["stage:pr", "P1"])], prs=[pr(17, 7, mergeable="CONFLICTING"),
                                                              pr(15, 5, mergeable="CONFLICTING")]), merger_max=3)
     m.pool.book.merger_runs.update({17: 3, 15: 3})
