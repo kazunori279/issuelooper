@@ -215,6 +215,9 @@ research_min_files = 2       # POOL_RESEARCH_MIN_FILES: small issues and issues 
 park_on_quota = true         # POOL_PARK_ON_QUOTA: a unit out of quota keeps its worktree and conversation and goes on
                              # later (39 of 129 implement units once timed out under quota and lost their work)
 park_max = 2                 # POOL_PARK_MAX
+slow_call_s = 30             # POOL_SLOW_CALL_S: model calls are slow while their recent median is over this
+slow_extend_s = 1800         # POOL_SLOW_EXTEND_S: then a worker about to wrap up gets this much more time,
+slow_extend_max = 2.0        # POOL_SLOW_EXTEND_MAX: up to this many times its base time limit
 author_resolve = true        # POOL_AUTHOR_RESOLVE: the author's conversation resolves its PR's conflicts; a merger only
                              # when it cannot (a merger re-reads the issue, the PR and main from scratch)
 author_guard = true          # POOL_AUTHOR_GUARD: a change that makes an older guard stale is fixed by its author, not handed back

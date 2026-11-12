@@ -181,6 +181,11 @@ class Cli:
                     return f"{step.get('tool') or ''} {step.get('text') or ''}".strip()
         return ""
 
+    def call_seconds(self, events: list[dict], marks: dict) -> list[float]:
+        """The latencies of the model calls in events newer than marks (conversation -> the
+        newest step counted, updated here). [] where the stream does not time its calls."""
+        return []
+
     def model_stalled(self, events: list[dict]) -> bool:
         """No tool is running and the stream is not finished: if nothing comes next for
         a while, the model went silent."""
@@ -456,6 +461,22 @@ class Agy(Cli):
                 c = self._condense(s)
                 return f"{c.get('tool') or ''} {c.get('text') or ''}".strip()
         return ""
+
+    def call_seconds(self, events, marks):
+        # agy times each model response (an agent_response step's duration_seconds).
+        out = []
+        for e in events:
+            s = e.get("step_update") if e.get("event") == "step_update" else None
+            if not isinstance(s, dict) or s.get("step_type") != "agent_response" or s.get("state") != "DONE":
+                continue
+            conv, idx = s.get("conversation_id") or "", s.get("step_index")
+            if not isinstance(idx, int) or idx <= marks.get(conv, -1):
+                continue
+            marks[conv] = idx
+            sec = s.get("duration_seconds")
+            if isinstance(sec, (int, float)) and sec > 0:
+                out.append(float(sec))
+        return out
 
     def is_result(self, e):
         return e.get("event") == "result"

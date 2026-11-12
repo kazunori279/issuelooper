@@ -274,6 +274,23 @@ def cl_text(text="Looking."):
     }
 
 
+def test_agy_call_seconds() -> None:
+    """The supervisor stretches a worker's time limit while model calls are slow; agy times
+    each model response in its stream."""
+    def step(conv, i, kind, sec, state="DONE"):
+        return {"event": "step_update", "step_update": {"conversation_id": conv, "step_index": i, "step_type": kind,
+                                                        "state": state, "duration_seconds": sec}}
+    events = [step("c1", 1, "agent_response", 12.5), step("c1", 2, "tool", 3.0), step("c1", 3, "agent_response", 40.0),
+              step("c1", 4, "agent_response", 9.0, state="RUNNING")]
+    marks: dict = {}
+    check("each finished model response once, tool steps left out", AGY.call_seconds(events, marks), [12.5, 40.0])
+    events.append(step("c1", 5, "agent_response", 61.0))
+    check("a second look counts only the new ones", AGY.call_seconds(events, marks), [61.0])
+    check("a fork, a new conversation, starts its own count",
+          AGY.call_seconds(events + [step("c2", 1, "agent_response", 7.0)], marks), [7.0])
+    check("a stream that does not time its calls gives none", CLAUDE.call_seconds(events, {}), [])
+
+
 def test_claude_stream() -> None:
     check(
         "session id: the newest one seen",

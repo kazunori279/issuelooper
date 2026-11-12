@@ -5761,6 +5761,37 @@ def test_research_then_a_fresh_implement_conversation() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_worker_gets_more_time_while_model_calls_are_slow() -> None:
+    """Released units all ran to their time limit, half of them while the model's median
+    latency was well over half a minute."""
+    h = Rig(state())
+    w = ccpool.Session(h.pool, ccpool.Unit("worker", "implement", "wrk:5@x", "wrk:5", 5, (4,), {}), 1)
+    check("too few calls to tell: no stretch", (h.pool.calls_slow(), w.slow_extension(2700)), (None, 0.0))
+    h.pool.call_seconds.extend([12.0] * 30)
+    check("calls are quick: none", w.slow_extension(2700), 0.0)
+    h.pool.call_seconds.extend([45.0] * 25)
+    check("the median of the last 40 calls is over POOL_SLOW_CALL_S (30): 30 minutes more",
+          (len(h.pool.call_seconds), h.pool.calls_slow(), w.slow_extension(2700)), (40, 45.0, 1800))
+    w.extended = 1800
+    check("up to POOL_SLOW_EXTEND_MAX (2) times the base limit in all", w.slow_extension(2700), 900)
+    w.extended = 2700
+    check("then no more", w.slow_extension(2700), 0.0)
+    w.extended = 0
+    h.pool.cfg.slow_extend_s = 0
+    check("POOL_SLOW_EXTEND_S=0: off", w.slow_extension(2700), 0.0)
+    w.cli = ccpool.agent_cli.get("agy")
+    w.events = lambda: [{"event": "step_update", "step_update": {"conversation_id": "c", "step_index": 3, "state": "DONE",
+                                                                 "step_type": "agent_response", "duration_seconds": 70.0}}]
+    h.pool.call_seconds.clear()
+    w.note_calls()
+    check("a session adds its finished calls to the pool's", list(h.pool.call_seconds), [70.0])
+    restore = with_env({"POOL_SLOW_CALL_S": "", "POOL_SLOW_EXTEND_S": "", "POOL_SLOW_EXTEND_MAX": ""})
+    cfg = ccpool.Config.from_env()
+    check("defaults: over 30 s, 30 min more, up to 2x", (cfg.slow_call_s, cfg.slow_extend_s, cfg.slow_extend_max),
+          (30, 1800, 2.0))
+    restore()
+
+
 def test_a_unit_out_of_quota_is_parked_and_goes_on_later() -> None:
     """POOL_PARK_ON_QUOTA: under a saturated quota 39 of 129 implement units timed out after their
     clocks had stood still for the 2400-s cap, and their worktrees and conversations were thrown away."""

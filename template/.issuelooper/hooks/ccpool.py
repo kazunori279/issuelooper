@@ -503,6 +503,13 @@ class Config:
     # in its run, and #40 parked at stage:owner after three of them.
     quota_extend_max_s: float = 1800
     quota_timeout_share: float = 0.2
+    # Slow model calls: while the median of the pool's last CALL_WINDOW model-call latencies
+    # is over slow_call_s, an implement unit about to wrap up gets slow_extend_s more, up to
+    # slow_extend_max times its base limit (slow_extend_s 0 = off). Released units all ran to
+    # their budget, half of them while calls took a minute or more.
+    slow_call_s: float = 30
+    slow_extend_s: float = 1800
+    slow_extend_max: float = 2.0
     fast_check_cmd: str = ""  # run on a behind PR merged with main; empty = no check
     rerun_cmd: str = ""  # [sweep] rerun: reruns the named failing tests ({tests}); empty = the whole check again
     main_check: bool = False  # run the full sweep on each new origin/main (Pool.main_check_due)
@@ -791,6 +798,9 @@ class Config:
             transient_resumes=env_int("POOL_TRANSIENT_RESUMES", 2),
             timeout_ceiling=float(e("POOL_TIMEOUT_CEILING", "") or 1.5),
             quota_extend_max_s=float(e("POOL_QUOTA_EXTEND_MAX_S", "") or 1800),
+            slow_call_s=float(e("POOL_SLOW_CALL_S", "") or 30),
+            slow_extend_s=float(e("POOL_SLOW_EXTEND_S", "") or 1800),
+            slow_extend_max=float(e("POOL_SLOW_EXTEND_MAX", "") or 2.0),
             quota_timeout_share=float(e("POOL_QUOTA_TIMEOUT_SHARE", "") or 0.2),
             fast_check_cmd=e("POOL_FAST_CHECK_CMD", "").strip(),
             rerun_cmd=e("SWEEP_RERUN", "").strip(),
@@ -3651,6 +3661,9 @@ def pid_alive(pid: int) -> bool:
 NOT_A_FAILURE = ("startup crash", "quota error", "transient error", "timed out under quota",
                  "stopped with the supervisor", "cut off with its background task", "parked for quota",
                  "parked unit could not go on")
+# Model-call latencies the pool keeps (Pool.call_seconds), and how many it needs before their
+# median counts (Pool.calls_slow).
+CALL_WINDOW, CALL_MIN = 40, 10
 # A worker that released its claim itself (claim.py release) and opened no pull request.
 RELEASED = "released"
 # A worker that ended with no pull request and no release of its own, while a sweep it had
@@ -3698,6 +3711,8 @@ class Session(threading.Thread):
         self.forked_conv: str | None = None
         self.fork_counted = False
         self.inturn_hits = 0  # quota errors the CLI retried inside this session's turns
+        self.call_marks: dict = {}  # conversation -> the newest model-call step counted (Pool.call_seconds)
+        self.extended = 0.0  # seconds its time limit was stretched for slow model calls
         self._stream: dict | None = None  # events(): what of session.jsonl was read and parsed
         self._stream_lock = threading.Lock()  # events() runs in the session's thread and the pool's
         slug = re.sub(r"[^\w.-]+", "_", unit.key)[:60]
@@ -3908,6 +3923,20 @@ class Session(threading.Thread):
                         self.kill()
                         rc = 75
                         break
+                    self.note_calls()
+                    add = self.slow_extension(seconds(timeout)) if (
+                        role == "worker" and self.unit.kind == "implement" and self.stage != "research"
+                        and not wrapped and time.time() > (wrap_at or soft) - 60) else 0.0
+                    if add:
+                        self.extended += add
+                        soft, hard, ceiling = soft + add, hard + add, ceiling + add
+                        if wrap_at:
+                            wrap_at += add
+                        with open(self.dir / "resumes.log", "a") as rl:
+                            rl.write(f"{time.time():.0f} time limit stretched {add:.0f} s: model calls are slow "
+                                     f"(median {self.pool.calls_slow():.0f} s)\n")
+                        self.pool.log("slow_extend", session=self.seq, unit=self.unit.key, add_s=round(add),
+                                      extended_s=round(self.extended), median_s=round(self.pool.calls_slow() or 0, 1))
                     quiet = self.quiet_s()
                     if time.time() > ceiling:
                         with open(self.dir / "resumes.log", "a") as rl:
@@ -4087,7 +4116,7 @@ class Session(threading.Thread):
         except OSError:
             errtext = ""
         timed_out = (rc == 124 or bool(cli.timeout_text and cli.timeout_text in errtext)
-                     or elapsed >= seconds(timeout) + 900 + paused or time.time() > ceiling)
+                     or elapsed >= seconds(timeout) + 900 + paused + self.extended or time.time() > ceiling)
         return rc, elapsed, timed_out
 
     def park_allowed(self) -> bool:
@@ -4348,6 +4377,31 @@ class Session(threading.Thread):
             c["mark"] = (c["mark"] + data[:cut])[-64:]
         tail = data[cut:]
         return c["events"] + agent_cli.parse(tail.decode(errors="replace").splitlines()) if tail else list(c["events"])
+
+    def note_calls(self) -> None:
+        """Add the model calls this session finished since the last look to the pool's
+        latencies (Cli.call_seconds), at most once a minute."""
+        if time.time() - getattr(self, "_calls_at", 0.0) < 60:
+            return
+        self._calls_at = time.time()
+        try:
+            secs = self.cli.call_seconds(self.events(), self.call_marks)
+        except (OSError, ValueError, TypeError):
+            return
+        if secs:
+            with self.pool.lock:
+                self.pool.call_seconds.extend(secs)
+
+    def slow_extension(self, base: float) -> float:
+        """Seconds to stretch this unit's time limit by now: POOL_SLOW_EXTEND_S while the pool's
+        model calls are slow (Pool.calls_slow over POOL_SLOW_CALL_S), up to POOL_SLOW_EXTEND_MAX
+        times the base limit in all; 0 otherwise."""
+        cfg = self.pool.cfg
+        room = (cfg.slow_extend_max - 1) * base - self.extended
+        median = self.pool.calls_slow()
+        if not cfg.slow_extend_s or room < 60 or median is None or median <= cfg.slow_call_s:
+            return 0.0
+        return min(cfg.slow_extend_s, room)
 
     def quiet_s(self) -> float:
         """Seconds since the session last wrote to its stream (0 when it has none)."""
@@ -5821,6 +5875,7 @@ class Pool:
         self.red_failed: dict[str, str] = {}  # test -> the red main it failed on (sweep_hand_back)
         self.own_deployed = ""
         self.ux_scores: list[dict] = []  # {t, sha, score} per UX run, score None when its report had none
+        self.call_seconds: collections.deque = collections.deque(maxlen=CALL_WINDOW)  # the newest model-call latencies
         self.undeployed_since = 0.0  # when main first moved past the last deploy started
         self.stopping = False
         self.halt = threading.Event()  # set with stopping, for sessions that wait
@@ -6537,6 +6592,16 @@ class Pool:
                 cur.update({(int(a) if str(a).isdigit() else a): b for a, b in v.items()})
             else:
                 setattr(self.book, k, v)
+
+    def calls_slow(self) -> float | None:
+        """The median of the pool's newest model-call latencies (Session.note_calls), or None
+        with fewer than CALL_MIN of them."""
+        with self.lock:
+            secs = sorted(self.call_seconds)
+        if len(secs) < CALL_MIN:
+            return None
+        mid = len(secs) // 2
+        return secs[mid] if len(secs) % 2 else (secs[mid - 1] + secs[mid]) / 2
 
     def record_ux_score(self, w: Session, outcome: str = ""):
         """The score from the UX run's report (an explorer's from its own), for pool.jsonl

@@ -199,6 +199,9 @@ Routes issues to persistent area conversations and serializes work on hot files.
 | `[pool] research_min_files` | `POOL_RESEARCH_MIN_FILES` | `2` | A research stage only for an issue in an area with at least this many predicted files (`0`: every cold unit). |
 | `[pool] park_on_quota` | `POOL_PARK_ON_QUOTA` | `true` | Park an implement unit that reaches the quota clock-pause cap (`POOL_RETRY_PAUSE_MAX_S`) or times out mostly waiting for quota: keep its claim, worktree and conversation, free its slot, and resume it once its quota group's pause is over. |
 | `[pool] park_max` | `POOL_PARK_MAX` | `2` | Parks per unit; after that it ends as an unfinished worker does. |
+| `[pool] slow_call_s` | `POOL_SLOW_CALL_S` | `30` | Model calls count as slow while the median of the pool's last 40 call latencies is over this many seconds (agy times each model response; Claude Code's stream does not, so its sessions add none). |
+| `[pool] slow_extend_s` | `POOL_SLOW_EXTEND_S` | `1800` | While calls are slow, an implement unit about to wrap up gets this many seconds more, again at each later wrap-up point while they stay slow (`0` disables). |
+| `[pool] slow_extend_max` | `POOL_SLOW_EXTEND_MAX` | `2.0` | The stretched limit is at most this many times the unit's base time limit. |
 | `[pool] author_resolve` | `POOL_AUTHOR_RESOLVE` | `false` | Resume the PR author's conversation to resolve rebase conflicts or red rebases before falling back to a merger. |
 | `[pool] author_resolve_max` | `POOL_AUTHOR_RESOLVE_MAX` | `2` | Maximum author conflict-resolution attempts before handing to a merger. |
 | `[pool] author_guard` | `POOL_AUTHOR_GUARD` | `false` | Resume the PR author's conversation when a merge-train acceptance guard fails because of that PR. |
