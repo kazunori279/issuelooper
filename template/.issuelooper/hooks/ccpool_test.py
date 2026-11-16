@@ -1308,6 +1308,14 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     calls, pool, verified = settle([named], logdir=logdir)
     check("the saved script names an always row only in its header: not verified, a fresh session checks again",
           (verified, ccpool.ACCEPT_RETRY in calls[0], "always:reload-mid-task" in calls[0]), ([], True, True))
+    check("the refusal says exactly what the block needs",
+          ("`test_accept_9.py` has no block for `always:reload-mid-task`" in calls[0],
+           "a comment line naming the id (`# always:reload-mid-task`), then what the user does" in calls[0]),
+          (True, True))
+    check("a row the verdict does not name: list it on the rows line, or skip it with a reason",
+          ccpool.gap_fixes("accept-verified: x", {"n": 9, "rows": ["lang:ja"]}, None),
+          ["- The verdict does not name `lang:ja`: run each, and list it on the verdict's `rows:` line (or write "
+           "`skip: <id> <why>` for one that cannot apply)."])
     script.write_text("# accept-rows: viewport:320x640 lang:ja always:reload-mid-task\ndef test_accept_9(page):\n"
                       "    # always:reload-mid-task: reload while a reply streams\n    page.reload()\n"
                       "    expect(page.locator('.bubble')).to_have_count(1)\n    # viewport:320x640\n"
@@ -1330,8 +1338,10 @@ def test_acceptance_verdicts_settle_themselves() -> None:
     unit.info["issues"][0]["shots"] = True
     script.write_text("# always:reload-mid-task\npage.reload()\nexpect(page.locator('.map')).to_be_visible()\n")
     calls, pool, verified = settle([named], logdir=logdir)
-    check("a change that needs a screenshot check, verified without one: not verified, and the retry says so",
-          (verified, ccpool.SHOTS_GAP in calls[0]), ([], True))
+    check("a change that needs a screenshot check, verified without one: not verified, and the retry says what to add",
+          (verified, "screenshot it (`locator.screenshot()`) and check its pixels" in calls[0]), ([], True))
+    check("and says it is about form, not the behavior, so the next tester fixes the script",
+          ccpool.FORM_ONLY in calls[0], True)
     script.write_text("from io import BytesIO\nfrom PIL import Image\n# always:reload-mid-task\npage.reload()\n"
                       "shot = Image.open(BytesIO(page.locator('.map').screenshot()))\n"
                       "assert len(shot.convert('RGB').getcolors(1 << 20)) > 8\n")
@@ -1605,6 +1615,10 @@ def test_accepted_scripts_become_guards_run_on_each_deploy() -> None:
               ([x.split(" --label")[0] for x in created], "print('six')" in created[0] if created else False,
                "print('five')" in created[0] if created else True),
               (["issue create --title Acceptance tests for #6"], True, False))
+        check("the chore asks guards to wait for lazy images and settling values, and live tests to skip without "
+              "the live configuration",
+              ("expect.poll(...)" in created[0], "img.complete && img.naturalWidth > 0" in created[0],
+               "pytest.skip(...)" in created[0]), (True, True, True))
         check("the chore asks each guard to make its own fresh state (one assumed an empty feed after reload)",
               ("a fresh state the test makes itself" in created[0], "never an assumption that" in created[0]), (True, True))
         check("no size limit QA could fail a chore on; the whole suite runs before the PR; isolation made explicitly",

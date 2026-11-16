@@ -3190,7 +3190,9 @@ def tester_prompt(u: Unit, port: int, timeout: str, journeys: str = "", previous
                "closed issue; never reopen, relabel or close it yourself (the supervisor acts on your verdict). "
                if closed else "")
             + "Someone else wrote each change, and its author already says it works: check as if you had not seen "
-            "that. For each issue, read it, its comments, its merged PR and every spec requirement it cites (with "
+            "that. When the issue has a supervisor comment marked `accept-retry` that lists what to fix in the "
+            "verdict or the script, fix exactly those lines and run the script again: they are about form, not the "
+            "behavior. For each issue, read it, its comments, its merged PR and every spec requirement it cites (with "
             "the spec's strings for every language), then drive what it asked for on screen with a script, in "
             "scripted mode or in live mode where marked, through the checklist rows its change needs, and try to "
             "break it: each viewport down to 390 and 320 px, the other language, a reload mid-turn and after, the "
@@ -3495,6 +3497,43 @@ def live_unproven(body: str, item: dict) -> bool:
     line must name it (or the verdict is `live-verified:`). Fewer than half of such verdicts
     ran live mode, and live defects went out verified."""
     return bool(item.get("live")) and not LIVE_RUN.search(body)
+
+
+def gap_fixes(body: str, item: dict, script: str | None) -> list[str]:
+    """What a verified verdict must change before it counts, one line per gap, each saying
+    exactly what to write: rows the verdict does not name, rows the saved script has no
+    block for, live mode, the screenshot check. Refusals that only said what was left out
+    were followed by a second refusal and a reopen of working code."""
+    rows, n = item.get("rows") or [], item.get("n", "N")
+
+    def ids(xs):
+        return ", ".join(f"`{x}`" for x in xs)
+    out = []
+    unnamed = unchecked_rows(body, rows)
+    if unnamed:
+        out.append(f"- The verdict does not name {ids(unnamed)}: run each, and list it on the verdict's `rows:` line "
+                   "(or write `skip: <id> <why>` for one that cannot apply).")
+    loose = [r for r in unchecked_rows(body, rows, script) if r not in unnamed] if script is not None else []
+    if loose and not script:
+        out.append(f"- No script was saved: save it as `$LOGDIR/accept/test_accept_{n}.py`, with a block for "
+                   f"{ids(loose)} as below.")
+    elif loose:
+        out.append(f"- `test_accept_{n}.py` has no block for {ids(loose)}. For each: a comment line naming the id "
+                   f"(`# {loose[0]}`), then what the user does (a click, a reload, input, a resize), then an "
+                   "assertion after that (`expect(...)` or `assert`). A row named only in the `# accept-rows:` "
+                   "header, or asserted before an action of its own, does not count.")
+    if live_unproven(body, item):
+        out.append("- The issue is marked live: run it in live mode and write `live mode` on the `accept-verified:` "
+                   "line.")
+    if shots_unchecked(script, item):
+        out.append(f"- The change touches maps or images: in `test_accept_{n}.py`, wait for each to load, screenshot "
+                   "it (`locator.screenshot()`) and check its pixels (more than a few colors with Pillow's "
+                   "`Image.getcolors`; `naturalWidth > 0` for an `<img>`).")
+    return out
+
+
+FORM_ONLY = ("This is about the verdict's and the script's form, not the behavior: fix the lines below in the script "
+             "and the verdict and run it again; nothing in the code needs to change for them.")
 
 
 def script_of(logdir: pathlib.Path | None, item: dict) -> str | None:
@@ -8313,12 +8352,13 @@ class Pool:
                 self.record_sample(n, True)
                 how = "verified"
             elif not retried:
-                why = (f"left out {', '.join(missing)} (each row named in the verdict and asserted in its own block "
-                       "of the saved script; live mode said on the verdict line)" if missing
-                       else "did not show the behavior")
+                fixes = gap_fixes(body, x, script_of(logdir, x)) if missing else []
+                text = (f"The post-merge check says accept-verified ({url}), but it does not count yet. {FORM_ONLY}\n\n"
+                        + "\n".join(fixes or [f"- Left out: {', '.join(missing)}."]) + "\n\n" if missing else
+                        f"The post-merge check did not show the behavior ({url}). ")
                 self.gh("issue", "comment", str(n), "--body",
-                        f"<!-- merger -->\n{ACCEPT_RETRY}\nThe post-merge check {why} ({url}). A fresh tester session "
-                        "checks it once more before it counts.")
+                        f"<!-- merger -->\n{ACCEPT_RETRY}\n{text}A fresh tester session checks it once more before it "
+                        "counts" + (", starting from the lines above." if missing else "."))
                 with self.lock:
                     self.book.accept_rounds[n] += 1
                 how = "retry"
@@ -8540,19 +8580,18 @@ class Pool:
                            + ([SHOTS_GAP] if shots_unchecked(script_of(logdir, x), x) else []))
                 retried = any(ACCEPT_RETRY in str(c.get("body", "")) and str(c.get("createdAt", "")) >= entry
                               for c in comments)
-                why = (f"The acceptance check says accept-verified ({url}) but leaves out what the merged change "
-                       f"needs: {', '.join(missing)}. Each checklist row is named in the verdict and asserted in its "
-                       "own block of the saved script, and an issue marked live is checked in live mode, said on the "
-                       "accept-verified line.")
+                fixes = gap_fixes(body, x, script_of(logdir, x)) or [f"- Left out: {', '.join(missing)}."]
+                why = (f"The acceptance check says accept-verified ({url}), but it does not count yet. {FORM_ONLY}\n\n"
+                       + "\n".join(fixes) + "\n\n")
                 if not retried:
-                    self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_RETRY}\n{why} A fresh "
-                            "tester session checks it once more, through every row, before it counts.")
+                    self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_RETRY}\n{why}A fresh "
+                            "tester session checks it once more, starting from the lines above, before it counts.")
                     with self.lock:
                         self.book.accept_rounds[n] += 1
                     how = "retry (rows missing)"
                 else:
                     self.gh("issue", "edit", str(n), "--remove-label", stage, "--add-label", "stage:triage")
-                    self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_HANDBACK}\n{why} The "
+                    self.gh("issue", "comment", str(n), "--body", f"<!-- merger -->\n{ACCEPT_HANDBACK}\n{why}The "
                             "second check left them out too, so it is not verified: back to stage:triage. The next "
                             "worker checks those rows in its live check.")
                     self.event(f"#{n}: accept-verified twice without rows {', '.join(missing[:3])}; back to stage:triage.")
@@ -8747,6 +8786,13 @@ class Pool:
         "(`page.goto`, `page.reload`): the review gate rejects both;\n"
         "- one browser page, and waits on what the page shows (`expect(...).to_be_visible()`, "
         "`wait_for_selector`), never fixed sleeps;\n"
+        "- a value that settles later is waited for, never read once: `expect.poll(...)`, or "
+        "`page.wait_for_function(\"img => img.complete && img.naturalWidth > 0\", arg=img)` for an image "
+        "(lazy images load after they become visible, and a guard that read `naturalWidth` right after "
+        "`to_be_visible()` failed by chance);\n"
+        "- a live-mode test skips when the live configuration or credentials are not there "
+        "(`pytest.skip(...)` behind a has-live-env check: the key, or the file .issuelooper/project.md names), "
+        "so a machine without them does not file regressions;\n"
         "- no reads of source files, line counts or file-structure checks: drop such parts of a script;\n"
         "- the issue's own checks, not the tester's whole script: one test per issue, a block per checklist row, "
         "setup shared through the suite's fixtures, a few seconds to run, and at most "

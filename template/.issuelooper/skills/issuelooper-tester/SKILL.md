@@ -159,13 +159,23 @@ accept-verified: <what ran, e.g. Playwright at 1280x800, 390x844, 320x640 in en 
    (Pillow) for a map, and `naturalWidth > 0` for an `<img>`: a grey map or a broken image
    passes every DOM check. It becomes the issue's regression test, so keep only what a user sees: no reads of
    source files, line counts or file structure (a split issue's script is not saved
-   at all), one page, waits on what the page shows rather than fixed sleeps. It starts
+   at all), one page, waits on what the page shows rather than fixed sleeps. A value that
+   settles later is waited for, never read once: `expect.poll(...)`, or
+   `page.wait_for_function("img => img.complete && img.naturalWidth > 0", arg=img)`
+   before an image's size or pixels are read (a lazy image loads after it becomes
+   visible). A live-mode script skips (`pytest.skip(...)`) when the live configuration
+   or credentials are not there, so it fails only on a machine that has them. It starts
    from a fresh state it makes itself: its own browser context, and a fresh server-side
    conversation or user when the app keeps them (`.issuelooper/project.md` names the
    fixture); never another test's leftovers or an empty history taken for granted. Make
    that isolation explicit: a script that relies on the app keeping each browser apart
    today (a cookie, a per-browser id) breaks when a correct change drops it, and the
    guards then fail together while each passes alone.
+
+   When the supervisor refuses a verified verdict, its `accept-retry` comment lists what
+   to fix, line by line (a row to name, a block to add, live mode to say, a screenshot
+   to check). Those are about form: fix exactly those lines in the script and the
+   verdict, run the script again, and post the verdict again.
 
 Write `$LOGDIR/accept_report.md`, one line per issue: its number and verdict
 (`verified`, `failed: <what>`, `blocked: <what>`). Then stop the server and remove `$T`.
