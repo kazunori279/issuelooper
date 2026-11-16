@@ -120,7 +120,7 @@ Configures post-merge acceptance (`"gate"`, `"after"`, or `"off"`), the shared w
 | `[devcheck] ready_path` | `DEVCHECK_READY_PATH` | `"/"` | HTTP path polled until it responds with status `< 500`. |
 | `[devcheck] command` | `DEVCHECK_COMMAND` | `""` | End-to-end smoke command run against `$DEVCHECK_URL` before the worker's own replay scripts (keep this script under `[guard] protected_paths`). |
 | `[devcheck] script_runner` | `DEVCHECK_SCRIPT_RUNNER` | `"python3"` | Runner used for worker replay scripts (for example `"uv run python"`). |
-| `[devcheck] slots` | `DEVCHECK_SLOTS` | `2` | Maximum concurrent `devcheck` runs. |
+| `[devcheck] slots` | `DEVCHECK_SLOTS` | `0` | Maximum concurrent `devcheck` runs. `0` (or unset) picks 4 on a machine with 16 or more CPUs available to the process, else 2; any other value is used as given. |
 | `[devcheck] port_base` | `DEVCHECK_PORT_BASE` | `8700` | Base port for `devcheck` slots (`port_base + slot`). |
 | `[devcheck] step_timeout_s` | `DEVCHECK_STEP_TIMEOUT_S` | `180` | Timeout in seconds for each `devcheck` step. |
 | `[devcheck] paths` | `DEVCHECK_PATHS` | `["src/"]` | Path prefixes whose PRs require a passing `devcheck` record. |

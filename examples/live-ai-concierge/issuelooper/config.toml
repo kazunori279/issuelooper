@@ -66,7 +66,8 @@ command = ""                 # DEVCHECK_COMMAND: no project smoke here: ux/journ
                              # records failed steps instead of failing, so it serves the tester's UX runs. A smoke
                              # for this key exits non-zero when a step fails and lives under ux/ (the owner's)
 script_runner = "uv run python"   # DEVCHECK_SCRIPT_RUNNER: workers' Playwright scripts
-slots = 2                    # DEVCHECK_SLOTS: live checks at once (each one talks to the Gemini Live API)
+slots = 0                    # DEVCHECK_SLOTS: live checks at once (each one talks to the Gemini Live API); 0 = 4 with
+                             # 16 or more CPUs, else 2
 port_base = 8700             # DEVCHECK_PORT_BASE
 paths = ["src/"]             # DEVCHECK_PATHS
 labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS

@@ -330,6 +330,21 @@ def test_stop_group_reaps_after_its_leader_exits() -> None:
         shutil.rmtree(pid_file.parent, ignore_errors=True)
 
 
+def test_slots_follow_the_cpus_unless_set() -> None:
+    """Two slots on a 16-CPU machine: checks waited in take_slot until a watchdog killed them."""
+    check("16 or more CPUs: 4 slots; fewer: 2", [devcheck.default_slots(c) for c in (8, 15, 16, 32)], [2, 2, 4, 4])
+    old = os.environ.get("DEVCHECK_SLOTS")
+    try:
+        for value, want in (("3", 3), ("1", 1), ("0", devcheck.default_slots()), ("", devcheck.default_slots())):
+            os.environ["DEVCHECK_SLOTS"] = value
+            check(f"DEVCHECK_SLOTS={value!r}", devcheck.slot_count(), want)
+    finally:
+        if old is None:
+            os.environ.pop("DEVCHECK_SLOTS", None)
+        else:
+            os.environ["DEVCHECK_SLOTS"] = old
+
+
 def test_refusals() -> None:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="devcheck-"))
     repo = make_repo()

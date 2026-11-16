@@ -150,7 +150,8 @@ ready_path = "/"             # DEVCHECK_READY_PATH: the app is up once this path
 command = ""                 # DEVCHECK_COMMAND: the project's end-to-end smoke against $DEVCHECK_URL, run before
                              # the worker's own scripts; keep it in an owner's path (guard.protected_paths)
 script_runner = "python3"    # DEVCHECK_SCRIPT_RUNNER: runs each worker script (such as "uv run python")
-slots = 2                    # DEVCHECK_SLOTS: checks that may run at the same time (each one uses the real services)
+slots = 0                    # DEVCHECK_SLOTS: checks that may run at the same time (each one uses the real services);
+                             # 0 = 4 on a machine with 16 or more CPUs, else 2
 port_base = 8700             # DEVCHECK_PORT_BASE: slot k serves on port_base + k
 paths = ["src/"]             # DEVCHECK_PATHS: a PR that changes any of these needs a live check
 labels = ["owner-request", "needs:live", "ux:accepted"]   # DEVCHECK_LABELS: so does a PR for an issue with one

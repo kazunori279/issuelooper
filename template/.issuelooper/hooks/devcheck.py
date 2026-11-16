@@ -10,8 +10,9 @@ real environment (real models, real services, the project's credentials) and use
 The sweep runs the test suite against test doubles; this runs the app for real. A
 worker runs it from its worktree, never from the shared checkout.
 
-1. Takes one of $DEVCHECK_SLOTS slots (`flock`, as the sweep does). Slot k listens
-   on $DEVCHECK_PORT_BASE + k, so two checks never share a port.
+1. Takes one of $DEVCHECK_SLOTS slots (`flock`, as the sweep does; unset or 0: 4 on a
+   machine with 16 or more CPUs, else 2). Slot k listens on $DEVCHECK_PORT_BASE + k,
+   so two checks never share a port.
 2. Starts the app with $DEVCHECK_START (`bash -c` at the worktree root, in its own
    process group) and waits until $DEVCHECK_URL$DEVCHECK_READY_PATH answers with
    any status below 500.
@@ -109,6 +110,27 @@ def script_rows(scripts) -> tuple[list[str], dict[str, str]]:
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, "").strip() or default
+
+
+def default_slots(cpus: int | None = None) -> int:
+    """Slots when $DEVCHECK_SLOTS is unset or 0: 4 with 16 or more CPUs this process may run
+    on, else 2. Two slots on a 16-CPU machine left checks waiting in take_slot long enough
+    for a watchdog to kill them as hung."""
+    if cpus is None:
+        try:
+            cpus = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            cpus = os.cpu_count() or 1
+    return 4 if cpus >= 16 else 2
+
+
+def slot_count() -> int:
+    """$DEVCHECK_SLOTS ([devcheck] slots); unset or 0: default_slots()."""
+    try:
+        n = int(_env("DEVCHECK_SLOTS", "0"))
+    except ValueError:
+        n = 0
+    return n if n > 0 else default_slots()
 
 
 def record_dir() -> pathlib.Path:
@@ -505,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
     # The slots (and so the ports) are the machine's, shared by every loop on it, as the
     # sweep's are; the records and logs are this repository's ($ISSUELOOPER_TMP).
     lock = _env("DEVCHECK_LOCK", "/tmp/issuelooper-devcheck.lock")
-    slots = max(1, int(_env("DEVCHECK_SLOTS", "2")))
+    slots = slot_count()
     begin = time.time()
     got = take_slot(lock, slots, float(_env("DEVCHECK_LOCK_DEADLINE_S", "1800")))
     if got is None:
