@@ -2112,6 +2112,21 @@ def test_files_in_the_shared_checkout() -> None:
         verdict, reason = run(cmd, role="worker", host=AGY)
         check(f"refused (if the cd fails it runs in the shared checkout): {cmd!r}",
               (verdict, "not checked" in reason), ("refuse", True))
+    # A worker's `cd` and server start ended with `&`: the whole list went to a background
+    # subshell, and the `rm -f .env` after it ran in the shared checkout.
+    bg = ('cd /tmp/issuelooper-x/wrk-3-12-wt && ln -sf "$SHARED_REPO_PATH/.env" .env && nohup uv run app --port 8799 '
+          '> /tmp/issuelooper-x/wrk-3-12-app.log 2>&1 < /dev/null &\nsleep 5; lsof -ti:8799 | xargs kill ; rm -f .env app.db')
+    verdict, reason = run(bg, role="worker", host=AGY)
+    check("a `cd` in a list that ends with `&` does not carry past it: refused, and the reason says why",
+          (verdict, "An earlier `&` sent the `cd`" in reason), ("refuse", True))
+    for cmd in ('cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & rm -f .env', 'cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null &\nwait; rm -f .env',
+                'cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & echo started; mv .env .env.bak'):
+        verdict, _ = run(cmd, role="worker", host=AGY)
+        check(f"refused after a backgrounded cd: {cmd!r}", verdict, "refuse")
+    for cmd in ('(cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null &) ; cd "$WT" && rm -f .env', 'cd "$WT" && (nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null &) && rm -f .env',
+                'cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & cd "$WT" && rm -f .env', 'nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & rm -f "$WT/.env"'):
+        verdict, _ = run(cmd, role="worker", host=AGY)
+        check(f"allowed: the rm runs in the worktree: {cmd!r}", verdict, "allow")
     verdict, _ = run("rm -f .env", role="worker", cwd=shared)
     check("Claude Code's cwd at the shared checkout counts too", verdict, "refuse")
     for cmd in ('cd "$WT" && rm -f .env', 'rm -f "$WT/.env"', 'ln -sf "$SHARED_REPO_PATH/.env" "$WT/.env"',

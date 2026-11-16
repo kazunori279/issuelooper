@@ -1086,13 +1086,23 @@ def shared_file_check(command: str, cwd: str | None) -> None:
     it). The shared checkout's .env, which only the owner has, disappeared in a test run of the sample and
     live checks stopped for hours; workers link it into their worktrees and remove the
     link again, and a bare `rm -f .env` run there, or after a `cd` that failed, removes
-    the real file."""
+    the real file. A list that ends with `&` runs in a background subshell, its `cd` with
+    it: `cd "$WT" && ... nohup app &` followed by `rm -f .env` removed the shared .env."""
     segments = command_segments(command)
     here = None if cwd is None else cwd  # where the next command runs (None: the session's cwd)
     shaky = False  # an earlier `cd` may have failed, leaving the command where it started
     strict = False  # `set -e`: a failed `cd` ends the command
     outer = []  # (here, shaky) outside each open subshell: a `cd` in `( ... )` stays in it
+    prev = None  # the separator before this simple command
+    start = (here, shaky)  # where the current and-or list started
+    after_bg = False  # a `cd` was left behind in a backgrounded list
     for words, sep in segments:
+        if prev == "&":
+            after_bg = after_bg or start[0] != here
+            here, shaky = start  # the list before `&` ran in a subshell of its own
+        if prev in (None, ";", "\n", "&", ";;", "("):
+            start = (here, shaky)
+        prev = sep
         if sep == "(":
             outer.append((here, shaky))
         elif sep == ")" and outer:
@@ -1137,6 +1147,10 @@ def shared_file_check(command: str, cwd: str | None) -> None:
                     "Name your own path: `rm -f \"$WT/.env\"` rather than `rm -f .env` (a command with "
                     "no `cd` runs in the shared checkout), or `cd \"$WT\" && ...` in the same command. "
                     "If something in the shared checkout looks wrong, say so on your issue."
+                    + ("\n\nAn earlier `&` sent the `cd` before it to the background with its list, so this part "
+                       "runs where the command started. Start the server in a subshell of its own "
+                       "(`(cd \"$WT\" && nohup ... &)`), then `cd \"$WT\" && ...` again for the rest."
+                       if after_bg else "")
                 )
             if relative and shaky:
                 block(
