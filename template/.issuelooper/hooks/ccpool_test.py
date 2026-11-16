@@ -3374,7 +3374,7 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
         return [u.number for u in r.step(dt) if u.role == "worker"]
     held = held_rig()
     check("within POOL_AREA_HOT_HOLD_PR_S an open PR holds it", workers(held, 60), [])
-    check("past it (45 min by default), the hold ends", workers(held, 2700), [42])
+    check("past it (an hour by default), the hold ends", workers(held, 3600), [42])
     back = held_rig()
     back.pool.book.handed_back[141] = ["b" * 40, False]
     check("a PR handed back to a worker holds nothing: its rework can take hours", workers(back), [42])
@@ -3390,7 +3390,7 @@ def test_dependency_edges_and_the_hot_lock_do_not_starve_the_pool() -> None:
     off.pool.book.convs[41] = {"conv": "s-41", "cli": "claude", "t": off.now, "files": ["src/live.py"]}
     check("POOL_AREA_HOT_HOLD_PR_S=0: an open PR holds nothing", [u.number for u in off.step()], [42])
     restore = with_env({"POOL_AREA_HOT_HOLD_PR_S": ""})
-    check("45 minutes by default", ccpool.Config.from_env().area_hot_hold_pr_s, 2700)
+    check("an hour by default", ccpool.Config.from_env().area_hot_hold_pr_s, 3600)
     os.environ["POOL_AREA_HOT_HOLD_PR_S"] = "0"
     check("and 0 from the environment is off", ccpool.Config.from_env().area_hot_hold_pr_s, 0)
     restore()

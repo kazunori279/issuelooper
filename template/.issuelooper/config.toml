@@ -201,7 +201,7 @@ lend_at = 4                  # POOL_AREA_LEND_AT: with every conversation of the
 hot_lock = true              # POOL_AREA_HOT_LOCK: one session at a time works an issue that names a hot file, from its
                              # start until its PR merges or closes
 hot_hold_max_s = 1800        # POOL_AREA_HOT_HOLD_MAX_S: a session holds it for this long at most
-hot_hold_pr_s = 2700         # POOL_AREA_HOT_HOLD_PR_S: then its open PR holds the hot files it changed while it is at
+hot_hold_pr_s = 3600         # POOL_AREA_HOT_HOLD_PR_S: then its open PR holds the hot files it changed while it is at
                              # stage:pr and not handed back, for this long at most after the session ended (0 = the file
                              # is free once the PR is open); such PRs go early in the merge train
 auto_hot_at = 4              # POOL_AREA_AUTO_HOT_AT: a file of an area that conflicts in this many PRs (within

@@ -644,8 +644,9 @@ class Config:
     # path, until it merges or closes, for area_hot_hold_pr_s at most after the session that
     # opened it ended (0: the PR holds nothing). Released when the PR opened, the next worker on
     # the file branched from a main without it while the PR waited in the merge queue, and the
-    # two conflicted; held for two hours, issues waited a median of well over an hour for it.
-    area_hot_hold_pr_s: float = 2700
+    # two conflicted; held for two hours, issues waited a median of well over an hour for it,
+    # and at 45 minutes the conflicts came back.
+    area_hot_hold_pr_s: float = 3600
     # A file of an area that conflicts in this many pull requests within POOL_SPLIT_WINDOW_S
     # becomes one of its hot files for the rest of the run (0 = off). A file in no hot list
     # (settings.js) conflicted more than any other, many times as train skips.
@@ -873,7 +874,7 @@ class Config:
             area_lend_at=env_int("POOL_AREA_LEND_AT", 4),
             area_lend_free=env_flag("POOL_AREA_LEND_FREE", True),
             area_hot_hold_max_s=float(e("POOL_AREA_HOT_HOLD_MAX_S", "") or 1800),
-            area_hot_hold_pr_s=float(e("POOL_AREA_HOT_HOLD_PR_S", "") or 2700),
+            area_hot_hold_pr_s=float(e("POOL_AREA_HOT_HOLD_PR_S", "") or 3600),
             area_auto_hot_at=env_int("POOL_AREA_AUTO_HOT_AT", 4),
             area_auto_hot_expire=env_int("POOL_AREA_AUTO_HOT_EXPIRE", 30),
             edge_flag_at=env_int("POOL_EDGE_FLAG_AT", 8),
