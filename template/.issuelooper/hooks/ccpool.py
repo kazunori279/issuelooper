@@ -475,6 +475,12 @@ class Config:
     stall_s: float = 600
     hold_review_s: float = 3600  # a hold:monitor this old is pointed out to the monitor
     blocked_review_s: float = 3600  # a claimable P0/P1 issue blocked this long is pointed out too
+    # A blocker that has failed unblock_tries times (released units, hand-backs: failed_tries)
+    # while an issue has waited unblock_wait_s on it: its GitHub dependency edge is removed, so
+    # the waiting issue builds on main, and the blocker goes to stage:owner (0 = off). A hub
+    # failed for six hours, and its four dependents waited the whole run.
+    unblock_tries: int = 2
+    unblock_wait_s: float = 5400
     # A hub: an issue at least hub_at open issues depend on (0 = off). It takes the highest
     # priority among its dependents and one level more in the claim order, gets hub_timeout
     # times the worker timeout, resumes its last worker's conversation, and claim.py's
@@ -796,6 +802,8 @@ class Config:
             stall_s=float(e("POOL_STALL_S", "600")),
             hold_review_s=gap_s("POOL_HOLD_REVIEW", 60),
             blocked_review_s=gap_s("POOL_BLOCKED_REVIEW", 60),
+            unblock_tries=env_int("POOL_UNBLOCK_TRIES", 2),
+            unblock_wait_s=float(e("POOL_UNBLOCK_WAIT_S", "") or 5400),
             decompose_after=env_int("POOL_DECOMPOSE_AFTER", 2),
             hub_at=env_int("POOL_HUB_AT", 3),
             hub_timeout=float(e("POOL_HUB_TIMEOUT", "") or 1.5),
@@ -1399,6 +1407,8 @@ class Book:
         self.holds_told: set[int] = set()  # holds the monitor was reminded of
         self.blocked: dict[int, float] = {}  # claimable P0/P1 issue -> when it was first seen blocked
         self.blocked_told: set[int] = set()  # blocked issues the monitor was pointed to
+        self.unblocked: set[tuple] = set()  # (issue, blocker) edges removed (Pool.unblock)
+        self.raised: set[int] = set()  # failing blockers sent to stage:owner (Pool.unblock)
         # issue -> its own failures: worker sessions that held its claim and ended without a
         # pull request, and pull requests handed back for red tests or the review's reject.
         self.failed_tries: collections.Counter = collections.Counter()
@@ -8992,6 +9002,12 @@ class Pool:
         for n in set(b.blocked) - set(waiting):
             del b.blocked[n]
             b.blocked_told.discard(n)
+        if self.cfg.unblock_tries:
+            for n, i in sorted(waiting.items()):
+                if now - b.blocked[n] >= self.cfg.unblock_wait_s:
+                    for x in native_blockers(i, done):
+                        if x != "?" and b.failed_tries[x] >= self.cfg.unblock_tries and (n, x) not in b.unblocked:
+                            self.unblock(n, x, now - b.blocked[n], st)
         for n, i in sorted(waiting.items()):
             if n not in b.blocked_told and now - b.blocked[n] >= self.cfg.blocked_review_s:
                 b.blocked_told.add(n)
@@ -9003,6 +9019,39 @@ class Pool:
                     f"each only if #{n} cannot work or would conflict without it, and remove the rest "
                     "(issuelooper-monitor skill, Dependencies)"
                 )
+
+    def unblock(self, n: int, x: int, waited: float, st: dict) -> None:
+        """Remove issue n's GitHub dependency on x, a blocker that has failed POOL_UNBLOCK_TRIES
+        times, so n builds on main; send x to stage:owner once (when it is waiting for a worker:
+        one at work on it, or its open PR, goes on). Called under the pool's lock."""
+        b = self.book
+        r = self.gh("api", f"repos/{{owner}}/{{repo}}/issues/{x}", "--jq", ".id")
+        xid = r.stdout.strip() if r.returncode == 0 else ""
+        if not xid.isdigit():
+            return  # GitHub could not be read: the next poll tries again
+        d = self.gh("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{n}/dependencies/blocked_by/{xid}")
+        b.unblocked.add((n, x))
+        if d.returncode != 0:
+            self.log("unblock_failed", issue=n, blocker=x, error=(d.stderr or d.stdout)[-200:])
+            return
+        tries = b.failed_tries[x]
+        self.gh("issue", "comment", str(n), "--body", (
+            f"<!-- merger -->\nNo longer waits on #{x}: it has failed {tries} times, and this issue waited "
+            f"{waited / 60:.0f} min for it. Build it on main as main is now; if it really needs #{x}'s code, say so "
+            "here and the owner decides."))
+        labels = set(next((i["labels"] for i in st["open"] if i["number"] == x), []))
+        raised = x not in b.raised and bool(labels & CLAIMABLE)
+        if raised:
+            b.raised.add(x)
+            stage = next(iter(labels & CLAIMABLE))
+            self.gh("issue", "edit", str(x), "--remove-label", stage, "--add-label", "stage:owner")
+            self.gh("issue", "comment", str(x), "--body", (
+                f"<!-- merger -->\nThis issue has failed {tries} times (the release and hand-back comments say why), "
+                "and the issues that waited on it now build without it. Waiting at stage:owner: split it, re-scope "
+                "it, or send it back to stage:ready."))
+        self.log("unblocked", issue=n, blocker=x, tries=tries, waited_s=round(waited), raised=raised)
+        self.event(f"#{n} waited {waited / 60:.0f} min on #{x}, which has failed {tries} times: the dependency is "
+                   f"removed and #{n} builds on main" + (f"; #{x} is at stage:owner for the owner's call" if raised else ""))
 
     def track_edges(self, st: dict) -> None:
         """Point out each new dependency edge whose blocker is not built yet (claimable or

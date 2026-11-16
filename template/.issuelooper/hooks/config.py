@@ -145,6 +145,8 @@ KEYS = {
     ("pool", "continue_max_tokens"): "POOL_CONTINUE_MAX_TOKENS",
     ("pool", "park_on_quota"): "POOL_PARK_ON_QUOTA",
     ("pool", "park_max"): "POOL_PARK_MAX",
+    ("pool", "unblock_tries"): "POOL_UNBLOCK_TRIES",
+    ("pool", "unblock_wait_s"): "POOL_UNBLOCK_WAIT_S",
     ("pool", "quota_reset_min_s"): "POOL_QUOTA_RESET_MIN_S",
     ("pool", "churn_max"): "POOL_CHURN_MAX",
     ("pool", "churn_pause_s"): "POOL_CHURN_PAUSE_S",

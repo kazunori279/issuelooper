@@ -1676,6 +1676,47 @@ def test_long_dependency_waits_are_pointed_out() -> None:
     check("an unblocked issue is forgotten", sorted(h.pool.book.blocked), [240])
 
 
+def test_a_failing_blocker_stops_holding_its_dependents() -> None:
+    """A hub failed for six hours, and the four issues that depended on it waited the whole run."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-unblock-"))
+    gh = d / "gh"
+    gh.write_text('#!/bin/sh\necho "$*" >> "$0.log"\ncase "$*" in\n  "api repos/{owner}/{repo}/issues/15 --jq .id") '
+                  'echo 9015 ;;\nesac\n')
+    gh.chmod(0o755)
+    hub = iss(15, ["stage:triage", "P1"])
+    dep = dict(iss(20, ["stage:triage", "P1"]), blocked_by=1, blockers=[15])
+    h = Rig(state([hub, dep]), gh=str(gh), unblock_tries=2, unblock_wait_s=5400, blocked_review_s=10 ** 6)
+    h.pool.book.failed_tries[15] = 1
+    h.step()
+    h.step(6000)
+    log = lambda: (d / "gh.log").read_text() if (d / "gh.log").exists() else ""
+    check("one failure: it keeps waiting", "DELETE" in log(), False)
+    h.pool.book.failed_tries[15] = 2
+    h.step(60)
+    check("two failures and 90 minutes of waiting: the edge goes, the blocker goes to the owner, both are told",
+          ("api -X DELETE repos/{owner}/{repo}/issues/20/dependencies/blocked_by/9015" in log(),
+           "issue edit 15 --remove-label stage:triage --add-label stage:owner" in log(),
+           log().count("issue comment"), sum("builds on main" in e for e in h.pool.events)),
+          (True, True, 2, 1))
+    check("logged", '"kind": "unblocked"' in (h.pool.cfg.logdir / "pool.jsonl").read_text(), True)
+    h.step(60)
+    check("once", log().count("DELETE"), 1)
+    fresh = Rig(state([hub, dep]), gh=str(gh), unblock_tries=2, unblock_wait_s=5400, blocked_review_s=10 ** 6)
+    fresh.pool.book.failed_tries[15] = 3
+    fresh.step()
+    fresh.step(3000)
+    check("not before the dependent has waited POOL_UNBLOCK_WAIT_S", fresh.pool.book.unblocked, set())
+    off = Rig(state([hub, dep]), gh=str(gh), unblock_tries=0, blocked_review_s=10 ** 6)
+    off.pool.book.failed_tries[15] = 9
+    off.step()
+    off.step(10 ** 5)
+    check("POOL_UNBLOCK_TRIES=0: off", off.pool.book.unblocked, set())
+    restore = with_env({"POOL_UNBLOCK_TRIES": "", "POOL_UNBLOCK_WAIT_S": ""})
+    cfg = ccpool.Config.from_env()
+    check("defaults: 2 failures, 90 minutes", (cfg.unblock_tries, cfg.unblock_wait_s), (2, 5400))
+    restore()
+
+
 def test_a_blocker_waiting_for_acceptance_counts_as_done() -> None:
     """Merged hub issues sat at stage:accept for over an hour behind a long queue, their
     dependents waited as if they were not merged, and after the 60-minute review the monitor

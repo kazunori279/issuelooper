@@ -222,6 +222,8 @@ research_min_files = 2       # POOL_RESEARCH_MIN_FILES: small issues and issues 
 park_on_quota = true         # POOL_PARK_ON_QUOTA: a unit out of quota keeps its worktree and conversation and goes on
                              # later (39 of 129 implement units once timed out under quota and lost their work)
 park_max = 2                 # POOL_PARK_MAX
+unblock_tries = 2            # POOL_UNBLOCK_TRIES: a blocker that failed this often stops holding issues that waited
+unblock_wait_s = 5400        # POOL_UNBLOCK_WAIT_S: this long on it, and goes to stage:owner
 quota_reset_min_s = 3600     # POOL_QUOTA_RESET_MIN_S: a quota that resets this far off holds its group until then
 churn_max = 5                # POOL_CHURN_MAX: sessions in a row that end at once with no tokens pause their group
 churn_pause_s = 900          # POOL_CHURN_PAUSE_S
