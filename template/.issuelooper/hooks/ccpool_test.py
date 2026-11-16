@@ -3063,15 +3063,23 @@ def test_a_symbol_index_per_main_commit() -> None:
         src = {"src/big.py": body, "tests/test_big.py": body}.get
         got = ccpool.names_code(["src/big.py:10-150: def big"], {"src/big.py": {"fooBar": 170, "big": 12},
                                                                   "tests/test_big.py": {"fooBar": 3}}, src, 10000)
-        check("a long definition is cut at 60 lines; a name found outside it gets the lines around it; test files "
-              "and lines already shown get none",
+        check("a long definition is cut at 40 lines; with a definition quoted, no lines around other mentions",
               ([ln.strip() for ln in got.splitlines() if ln.strip().startswith(("...", "src/", "tests/"))],
-               "line 69" in got, "line 70" in got, "line 162" in got, "line 178" in got, "line 161" in got),
-              (["src/big.py:10-150: def big", "... (81 more lines to 150)", "src/big.py:170: `fooBar`"],
-               True, False, True, True, False))
-        check("the whole is capped (POOL_INDEX_CODE_CHARS): what does not fit stays a pointer",
-              ccpool.names_code(["src/big.py:10-150: def big"], {"src/big.py": {"fooBar": 170}}, src, 900).count("src/big.py"),
-              0)
+               "line 49" in got, "line 50" in got, "line 170" in got),
+              (["src/big.py:10-150: def big", "... (101 more lines to 150)"], True, False, False))
+        alone = ccpool.names_code([], {"src/big.py": {"fooBar": 170}, "tests/test_big.py": {"fooBar": 3}}, src, 10000)
+        check("no definition: the lines around each mention in a source file, none from tests",
+              ([ln.strip() for ln in alone.splitlines() if ln.strip().startswith(("src/", "tests/"))],
+               "line 162" in alone, "line 178" in alone, "line 161" in alone),
+              (["src/big.py:170: `fooBar`"], True, True, False))
+        check("the whole is capped (POOL_INDEX_CODE_CHARS, 2500 by default): what does not fit stays a pointer",
+              (ccpool.names_code(["src/big.py:10-150: def big"], {}, src, 500).count("src/big.py"),
+               ccpool.Config().index_code_chars), (0, 2500))
+        check("one definition per name: the whole name over its last part, source over tests, then the shortest",
+              ccpool.best_definitions(["src/a.py:4: def get", "src/a.py:8: class Store", "src/a.py:9: def Store.get",
+                                       "src/a.py:30: def Store.put", "tests/t.py:1: def Store", "src/b.js:3: function get"],
+                                      {"Store", "get", "Store.get"}, lambda f: 40),
+              ["src/a.py:4-7: def get", "src/a.py:9-29: def Store.get", "src/a.py:8-40: class Store"])
         check("and the worker is not asked to grep the index for them", ("looked up for you" in named,
               "Look a name up there" in named), (True, False))
         check("ranges: a function ends before the next definition, a method at the next row, a class after its "

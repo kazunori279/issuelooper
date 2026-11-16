@@ -266,9 +266,9 @@ notes_stale_lines = 200      # POOL_NOTES_STALE_LINES
 symbol_index = false         # POOL_SYMBOL_INDEX: a symbol index of origin/main (functions, classes, ids, CSS rules with
                              # file:line; Python, JS/TS, HTML, CSS; no model), cached per main sha, named in the worker's
                              # prompt with its lines for the issue's files, so workers read line ranges, not whole files
-index_code_chars = 6000      # POOL_INDEX_CODE_CHARS: with symbol_index, the code the issue's names point at (their
-                             # definitions, and the lines around them in source files) quoted in the prompt, up to this
-                             # many characters (0 = line ranges only)
+index_code_chars = 2500      # POOL_INDEX_CODE_CHARS: with symbol_index, the code the issue's names point at (the best
+                             # definition of each, else the lines around them in source files) quoted in the prompt, up to
+                             # this many characters (0 = line ranges only)
 research_brief = false       # POOL_RESEARCH_BRIEF: a worker that starts cold runs two conversations under one claim:
                              # research (research_share of the timeout) writes a brief outside the repository, then a fresh
                              # conversation implements from the issue, the brief and the area notes. No usable brief:

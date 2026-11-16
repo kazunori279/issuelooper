@@ -603,9 +603,10 @@ class Config:
     # Notes are sent with every call of every worker in the area: long ones (a median of about
     # 11k characters) cost on each call and did not cut what workers read.
     notes_max_chars: int = 8000
-    # With symbol_index: characters of the code the issue's names point at (their definitions,
-    # and the lines around them in source files) quoted in the worker's prompt (0 = pointers only).
-    index_code_chars: int = 6000
+    # With symbol_index: characters of the code the issue's names point at (the best definition
+    # of each, else the lines around them in source files) quoted in the worker's prompt (0 =
+    # pointers only). 6000 grew the context and did not cut what workers read before editing.
+    index_code_chars: int = 2500
     notes_stale_lines: int = 200
     # A symbol index of origin/main (POOL_SYMBOL_INDEX): functions, classes and selectors with
     # file:line, made without a model and cached per main sha, named in the worker's prompt with
@@ -862,7 +863,7 @@ class Config:
             area_hot_lock=env_flag("POOL_AREA_HOT_LOCK", True),
             area_notes=env_flag("POOL_AREA_NOTES"),
             notes_max_chars=env_int("POOL_NOTES_MAX_CHARS", 8000),
-            index_code_chars=env_int("POOL_INDEX_CODE_CHARS", 6000),
+            index_code_chars=env_int("POOL_INDEX_CODE_CHARS", 2500),
             notes_stale_lines=env_int("POOL_NOTES_STALE_LINES", 200),
             symbol_index=env_flag("POOL_SYMBOL_INDEX"),
             research_brief=env_flag("POOL_RESEARCH_BRIEF"),
@@ -2532,8 +2533,25 @@ def index_ranges(rows: list[str], names: set[str], length=None) -> list[str]:
     return [x for _, x in sorted(out, key=lambda t: t[0])][:INDEX_NAMES]
 
 
-INDEX_CODE_LINES = 60  # lines of one definition's code quoted at most; the rest is read from the file
+INDEX_CODE_LINES = 40  # lines of one definition's code quoted at most; the rest is read from the file
 HIT_CONTEXT = 8  # lines quoted on each side of a name found in a source file outside any definition
+
+
+def best_definitions(rows: list[str], names: set[str], length=None) -> list[str]:
+    """For each of names, the one index row (`path:A-B: kind name`, as index_ranges writes it)
+    that defines it best: the whole name over its last part, a source file over a test, then
+    the shortest. Every definition of a name quoted, or the lines around each mention, grew the
+    prompt and did not cut what workers read."""
+    best: dict[str, tuple] = {}
+    for path, line, end, kind, name in index_spans(rows, length):
+        for key in names:
+            whole = key == name
+            if not (whole or key == name.rsplit(".", 1)[-1] or key == name.lstrip(".#").split(",")[0]):
+                continue
+            rank = (not whole, is_test(path), (end or line + INDEX_CODE_LINES) - line, path, line)
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, f"{path}:{line}-{end if end else 'end'}: {kind} {name}")
+    return list(dict.fromkeys(row for _, row in sorted(best.values(), key=lambda v: v[0][1:])))
 
 
 def code_excerpt(text: str, first: int, last: int) -> list[str]:
@@ -2544,10 +2562,10 @@ def code_excerpt(text: str, first: int, last: int) -> list[str]:
 
 def names_code(defined: list[str], hits: dict, source, cap: int) -> str:
     """The code the issue's names point at, at most cap characters: the body of each
-    definition in defined (`path:A-B: kind name`, cut at INDEX_CODE_LINES lines), then the
-    lines around each name found in a source file (hits: path -> {name: line}) that no quoted
-    definition covers. Workers told where the names were still opened the files and read as
-    much as before; a worker given a concrete starting point read about half as much."""
+    definition in defined (`path:A-B: kind name`, cut at INDEX_CODE_LINES lines; the caller
+    gives the best one per name, best_definitions), else, when no name has a definition, the
+    lines around each name found in a source file (hits: path -> {name: line}). Workers told
+    where the names were still opened the files and read as much as before."""
     out, used, shown = [], 0, {}  # shown: path -> [(first, last)] quoted
     blocks = []
     for row in defined:
@@ -2556,7 +2574,7 @@ def names_code(defined: list[str], hits: dict, source, cap: int) -> str:
             first = int(m.group(2))
             last = int(m.group(3)) if m.group(3) != "end" else first + INDEX_CODE_LINES - 1
             blocks.append((m.group(1), first, last, first, row))
-    for path, names in hits.items():
+    for path, names in ({} if blocks else hits).items():
         if is_test(path) or os.path.splitext(path)[1].lower() not in SOURCE_EXT:
             continue
         for name, line in sorted(names.items(), key=lambda kv: kv[1]):
@@ -2598,7 +2616,8 @@ def index_text(path: str, files: list[str], globs: list[str], text: str = "", so
         return body.count("\n") if body is not None else None
     defined = (index_ranges([ln for ln in rows if not ln.startswith("#")], issue_names(text),
                             length if source else None) if text else [])
-    code = names_code(defined, hits or {}, source, code_chars) if source and code_chars > 0 else ""
+    code = (names_code(best_definitions([ln for ln in rows if not ln.startswith("#")], issue_names(text), length),
+                       hits or {}, source, code_chars) if source and code_chars > 0 and text else "")
     out = (f"\nA symbol index of origin/main is at {path}: one line per function, class, method, id or CSS rule, "
            "`path:line: kind name`. Read only the line ranges you need (sed -n 'A,Bp' <file>, or your read tool with "
            "an offset and a limit) and grep results, not whole files: everything you read is sent again with each "
