@@ -115,6 +115,7 @@ KEYS = {
     ("areas", "shared"): "POOL_AREA_SHARED",
     ("review", "enabled"): "REVIEW_GATE",
     ("review", "rules"): "REVIEW_RULES",
+    ("review", "model"): "REVIEW_MODEL",
     ("review", "production_paths"): "REVIEW_PATHS",
     ("review", "max_rejects"): "REVIEW_MAX_REJECTS",
     ("review", "test_removal_min"): "REVIEW_TEST_REMOVAL_MIN",

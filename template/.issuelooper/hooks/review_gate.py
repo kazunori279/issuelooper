@@ -8,8 +8,9 @@ reject. It looks for what tests and sweeps do not catch: data that is made up an
 shown to users as real (invented values when a source fails, returns nothing or
 omits a field), code that exists to pass tests or evaluators (special-casing
 fixture or sample inputs, test-mode branches, injection seams), and whatever the
-project's rules file adds. The judge is the reviewer role's CLI and model (see
-judge.py; JUDGE=agy:<model> or claude:<model> picks another).
+project's rules file adds. The judge is the reviewer role's CLI, with the model
+REVIEW_MODEL names, else the reviewer role's model (see judge.py; JUDGE=agy:<model> or
+claude:<model> picks another CLI and model).
 
 Settings (environment, or .issuelooper/config.toml through config.py):
 
@@ -31,6 +32,11 @@ Settings (environment, or .issuelooper/config.toml through config.py):
     REVIEW_GUARD_MAX_LINES  an acceptance chore whose guard file (tests/accept/test_*.py)
                          is over this many lines is rejected without the model. Default
                          200, 0 = off.
+    REVIEW_MODEL         the judge's model, pinned apart from the agents' ([review] model);
+                         empty = the reviewer role's model. A review is only as strict as
+                         its model, and a slow one held merges when its reviews errored.
+    REVIEW_TIMEOUT_S     seconds one judge call may take (default 240; the supervisor
+                         raises it while the pool's model calls are slow).
     REVIEW_MAX_ERRORS    failed reviews (the judge failed or answered nonsense) of one
                          head before its issue goes to stage:owner, default 3.
     REVIEW_DIR           where records go, default $ISSUELOOPER_TMP/review (records in
@@ -1001,7 +1007,15 @@ def build_prompt(n, title, flags, longfn, dupes, text, cut, rules: str = "", mov
 def judge():
     import judge as judge_mod
 
-    return judge_mod.Judge(log_dir=RECORDS / "judge-logs")
+    return judge_mod.Judge(model=os.environ.get("REVIEW_MODEL", "").strip() or None, log_dir=RECORDS / "judge-logs")
+
+
+def judge_timeout() -> float:
+    """REVIEW_TIMEOUT_S, at least 60 (default 240)."""
+    try:
+        return max(60.0, float(os.environ.get("REVIEW_TIMEOUT_S", "") or 240))
+    except ValueError:
+        return 240.0
 
 
 JUDGE_USAGE: dict = {}  # the last call's tokens, for the record
@@ -1011,7 +1025,7 @@ def ask_judge(prompt: str) -> str:
     """The judge's reply text; judge.JudgeError after one retry."""
     j = judge()
     try:
-        return j.ask(prompt, max_tokens=2000, timeout=240, tries=2, schema=SCHEMA)
+        return j.ask(prompt, max_tokens=2000, timeout=judge_timeout(), tries=2, schema=SCHEMA)
     finally:
         JUDGE_USAGE.clear()
         JUDGE_USAGE.update(j.usage)

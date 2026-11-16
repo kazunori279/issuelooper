@@ -337,6 +337,17 @@ try:
         except ValueError:
             pass
 
+    # A review is only as strict as its model: [review] model pins it apart from the agents'.
+    os.environ["CCROLE_MODEL_REVIEWER"] = "agents-model"
+    check("the reviewer role's model by default", rg.judge().model, "agents-model")
+    os.environ["REVIEW_MODEL"] = "review-model"
+    check("REVIEW_MODEL pins the judge's model", rg.judge().model, "review-model")
+    del os.environ["REVIEW_MODEL"], os.environ["CCROLE_MODEL_REVIEWER"]
+    os.environ["REVIEW_TIMEOUT_S"] = "480"
+    check("REVIEW_TIMEOUT_S sets the judge's time (240 unset)", rg.judge_timeout(), 480.0)
+    del os.environ["REVIEW_TIMEOUT_S"]
+    check("default", rg.judge_timeout(), 240.0)
+
     # --- review(): skip, pass, reject, cap ------------------------------------------
     serve(1, "A" * 40, [("docs/x.md", ["hi"]), ("tests/test_a.py", ["assert 1"])])
     check("docs only: exit", rg.review(1), 0)

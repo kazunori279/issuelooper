@@ -173,6 +173,7 @@ Routes issues to persistent area conversations and serializes work on hot files.
 |---|---|---|---|
 | `[review] enabled` | `REVIEW_GATE` | `true` | Run the LLM diff reviewer (`review_gate.py`) before merging (Gate 5). |
 | `[review] rules` | `REVIEW_RULES` | `".issuelooper/review_rules.md"` | Path to the project review rules file. |
+| `[review] model` | `REVIEW_MODEL` | `""` | The reviewer's model, pinned apart from the agents' models; empty uses the reviewer role's model (`[agents.reviewer] model`, else `[agents] model`). `JUDGE` in the environment still overrides both CLI and model. Each judge call gets 240 s, raised while the pool's model calls are slow (240 s times the median latency over `[pool] slow_call_s`, at most 720 s); `REVIEW_TIMEOUT_S` in the environment sets it outright. |
 | `[review] production_paths` | `REVIEW_PATHS` | `["src/"]` | Path prefixes reviewed by `review_gate.py`; diffs outside these paths skip Gate 5. |
 | `[review] spec_paths` | `REVIEW_SPEC_PATHS` | `["spec/"]` | Specification paths scanned so identifiers defined in the spec are not mistaken for test-specific hooks (`[]` disables). |
 | `[review] max_rejects` | `REVIEW_MAX_REJECTS` | `2` | Maximum review hand-backs before parking the issue at `stage:owner`. |

@@ -192,6 +192,7 @@ words = ["tool", "tools"]
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project
+model = ""                   # REVIEW_MODEL: pin the reviewer's model (empty = the reviewer role's model)
 production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these skips the review
 test_removal_min = 5         # REVIEW_TEST_REMOVAL_MIN: ... unless it only removes tests (a consolidation once cut 29 unreviewed)
 guard_max_lines = 200        # REVIEW_GUARD_MAX_LINES: a longer acceptance guard file is rejected

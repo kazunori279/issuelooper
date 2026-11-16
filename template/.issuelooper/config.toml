@@ -222,6 +222,8 @@ lend_free = true             # POOL_AREA_LEND_FREE: with pool slots free, an iss
 [review]
 enabled = true               # REVIEW_GATE: a second model reads each diff before the merge
 rules = ".issuelooper/review_rules.md"   # REVIEW_RULES: what the reviewer rejects in this project
+model = ""                   # REVIEW_MODEL: the reviewer's model, pinned apart from the agents' (empty = the reviewer
+                             # role's model, [agents.reviewer] or [agents] model); a review is only as strict as its model
 production_paths = ["src/"]  # REVIEW_PATHS: a diff that touches none of these skips the review
 spec_paths = ["spec/"]       # REVIEW_SPEC_PATHS: where the spec is; names the diff adds that it names (test hooks,
                              # ids, keys) are listed for the reviewer as the product's, never test-specific. [] = off

@@ -4182,6 +4182,31 @@ def race_session(mutate: str = "", every: bool = False, issue_labels=("stage:pr"
     return outcome, runs, log, pool
 
 
+def test_the_review_gate_gets_more_time_while_model_calls_are_slow() -> None:
+    """A slow model's reviews timed out and held merges ("review gate exited 2")."""
+    check("240 s while calls are quick, scaled by the median over POOL_SLOW_CALL_S, at most 3 times",
+          [ccpool.review_timeout(m, 30) for m in (None, 20, 45, 300)], [240.0, 240.0, 360.0, 720.0])
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-review-time-"))
+    review = d / "review"
+    review.write_text(f'#!/bin/sh\necho "$REVIEW_TIMEOUT_S" > {d}/seen\nexit 2\n')
+    review.chmod(0o755)
+    pool = ccpool.Pool(ccpool.Config(logdir=d / "pool", review_cmd=str(review)), fetcher=state, spawn=False)
+    pool.call_seconds.extend([60.0] * 20)
+    u = ccpool.Unit("auto", "merge", "merge:9@x", "mrg:9", 9, (0, 9),
+                    {"issue": 2, "head": "c" * 40, "mergeable": "MERGEABLE", "needs_live": False})
+    w = ccpool.Session(pool, u, 1)
+    w.dir.mkdir(parents=True)
+    w.red_main_hold = w.starve_hold = lambda *a: ""
+    saved = os.environ.pop("REVIEW_TIMEOUT_S", None)
+    try:
+        out = w.auto_merge(dict(os.environ))
+    finally:
+        if saved is not None:
+            os.environ["REVIEW_TIMEOUT_S"] = saved
+    check("the gate is told the scaled time (calls take 60 s: twice 240)", ((d / "seen").read_text().strip(), out),
+          ("480", "held (the review gate exited 2)"))
+
+
 def test_the_merge_gates_run_outside_the_merge_lock() -> None:
     """Issue #23: the guard (up to 300 s) ran under the merge lock, and every other merge
     waited. It runs before the lock now; under it, what can change is read again, and the

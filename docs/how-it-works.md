@@ -44,7 +44,7 @@ Before editing application code, a worker must write or update a pytest test in 
 
 ### Gate 5: The LLM diff reviewer (`review_gate.py`)
 
-When a PR modifies files under `[review] production_paths` (such as `["src/"]`), `review_gate.py` makes a single tool-free model call to inspect the diff:
+When a PR modifies files under `[review] production_paths` (such as `["src/"]`), `review_gate.py` makes a single tool-free model call to inspect the diff, with the model `[review] model` names (else the reviewer role's), so the gate can stay strict when the agents run on a weaker or slower model. While the pool's model calls are slow, each call gets more time (up to 720 s) instead of the review erroring and holding the merge:
 
 - **Two built-in checks:** it rejects (1) fabricated or hard-coded data presented to users as real output (checking literals against `[review] fixtures` when configured), and (2) production code that detects or special-cases test runs or evaluators (identifiers named in `[review] spec_paths` are passed to the reviewer as legitimate product hooks).
 - **Project rules:** it enforces every rule in `.issuelooper/review_rules.md` (reporting violations as `project_rule`). A fenced ```` ```prescan ```` block in `review_rules.md` can list regular expressions that flag added lines as hints for the reviewer.

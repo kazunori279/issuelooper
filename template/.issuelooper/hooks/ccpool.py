@@ -3430,6 +3430,18 @@ SHOT_CHECKED = re.compile(r"getcolors|getextrema|ImageStat|getpixel|histogram|ge
                           r"len\(\s*[\w.]*screenshot")
 
 
+REVIEW_JUDGE_S, REVIEW_SCALE_MAX = 240.0, 3.0
+
+
+def review_timeout(median: float | None, slow_s: float) -> float:
+    """The review gate's time per judge call (REVIEW_TIMEOUT_S): REVIEW_JUDGE_S, times the
+    pool's median model-call latency over POOL_SLOW_CALL_S while calls are slower than that,
+    at most REVIEW_SCALE_MAX times. A slow model's reviews timed out and held merges."""
+    if median is None or not slow_s or median <= slow_s:
+        return REVIEW_JUDGE_S
+    return REVIEW_JUDGE_S * min(REVIEW_SCALE_MAX, median / slow_s)
+
+
 def guard_max_lines() -> int:
     """[review] guard_max_lines: the longest acceptance guard file an acceptance chore may add."""
     try:
@@ -5083,9 +5095,12 @@ class Session(threading.Thread):
         u = self.unit
         pr, n, head = u.number, u.info["issue"], u.info["head"]
         env = dict(env, CC_ROLE="merger", MERGE_PR=str(pr))
+        judge_s = review_timeout(self.pool.calls_slow(), self.pool.cfg.slow_call_s)
+        if "REVIEW_TIMEOUT_S" not in os.environ:
+            env["REVIEW_TIMEOUT_S"] = str(round(judge_s))
         r = subprocess.run(
             [*shlex.split(self.pool.cfg.review_cmd), "--pr", str(pr)],
-            env=env, cwd=repo_root(), capture_output=True, text=True, timeout=900,
+            env=env, cwd=repo_root(), capture_output=True, text=True, timeout=max(900, 2 * judge_s + 300),
         )
         self.note(f"review gate exit {r.returncode}: {(r.stdout + r.stderr).strip()[-600:]}")
         if r.returncode == 1 and review_record(head).get("verdict") == "owner":
