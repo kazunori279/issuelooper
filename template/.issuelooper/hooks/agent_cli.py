@@ -44,6 +44,17 @@ DEFAULT = "agy"
 
 # agy's error for a model stream that went quiet; it retries the call itself.
 STREAM_IDLE = re.compile(r"(?i)stream idle timeout")
+# When a quota error says its quota resets: "reset after 10h14m14s", "Resets in 3h 20m".
+RESET_IN = re.compile(r"(?i)\breset(?:s)?\s+(?:after|in)\s+((?:\d+\s*[dhms]\s*){1,4})")
+
+
+def reset_seconds(text: str) -> float | None:
+    """The seconds until the quota resets, from the last such phrase in text; None without one."""
+    found = RESET_IN.findall(text or "")
+    if not found:
+        return None
+    unit = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+    return float(sum(int(n) * unit[u.lower()] for n, u in re.findall(r"(\d+)\s*([dhmsDHMS])", found[-1])))
 
 
 def parse(lines) -> list[dict]:
@@ -232,9 +243,13 @@ class Agy(Cli):
     # A model quota or capacity error in any wording agy has used. One wording ("TPM
     # quota exhausted. No spare capacity ...") came with no RESOURCE_EXHAUSTED in the
     # result (that was only on stderr); without it those sessions were never resumed
-    # and each counted as a failed claim attempt.
+    # and each counted as a failed claim attempt. A per-user quota's wording ("You have
+    # exhausted your capacity on this model. Your quota will reset after 10h14m14s.")
+    # read as a retryable error, and the pool started thousands of sessions that each
+    # failed within minutes.
     quota = re.compile(
-        r"RESOURCE_EXHAUSTED|TPM quota exhausted|No spare capacity|\bcode 429\b"
+        r"RESOURCE_EXHAUSTED|TPM quota exhausted|No spare capacity|\bcode 429\b|exhausted your capacity"
+        r"|quota will reset"
     )
     # A turn agy ended on an error it calls retryable: its stderr's AGY_ERROR line says
     # `"retryable":true`. Run 11: a stream idle timeout during context summarization

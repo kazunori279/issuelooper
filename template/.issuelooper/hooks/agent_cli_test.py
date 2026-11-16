@@ -305,6 +305,17 @@ def test_agy_stale_stream_idle_error() -> None:
     check("the same error with no answer: the turn failed", AGY.read(now)["status"], "ERROR")
 
 
+def test_agy_quota_reset_wording() -> None:
+    """A per-user quota's result: no RESOURCE_EXHAUSTED or 429 in it."""
+    q = {"event": "result", "result": {"status": "ERROR", "response": "", "error": "You have exhausted your capacity "
+         "on this model. Your quota will reset after 10h14m14s.", "usage": {"input_tokens": 0}}}
+    check("the capacity wording is a quota result", AGY.quota_result(q), True)
+    check("and when the quota resets, in seconds",
+          [agent_cli.reset_seconds(x) for x in ("Your quota will reset after 10h14m14s.", "Resets in 3h 20m",
+                                                 "reset after 45s", "no reset named")],
+          [36854.0, 12000.0, 45.0, None])
+
+
 def test_claude_stream() -> None:
     check(
         "session id: the newest one seen",

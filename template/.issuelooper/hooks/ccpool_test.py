@@ -3870,6 +3870,69 @@ def test_quota_backoff_and_pause() -> None:
     check("a session that ends ok resets the streak", h.pool.book.quota_streak[group], 0)
 
 
+def test_a_quota_that_resets_hours_later_holds_its_group_until_then() -> None:
+    """A per-user quota's error said only "You have exhausted your capacity on this model.
+    Your quota will reset after ..." in its result (RESOURCE_EXHAUSTED and `"retryable":true`
+    were on stderr). It read as a retryable error, and the pool started thousands of
+    sessions that failed within minutes, for hours."""
+    used_up = "You have exhausted your capacity on this model. Your quota will reset after 10h14m14s."
+    rc, timed_out, calls, resumes, _ = run_429_session(9, ["stage:pr"], text=used_up)
+    w = run_429_session.last
+    pool, group = w.pool, w.quota_group
+    left = pool.book.quota_reset.get(group, 0) - time.time()
+    check("the quota resets in 10 h: no resume, the group holds until the reset, the owner hears once",
+          (rc, len(calls), resumes, 36000 < left < 36900, sum("resets in 10.2 h" in e for e in pool.events)),
+          (1, 1, [], True, 1))
+    check("it counts as a quota error, not a transient one", (w.ended_on_quota(), w.ended_transient()), (True, False))
+    check("no new sessions of the group until then", bool(pool.book.quota_paused(group, time.time() + 36000)), True)
+    pool.save_owners()
+    again = ccpool.Pool(pool.cfg, fetcher=state, spawn=False)
+    check("a restarted supervisor keeps the reset", bool(again.book.quota_paused(group, time.time() + 36000)), True)
+    pool.quota_reset("worker", group, 36800)
+    check("another session saying the same: no second event", sum("resets in" in e for e in pool.events), 1)
+    rc, _, calls, resumes, _ = run_429_session(1, ["stage:pr"], text="You have exhausted your capacity on this "
+                                               "model. Your quota will reset after 2m10s.")
+    check("a reset minutes away is waited out and resumed as before", (rc, len(calls), len(resumes)), (0, 2, 1))
+    # The result with no quota words at all; agy's stderr has them.
+    v = ccpool.Session(pool, ccpool.Unit("worker", "implement", "wrk:7@x", "wrk:7", 7, (4,), {}), 7)
+    v.dir.mkdir(parents=True)
+    v.cli = ccpool.agent_cli.get("agy")
+    (v.dir / "session.jsonl").write_text(json.dumps({"event": "result", "result": {
+        "status": "ERROR", "response": "", "error": "the turn failed", "usage": {"input_tokens": 0}}}) + "\n")
+    (v.dir / "session.err").write_text('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): You have exhausted '
+                                       'your capacity on this model. Your quota will reset after 3h0m0s.","status":'
+                                       '"RESOURCE_EXHAUSTED","error_code":429,"retryable":true}\n')
+    check("an empty ERROR result: stderr's quota error counts, its retryable flag does not make it transient",
+          (v.ended_on_quota(), v.ended_transient(), v.quota_reset_s()), (True, False, 10800.0))
+    (v.dir / "session.jsonl").write_text(json.dumps({"event": "result", "result": {
+        "status": "ERROR", "response": "I pushed the fix and opened the PR.", "error": "x"}}) + "\n")
+    check("a result with an answer is not read from stderr", v.ended_on_quota(), False)
+
+
+def test_sessions_that_end_at_once_with_no_tokens_pause_their_group() -> None:
+    h = Rig(state(), churn_max=3, churn_pause_s=600)
+    for k in range(2):
+        h.pool.churn_seen("agy/m", True, "worker")
+    check("two in a row: nothing yet", h.pool.book.quota_paused("agy/m", h.now), 0.0)
+    h.pool.churn_seen("agy/m", False, "worker")
+    h.pool.churn_seen("agy/m", True, "worker")
+    h.pool.churn_seen("agy/m", True, "worker")
+    check("a session that used tokens resets the count", h.pool.book.quota_paused("agy/m", h.now), 0.0)
+    h.pool.churn_seen("agy/m", True, "worker")
+    check("POOL_CHURN_MAX in a row: no new sessions of the group for POOL_CHURN_PAUSE_S, one event",
+          (h.pool.book.quota_paused("agy/m", h.now), sum("ended within 60 s with no tokens" in e for e in h.pool.events),
+           h.pool.book.quota_paused("agy/other", h.now)), (h.now + 600, 1, 0.0))
+    off = Rig(state(), churn_max=0)
+    for k in range(9):
+        off.pool.churn_seen("agy/m", True, "worker")
+    check("POOL_CHURN_MAX=0: off", off.pool.book.quota_paused("agy/m", off.now), 0.0)
+    restore = with_env({"POOL_QUOTA_RESET_MIN_S": "", "POOL_CHURN_MAX": "", "POOL_CHURN_PAUSE_S": ""})
+    cfg = ccpool.Config.from_env()
+    check("defaults: a reset an hour away, 5 sessions, 15 minutes",
+          (cfg.quota_reset_min_s, cfg.churn_max, cfg.churn_pause_s), (3600, 5, 900))
+    restore()
+
+
 def test_quota_pauses_per_quota_group() -> None:
     """Issue #24: one 429 paused every agent session, whatever model or provider it used."""
     env = {"CCROLE_WORKER_CLI": "agy", "CCROLE_MODEL_WORKER": "gemini-3.8-pro",

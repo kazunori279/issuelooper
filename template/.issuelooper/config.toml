@@ -280,6 +280,11 @@ park_on_quota = true         # POOL_PARK_ON_QUOTA: an implement unit whose clock
                              # freed, its claim, worktree and conversation kept, and it goes on in that conversation with a
                              # fresh time budget once its quota group's pause is over
 park_max = 2                 # POOL_PARK_MAX: parks per unit; after that it ends as an unfinished worker does
+quota_reset_min_s = 3600     # POOL_QUOTA_RESET_MIN_S: a quota error that says its quota resets this far off or more
+                             # ("reset after 10h14m14s") holds its quota group until the reset, with one event and no
+                             # resumes; the time is kept across a restart
+churn_max = 5                # POOL_CHURN_MAX: this many sessions of one quota group in a row that end within 60 s with no
+churn_pause_s = 900          # POOL_CHURN_PAUSE_S: tokens pause the group for this long, with one event (0 = off)
 slow_call_s = 30             # POOL_SLOW_CALL_S: model calls are slow while the median of the pool's last 40 call
                              # latencies (timed by the CLI: agy) is over this many seconds
 slow_extend_s = 1800         # POOL_SLOW_EXTEND_S: then an implement unit about to wrap up gets this much more time,

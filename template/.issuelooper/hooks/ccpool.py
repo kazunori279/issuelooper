@@ -406,6 +406,7 @@ def ux_gap_s() -> float:
 DEPLOY_LOCK_PAUSE_S = 5  # deploy() retries a ref-lock failure after 5 s, then 10 s
 
 
+CHURN_S = 60  # a session this short with no tokens counts toward POOL_CHURN_MAX
 QUOTA_ANY = "*"  # the quota group of a role whose model is not known: every group's
 
 
@@ -462,6 +463,15 @@ class Config:
     quota_resumes: int = 8
     quota_wait_s: float = 60
     quota_wait_max_s: float = 900
+    # A quota error that says when its quota resets ("reset after 10h14m14s"), this far off or
+    # more: no new sessions of its group until then (Book.quota_reset, kept across restarts),
+    # one event, and no resumes. A per-user quota ended a model's calls with 14 h left, and
+    # the pool started thousands of sessions that failed within minutes.
+    quota_reset_min_s: float = 3600
+    # This many sessions of one quota group in a row that end within CHURN_S with no tokens:
+    # no new sessions of the group for churn_pause_s, one event (0 = off).
+    churn_max: int = 5
+    churn_pause_s: float = 900
     stall_s: float = 600
     hold_review_s: float = 3600  # a hold:monitor this old is pointed out to the monitor
     blocked_review_s: float = 3600  # a claimable P0/P1 issue blocked this long is pointed out too
@@ -780,6 +790,9 @@ class Config:
             quota_resumes=env_int("POOL_QUOTA_RESUMES", 8),
             quota_wait_s=float(e("POOL_QUOTA_WAIT_S", "60")),
             quota_wait_max_s=float(e("POOL_QUOTA_WAIT_MAX_S", "900")),
+            quota_reset_min_s=float(e("POOL_QUOTA_RESET_MIN_S", "") or 3600),
+            churn_max=env_int("POOL_CHURN_MAX", 5),
+            churn_pause_s=float(e("POOL_CHURN_PAUSE_S", "") or 900),
             stall_s=float(e("POOL_STALL_S", "600")),
             hold_review_s=gap_s("POOL_HOLD_REVIEW", 60),
             blocked_review_s=gap_s("POOL_BLOCKED_REVIEW", 60),
@@ -1274,12 +1287,15 @@ class Book:
     """What the supervisor has started and how it ended."""
 
     def quota_paused(self, group: str, now: float) -> float:
-        """Until when new sessions of this quota group wait (0: they do not). A pause of
-        QUOTA_ANY holds every group, and QUOTA_ANY waits for any group's pause."""
+        """Until when new sessions of this quota group wait (0: they do not): a pause, or a
+        quota reset still to come (quota_reset). A pause of QUOTA_ANY holds every group, and
+        QUOTA_ANY waits for any group's pause."""
+        held = {g: max(self.quota_until.get(g, 0.0), self.quota_reset.get(g, 0.0))
+                for g in set(self.quota_until) | set(self.quota_reset)}
         if group == QUOTA_ANY:
-            until = max(self.quota_until.values(), default=0.0)
+            until = max(held.values(), default=0.0)
         else:
-            until = max(self.quota_until.get(group, 0.0), self.quota_until.get(QUOTA_ANY, 0.0))
+            until = max(held.get(group, 0.0), held.get(QUOTA_ANY, 0.0))
         return until if until > now else 0.0
 
     def __init__(self):
@@ -1373,6 +1389,10 @@ class Book:
         self.quota_streak: collections.Counter = collections.Counter()  # group -> pauses in a row, none ending ok
         self.quota_hits: collections.Counter = collections.Counter()  # group -> quota errors seen (paused or not)
         self.quota_paused_s: collections.Counter = collections.Counter()  # group -> seconds of pauses started
+        # quota group -> when its quota resets, from the error's own words (Pool.quota_reset);
+        # kept in owners.json, so a restarted supervisor does not start sessions to find out again.
+        self.quota_reset: dict[str, float] = {}
+        self.churn: collections.Counter = collections.Counter()  # group -> short empty sessions in a row
         self.live_entry: dict[int, str] = {}  # issue -> updatedAt when it entered stage:live
         self.missing: list[str] = []  # required files gone from the shared checkout (Pool.check_files)
         self.holds: dict[int, float] = {}  # issue -> when hold:monitor was first seen on it
@@ -4130,6 +4150,12 @@ class Session(threading.Thread):
                 # capacity shortage can last hours, and every session retrying at once
                 # is the load the error asks to reduce.
                 conv = self.quota_stalled(quiet=0, exited=True)
+                reset = self.quota_reset_s() if rc != 0 else None
+                if reset is not None and cfg.quota_reset_min_s and reset >= cfg.quota_reset_min_s \
+                        and (conv or self.ended_on_quota()):
+                    # The quota resets hours from now: resuming is a session that fails again.
+                    self.pool.quota_reset(role, self.quota_group, reset, self.dir)
+                    break
                 if not conv and rc != 0 and trans_k < cfg.transient_resumes and self.ended_transient() \
                         and not self.work_done():
                     # A retryable failure of the CLI (agy: a stream idle timeout while it
@@ -4542,30 +4568,45 @@ class Session(threading.Thread):
 
     def ended_on_quota(self) -> bool:
         """Whether the session's last word was a quota error: its stream's last event, or,
-        when the stream has no result at the end, the tail of its stderr."""
+        when the stream has no result at the end or ends on a result with an error and no
+        answer, the tail of its stderr. A per-user quota's result said only "You have
+        exhausted your capacity on this model"; its RESOURCE_EXHAUSTED was on stderr."""
         events = self.events()
         if events and self.cli.quota_result(events[-1]):
             return True
         if events and self.cli.is_result(events[-1]):
-            return self.cut_by_quota(events[-1])  # the caller checked: the CLI exited with an error
+            if self.cut_by_quota(events[-1]):  # the caller checked: the CLI exited with an error
+                return True
+            r = events[-1].get("result")
+            if not (isinstance(r, dict) and r.get("status") == "ERROR" and not str(r.get("response") or "").strip()):
+                return False
+        return bool(self.cli.quota.search(self.err_tail()))
+
+    def err_tail(self) -> str:
+        """The last 3000 characters of the session's stderr ('' unread)."""
         try:
-            err = (self.dir / "session.err").read_text(errors="replace")[-3000:]
+            return (self.dir / "session.err").read_text(errors="replace")[-3000:]
         except OSError:
-            return False
-        return bool(self.cli.quota.search(err))
+            return ""
+
+    def quota_reset_s(self) -> float | None:
+        """Seconds until the quota resets, as the session's last quota error says (agy:
+        "Your quota will reset after 10h14m14s"); None when it does not say."""
+        events = self.events()
+        last = json.dumps(events[-1]) if events and self.cli.is_result(events[-1]) else ""
+        return agent_cli.reset_seconds(last) or agent_cli.reset_seconds(self.err_tail())
 
     def ended_transient(self) -> bool:
         """Whether the turn ended on an error the CLI calls retryable and that is not a
-        quota error: the stream's last result, or the tail of stderr (agy's AGY_ERROR)."""
+        quota error: the stream's last result, or the tail of stderr (agy's AGY_ERROR).
+        agy marks a quota error `"retryable":true` too: a quota marker anywhere in the tail
+        makes it a quota error, not a transient one."""
         pattern = self.cli.transient
         events = self.events()
         if events and self.cli.is_result(events[-1]) and pattern.search(json.dumps(events[-1])):
             return not self.ended_on_quota()
-        try:
-            err = (self.dir / "session.err").read_text(errors="replace")[-3000:]
-        except OSError:
-            return False
-        return bool(pattern.search(err)) and not self.ended_on_quota()
+        err = self.err_tail()
+        return bool(pattern.search(err)) and not self.ended_on_quota() and not self.cli.quota.search(err)
 
     def work_done(self) -> bool:
         """Whether the unit's result is already there (on GitHub, or the tester's
@@ -6332,6 +6373,57 @@ class Pool:
             )
         self.log("quota_pause", role=role, group=group, seconds=wait, streak=streak, inturn=inturn)
 
+    def quota_reset(self, role: str, group: str | None, seconds_left: float, logdir=None) -> None:
+        """A quota error says the quota resets seconds_left from now, past POOL_QUOTA_RESET_MIN_S:
+        no new sessions of its group until then (Book.quota_reset, in owners.json), and one event
+        for the monitor and the owner, not one per session."""
+        now = self.clock()
+        group = group or quota_group(role, self.cfg)
+        until = now + seconds_left
+        with self.lock:
+            b = self.book
+            b.quota_hits[group] += 1
+            known = b.quota_reset.get(group, 0.0)
+            if known > now and abs(known - until) < 900:
+                return  # told already
+            b.quota_reset[group] = until
+            which = "agent sessions" if group == QUOTA_ANY else f"{group} sessions"
+            self.events.append(
+                f"model quota used up ({role} session{f', {logdir}' if logdir else ''}): it resets in "
+                f"{seconds_left / 3600:.1f} h, at {time.strftime('%H:%M', time.localtime(until))}; no new {which} "
+                "until then. Tell the owner: another model or quota group ([agents] model, quota_groups) can go "
+                "on meanwhile"
+            )
+        self.log("quota_reset", role=role, group=group, seconds=round(seconds_left), until=round(until))
+        self.save_owners()
+
+    def churn_seen(self, group: str, short_empty: bool, role: str) -> None:
+        """Count sessions of a quota group in a row that ended within CHURN_S with no tokens;
+        at POOL_CHURN_MAX, no new sessions of the group for POOL_CHURN_PAUSE_S and one event.
+        A model whose every call failed in a way no rule named started sessions for hours."""
+        if not self.cfg.churn_max:
+            return
+        now = self.clock()
+        with self.lock:
+            b = self.book
+            if not short_empty:
+                b.churn[group] = 0
+                return
+            b.churn[group] += 1
+            if b.churn[group] < self.cfg.churn_max:
+                return
+            b.churn[group] = 0
+            if b.quota_until.get(group, 0.0) > now:
+                return
+            b.quota_until[group] = now + self.cfg.churn_pause_s
+            which = "agent sessions" if group == QUOTA_ANY else f"{group} sessions"
+            self.events.append(
+                f"{self.cfg.churn_max} {which} in a row ended within {CHURN_S} s with no tokens used (the last a "
+                f"{role} session): no new ones for {self.cfg.churn_pause_s:.0f} s. Read their session.err: the model "
+                "or its quota may be gone"
+            )
+        self.log("churn_pause", group=group, role=role, seconds=self.cfg.churn_pause_s, sessions=self.cfg.churn_max)
+
     def quota_state(self, now: float) -> dict:
         """For state.json, per quota group that has hit its quota: the end of its pause (0:
         not paused now), the pauses in a row, the quota errors seen, the seconds of pause."""
@@ -6493,6 +6585,11 @@ class Pool:
             retried, _ = w.cli.inturn_quota(w.conversation(), w.quota_base) if w.unit.role != "auto" else (0, 0)
             if retried:
                 extra["quota_retries"] = retried  # inside its turns, all told
+        if u.role != "auto" and "usage" in extra and not outcome.startswith(("stopped", "held", "unclaimable")):
+            # Only a session that ran its CLI (it wrote a stream) and did not end ok counts.
+            tokens = sum(int(v or 0) for k, v in (extra.get("usage") or {}).items()
+                         if k in ("input", "output", "thinking", "cache_read"))
+            self.churn_seen(group, outcome != "ok" and time.time() - w.started < CHURN_S and not tokens, u.role)
         self.log(
             "end",
             session=w.seq,
@@ -6615,7 +6712,7 @@ class Pool:
         self.save_owners()
 
     OWNED = ("auto_hot", "auto_hot_mark", "cooled", "merges", "after", "after_since", "after_fails", "chore_pending", "convs", "author_runs", "guard_fix", "guard_runs", "train_failed", "accept_author", "samples", "sample_n", "sample_since", "sample_count", "area_slots",
-             "area_seeds", "repo_seed", "area_wait_s", "notes", "parked")
+             "area_seeds", "repo_seed", "area_wait_s", "notes", "parked", "quota_reset")
 
     def save_owners(self) -> None:
         """The conversations and the author's bookkeeping, for a restarted supervisor."""
