@@ -3994,6 +3994,14 @@ class Session(threading.Thread):
             with self.pool.lock:
                 if self.pool.stopping:
                     return 143, 0.0, False
+                # The shared checkout, on purpose. Claude Code loads the role guard from the
+                # .claude/settings.json of the project it starts in, so a session started
+                # elsewhere would run unguarded; one started in its own worktree would load
+                # role_guard.py from a working tree it can edit; and agy, given several
+                # workspace directories, runs commands in the first in sorted order, not in
+                # this cwd. A stray relative write is caught instead: the guard refuses the
+                # backgrounded-setup shape, the supervisor quarantines untracked files, and
+                # Gate 0 ignores them.
                 self.proc = subprocess.Popen(
                     cmd,
                     env=env,
