@@ -56,7 +56,7 @@ come from), with its log at `$ISSUELOOPER_TMP/wrk-$K-$N-live.log` (always
 `nohup <cmd> > <log> 2>&1 < /dev/null &`: a background server that keeps the command's
 output or input holds your session until its timeout, and the guard refuses it). Drive the issue's steps at
 least twice (in each language the issue concerns), read the screenshots and the
-server log, stop the server with `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, and remove any credential
+server log, stop the server by its port (*Stop a server* below), and remove any credential
 link you made in the worktree before you commit. Say what the live environment
 did under *Checked on screen*. Never print the credentials or commit them.
 
@@ -151,11 +151,29 @@ step by step from a fresh start, not a shortcut to the end state. Save
 screenshots under `$ISSUELOOPER_TMP/wrk-$K-$N-shots/`, before your change (on `origin/main`, from
 a second worktree: `git -C "$SHARED_REPO_PATH" worktree add --detach $ISSUELOOPER_TMP/wrk-$K-$N-base-wt origin/main`;
 never `git stash`, which the guard refuses) and after it, the last one
-showing the state the issue is about. Open them and compare: the symptom is gone,
-and nothing next to it broke (overlap, cut-off text, a control that moved). Fix
-what you see, then stop the server by its port (`lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, never
-`pkill`). In the PR body under *Checked on screen*, list the steps you replayed,
+showing the state the issue is about. Give the script that directory as an absolute
+path written out in its own arguments, never a variable set earlier in a command that
+also starts the server with `&`: `&` runs its whole `... && ...` list in the background,
+its `cd`s and variables with it, so the rest of that command runs where your session
+started with the variable empty, and screenshots saved to an empty path once landed in
+the shared checkout and held every merge. Start the server in a command of its own:
+
+```bash
+(cd "$WT" && nohup <server command> --port $P > $ISSUELOOPER_TMP/wrk-$K-$N-app.log 2>&1 < /dev/null &)
+```
+
+then, in the next command, `cd "$WT" && for i in $(seq 60); do curl -sf localhost:$P/ > /dev/null && break; sleep 1; done && uv run python $ISSUELOOPER_TMP/wrk-$K-$N-shots.py http://127.0.0.1:$P $ISSUELOOPER_TMP/wrk-$K-$N-shots before`.
+The guard refuses the leaking shape. Open the screenshots and compare: the symptom is
+gone, and nothing next to it broke (overlap, cut-off text, a control that moved). Fix
+what you see, then stop the server by its port (*Stop a server* below), never
+`pkill`. In the PR body under *Checked on screen*, list the steps you replayed,
 what the last screenshot shows, and its path.
+
+**Stop a server** by the port you gave it:
+`python3 "$SHARED_REPO_PATH/.issuelooper/hooks/port_pids.py" <port> --kill` (it reads
+/proc, so it works where `lsof` is not installed; `fuser -k <port>/tcp` is another way),
+or by the PID you saved when you started it (`... & echo $! > $ISSUELOOPER_TMP/<name>.pid`,
+then `kill $(cat $ISSUELOOPER_TMP/<name>.pid)`). Never `pkill` or `killall`.
 
 **The live check** (when `[devcheck]` is on in `.issuelooper/config.toml`): the
 screenshots above come from a session that may use test doubles; a developer also

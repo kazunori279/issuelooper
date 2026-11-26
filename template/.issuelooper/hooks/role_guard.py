@@ -807,7 +807,8 @@ def kill_by_pattern_check(command: str) -> None:
             "`pkill` and `killall` match command lines, and this session's own command line "
             "contains its prompt, so a pattern that names your server can match, and kill, "
             "this session too.\n\n"
-            "Stop a server by its port or its PID instead: `lsof -tiTCP:<port> -sTCP:LISTEN | xargs kill`, or start it "
+            "Stop a server by its port or its PID instead: `python3 \"$SHARED_REPO_PATH/.issuelooper/hooks/port_pids.py\" "
+            "<port> --kill` (it reads /proc; no lsof needed), or start it "
             "with `nohup ... > <log> 2>&1 < /dev/null & echo $! > $ISSUELOOPER_TMP/<name>.pid` and later "
             "`kill $(cat $ISSUELOOPER_TMP/<name>.pid)`."
         )
@@ -914,6 +915,57 @@ def background_jobs(command: str) -> list[str]:
         else:
             cur.append(t)
     return [] if waited else jobs
+
+
+def lost_setup(command: str) -> tuple[str, str] | None:
+    """(what, why) when a list that ends with `&` sets up what a later part of the command
+    uses: a `cd` before the `&` while the next part has no `cd` of its own (it runs where the
+    command started), or a variable assigned before it and read after it (empty there). The
+    `&` runs its whole and-or list in a background subshell; screenshots a later part saved
+    to an empty `$SHOTS` landed in the shared checkout and held every merge. A list inside
+    `( ... )` keeps its `cd` to itself."""
+    segs = command_segments(command)
+    start, depth = 0, 0
+    for k, (words, sep) in enumerate(segs):
+        if sep == "(":
+            depth += 1
+        elif sep == ")":
+            depth = max(0, depth - 1)
+        if sep in (";", "\n", ";;", "(", ")"):
+            start = k + 1
+            continue
+        if sep != "&" or k + 1 >= len(segs):
+            continue
+        listed, later = [w for w, _ in segs[start:k + 1]], [w for w, _ in segs[k + 1:] if w]
+        start = k + 1
+        if depth or not later:
+            continue  # inside its own subshell, or nothing follows
+        rest = " ".join(" ".join(w) for w in later)
+        names = [ASSIGN.match(w).group(1) for ws in listed for w in ws[:1] if ASSIGN.match(w)]
+        names += [ws[1].split("=", 1)[0] for ws in listed if ws[:1] == ["export"] and len(ws) > 1 and "=" in ws[1]]
+        used = [n for n in names if re.search(rf"\${{?{n}\b", rest)]
+        if used:
+            return f"${used[0]}", "is set before the `&` and read after it, where it is empty"
+        idle = (["sleep"], ["wait"], ["echo"], ["true"], [":"], ["curl"])
+        if any(ws[:1] == ["cd"] for ws in listed) and later[0][:1] != ["cd"] \
+                and not all(ws[:1] in idle for ws in later):
+            return "`cd`", "is before the `&`, so what follows it runs where the command started"
+    return None
+
+
+def background_setup_check(command: str) -> None:
+    if "&" not in command:
+        return
+    lost = lost_setup(command)
+    if lost:
+        block(
+            f"The {lost[0]} in this command {lost[1]}: `&` runs the whole `... && ...` list before it in a "
+            "background subshell, with its `cd`s and variables. Screenshots a later part saved to an empty "
+            "`$SHOTS` landed in the shared checkout and held every merge for hours.\n\n"
+            "Start the server on its own: `(cd \"$WT\" && nohup <server> > $ISSUELOOPER_TMP/<name>.log 2>&1 "
+            "< /dev/null &)` as one command, then the rest as another, with `cd \"$WT\" &&` and absolute paths "
+            "(no variables set before the `&`)."
+        )
 
 
 def background_check(command: str) -> None:
@@ -1086,6 +1138,10 @@ def command_segments(command: str) -> list[tuple[list[str], str]]:
     """The simple commands in `command`, each as (words, the separator after it); [] when
     the quotes do not balance (the shell refuses it too)."""
     text = HEREDOC.sub("", command)  # a here-document's body is text, not commands
+    # `2>&1`, `>&2`, `&>log`: redirections, not a background `&` (shlex would split them there,
+    # and every `cmd > log 2>&1 && ...` after a `cd` read as backgrounded).
+    text = re.sub(r"(\d*)([<>])&(\d+|-)", r"\1\2__FD\3", text)
+    text = re.sub(r"(?<![&|])&>>?(?=\s*\S)", lambda m: m.group(0).replace("&", "__ALL"), text)
     lex = shlex.shlex(text, posix=True, punctuation_chars=";&|()\n")
     lex.whitespace, lex.whitespace_split = " \t\r", True
     try:
@@ -1102,7 +1158,7 @@ def command_segments(command: str) -> list[tuple[list[str], str]]:
             segments.append((cur, t))
             cur = []
         else:
-            cur.append(t)
+            cur.append(t.replace("__FD", "&").replace("__ALL", "&"))
     return segments
 
 
@@ -2979,6 +3035,7 @@ def main(raw: str) -> None:
     kill_by_pattern_check(command)
     if role:
         background_check(command)
+        background_setup_check(command)
     if role in ("worker", "merger", "tester"):
         loop_logs_check(command)
     if role in ROLES:

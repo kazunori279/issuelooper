@@ -289,7 +289,7 @@ install.sh                     Installer and upgrader for target repositories
 template/                      Files copied into a target repository by install.sh
   .issuelooper/hooks/          Supervisor (ccpool.py), role_guard.py, claim.py, sweep_run.py,
                                devcheck.py, review_gate.py, herdr_link.py, broker.py,
-                               dash_model.py, dashboard.py, issuelooper CLI, and *_test.py
+                               dash_model.py, dashboard.py, port_pids.py, issuelooper CLI, and *_test.py
   .issuelooper/skills/         Role instructions read by monitor, worker, merger, tester, aide
   .issuelooper/                Starter templates for config.toml, project.md, review_rules.md
   .claude/                     Claude Code settings.json and skill symlinks

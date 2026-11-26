@@ -345,6 +345,31 @@ def test_slots_follow_the_cpus_unless_set() -> None:
             os.environ["DEVCHECK_SLOTS"] = old
 
 
+def test_port_pids_finds_a_listener_without_lsof() -> None:
+    """The skills stopped servers with lsof, which some machines lack; port_pids.py reads /proc."""
+    import port_pids
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    port = srv.getsockname()[1]
+    try:
+        check("the process listening on the port", port_pids.port_pids(port), [os.getpid()])
+        free = socket.socket()
+        free.bind(("127.0.0.1", 0))
+        idle = free.getsockname()[1]
+        free.close()
+        check("no listener: none", port_pids.port_pids(idle), [])
+    finally:
+        srv.close()
+    rows = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+            "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242 1\n"
+            "   1: 0100007F:1F90 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 4343 1\n")
+    table = pathlib.Path(tempfile.mkdtemp(prefix="port-pids-")) / "tcp"
+    table.write_text(rows)
+    check("only LISTEN rows on that port count", port_pids.listening_inodes(8080, (str(table),)), {"4242"})
+
+
 def test_refusals() -> None:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="devcheck-"))
     repo = make_repo()

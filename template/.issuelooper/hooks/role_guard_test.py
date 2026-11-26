@@ -210,7 +210,8 @@ def test_kill_by_pattern() -> None:
                     "pkill -9 -f uvicorn || true"):
             verdict, reason = run(cmd, role=role)
             check(f"{cmd!r} is refused for {role}", verdict, "refuse")
-        check(f"the refusal for {role} names the substitute", "lsof -tiTCP:" in reason, True)
+        check(f"the refusal for {role} names the substitute (port_pids.py: no lsof needed)",
+              "port_pids.py" in reason and "--kill" in reason, True)
     for cmd in ("lsof -tiTCP:8021 -sTCP:LISTEN | xargs kill", "kill $(cat /tmp/app.pid)"):
         verdict, _ = run(cmd, role="tester")
         check(f"{cmd!r} is allowed", verdict, "allow")
@@ -2126,7 +2127,7 @@ def test_files_in_the_shared_checkout() -> None:
           '> /tmp/issuelooper-x/wrk-3-12-app.log 2>&1 < /dev/null &\nsleep 5; lsof -ti:8799 | xargs kill ; rm -f .env app.db')
     verdict, reason = run(bg, role="worker", host=AGY)
     check("a `cd` in a list that ends with `&` does not carry past it: refused, and the reason says why",
-          (verdict, "An earlier `&` sent the `cd`" in reason), ("refuse", True))
+          (verdict, "An earlier `&` sent the `cd`" in reason or "is before the `&`" in reason), ("refuse", True))
     for cmd in ('cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & rm -f .env', 'cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null &\nwait; rm -f .env',
                 'cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & echo started; mv .env .env.bak'):
         verdict, _ = run(cmd, role="worker", host=AGY)
@@ -2135,6 +2136,28 @@ def test_files_in_the_shared_checkout() -> None:
                 'cd "$WT" && nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & cd "$WT" && rm -f .env', 'nohup app > /tmp/issuelooper-x/a.log 2>&1 < /dev/null & rm -f "$WT/.env"'):
         verdict, _ = run(cmd, role="worker", host=AGY)
         check(f"allowed: the rm runs in the worktree: {cmd!r}", verdict, "allow")
+    for cmd in ('cd "$WT" && uv run pytest > /tmp/x.log 2>&1 && rm -f .env', 'cd "$WT" && make >/tmp/l 2>&1 && rm -f .env'):
+        verdict, _ = run(cmd, role="worker", host=AGY)
+        check(f"`2>&1` is a redirect, not a background `&`: allowed: {cmd!r}", verdict, "allow")
+    # The screenshots that held every merge: the variables and the `cd` before the `&` went to
+    # the background with its list, and the screenshot script ran in the shared checkout.
+    leak = ('SHOTS="$ISSUELOOPER_TMP/wrk-4-19-shots" && mkdir -p "$SHOTS" && cd "$BASE_WT" && nohup uv run app --port 18488 '
+            '> /tmp/a.log 2>&1 < /dev/null & for i in 1 2 3; do curl -sf localhost:18488/ && break; sleep 1; done '
+            '&& uv run python "$ISSUELOOPER_TMP/wrk-4-19-shots.py" http://127.0.0.1:18488 "$SHOTS" before')
+    verdict, reason = run(leak, role="worker", host=AGY)
+    check("refused: a variable set before a backgrounded list and read after it, with the safe pattern",
+          (verdict, "$SHOTS" in reason, '(cd \\"$WT\\" && nohup' in reason or '(cd "$WT" && nohup' in reason),
+          ("refuse", True, True))
+    for cmd in ('cd "$WT" && nohup uv run app > /tmp/a.log 2>&1 < /dev/null & uv run python shots.py /tmp/out',
+                'export SHOTS=/tmp/s && nohup app > /tmp/a.log 2>&1 < /dev/null & ls "$SHOTS"'):
+        verdict, _ = run(cmd, role="worker", host=AGY)
+        check(f"refused: setup lost to a backgrounded list: {cmd!r}", verdict, "refuse")
+    for cmd in ('(cd "$WT" && nohup uv run app > /tmp/a.log 2>&1 < /dev/null &)\ncd "$WT" && uv run python shots.py /tmp/out',
+                'cd "$WT" && nohup uv run app > /tmp/a.log 2>&1 < /dev/null & sleep 3',
+                'nohup uv run app > /tmp/a.log 2>&1 < /dev/null & echo started',
+                'cd "$WT" && nohup uv run app > /tmp/a.log 2>&1 < /dev/null & cd "$WT" && uv run python s.py /tmp/o'):
+        verdict, _ = run(cmd, role="worker", host=AGY)
+        check(f"allowed: the server in its own subshell or list, the rest set up again: {cmd!r}", verdict, "allow")
     verdict, _ = run("rm -f .env", role="worker", cwd=shared)
     check("Claude Code's cwd at the shared checkout counts too", verdict, "refuse")
     # A worker's screenshots landed in the shared checkout and held every merge; its rm of

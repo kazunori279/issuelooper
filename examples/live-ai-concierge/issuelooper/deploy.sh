@@ -22,7 +22,7 @@ rm -rf "$dest" && mv "$dest.tmp" "$dest"
 
 serve() {  # serve PORT NAME [ENV=VALUE ...]
   local p="$1" name="$2"; shift 2
-  lsof -tiTCP:"$p" -sTCP:LISTEN | xargs kill 2>/dev/null || true
+  python3 "$root/.issuelooper/hooks/port_pids.py" "$p" --kill > /dev/null || true
   sleep 1
   # The whole background job writes to the log: a shell left holding the supervisor's
   # output pipe would keep the deploy from ever finishing.
