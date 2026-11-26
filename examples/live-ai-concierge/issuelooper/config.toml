@@ -224,6 +224,10 @@ research_min_files = 2       # POOL_RESEARCH_MIN_FILES: small issues and issues 
 park_on_quota = true         # POOL_PARK_ON_QUOTA: a unit out of quota keeps its worktree and conversation and goes on
                              # later (39 of 129 implement units once timed out under quota and lost their work)
 park_max = 2                 # POOL_PARK_MAX
+gate0_alert_at = 10          # POOL_GATE0_ALERT_AT: Gate 0 holds in a row before one stage:owner issue
+gate0_alert_s = 1800         # POOL_GATE0_ALERT_S: or a hold this old
+gate0_backoff_max_s = 600    # POOL_GATE0_BACKOFF_MAX_S: the longest wait before a held PR is polled again
+quarantine_s = 300           # POOL_QUARANTINE_S: stray untracked files in the shared checkout move to the quarantine
 unblock_tries = 2            # POOL_UNBLOCK_TRIES: a blocker that failed this often stops holding issues that waited
 unblock_wait_s = 5400        # POOL_UNBLOCK_WAIT_S: this long on it, and goes to stage:owner
 quota_reset_min_s = 3600     # POOL_QUOTA_RESET_MIN_S: a quota that resets this far off holds its group until then

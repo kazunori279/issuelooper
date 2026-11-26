@@ -39,6 +39,9 @@ sys.path.insert(0, str(HERE))
 # The repository's scratch directory, for every case and every process they start.
 SCRATCH = os.path.realpath(tempfile.mkdtemp(prefix="ccpool-scratch-"))
 os.environ["ISSUELOOPER_TMP"] = SCRATCH
+# A test that steps the pool quarantines a checkout's stray files; never the repository holding
+# these tests (repo_root() without SHARED_REPO_PATH). POOL_QUARANTINE_S=0 unless a test turns it on.
+os.environ.setdefault("POOL_QUARANTINE_S", "0")
 import agent_cli  # noqa: E402
 import ccpool  # noqa: E402
 import claim_test  # noqa: E402
@@ -2440,6 +2443,95 @@ def gh_log() -> str:
     (d / "gh").write_text(FAKE_GH_LOG)
     (d / "gh").chmod(0o755)
     return str(d / "gh")
+
+
+def test_untracked_files_in_the_shared_checkout_are_quarantined() -> None:
+    """Seven stray screenshots a worker wrote into the shared checkout held every merge for
+    nine hours, and no session was allowed to remove them."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="ccpool-quarantine-"))
+    work, g = git_repo(d)
+    (work / ".gitignore").write_text(".env\n*.log\n")
+    g("add", ".gitignore")
+    g("commit", "-qm", "ignore")
+    for rel, text in (("before-1.png", "x"), ("shots/after-2.png", "y"), (".env", "KEY=1"), ("server.log", "z"),
+                      ("secrets/key.json", "{}"), (".issuelooper/run/x", "r")):
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    restore = with_env({"SHARED_REPO_PATH": str(work)})
+    try:
+        h = Rig(state(), quarantine_s=300, required_files=["secrets/key.json"])
+        moved = h.pool.quarantine()
+        dest = next((h.pool.cfg.logdir / "quarantine").iterdir())
+        check("untracked files move into the quarantine with their paths; .env, ignored files, required files and "
+              ".issuelooper/ stay",
+              (sorted(moved), (dest / "shots" / "after-2.png").read_text(), sorted(
+                  p.relative_to(work).as_posix() for p in work.rglob("*") if p.is_file() and ".git" not in p.parts)),
+              (["before-1.png", "shots/after-2.png"], "y",
+               [".env", ".gitignore", ".issuelooper/run/x", "secrets/key.json", "server.log"]))
+        check("logged and told", ('"kind": "quarantined"' in (h.pool.cfg.logdir / "pool.jsonl").read_text(),
+                                  any("moved 2 untracked file(s)" in e for e in h.pool.events)), (True, True))
+        (work / "late.png").write_text("x")
+        check("not again before POOL_QUARANTINE_S", h.pool.quarantine(), [])
+        (work / "notes.md").write_text("stray")
+        g("checkout", "-qb", "side")
+        (work / "notes.md").rename(work / "keep.tmp")
+        (work / "notes.md").write_text("tracked")
+        g("add", "notes.md")
+        g("commit", "-qm", "adds notes.md")
+        sha = g("rev-parse", "HEAD")
+        g("checkout", "-q", "main")
+        (work / "keep.tmp").rename(work / "notes.md")
+        h.pool.cfg.deploy_cmd = "true"
+        h.pool.deploy(sha)
+        check("before a deploy, an untracked file where the commit adds one moves aside at once; others wait",
+              ((work / "notes.md").exists(), (work / "late.png").exists()), (False, True))
+        h.pool.cfg.quarantine_s = 0
+        h.pool.quarantined_at = 0.0
+        check("POOL_QUARANTINE_S=0: off", h.pool.quarantine(), [])
+    finally:
+        restore()
+    restore = with_env({"POOL_QUARANTINE_S": ""})
+    check("every 5 minutes by default", ccpool.Config.from_env().quarantine_s, 300)
+    restore()
+
+
+def test_a_gate0_stall_is_raised_to_the_owner_and_polled_less() -> None:
+    """Gate 0 held every merge for nine hours: the monitor said so only in its own turn text,
+    and the held PRs were polled tens of thousands of times."""
+    gh = gh_log()
+    h = Rig(state([iss(5, ["stage:pr", "P1"])], prs=[pr(50, 5)]), gh=gh, gate0_alert_at=3, gate0_alert_s=1800,
+            hold_retry_s=60, gate0_backoff_max_s=600)
+    lines = "?? before-1.png\n M src/app.py"
+    waits = []
+    for k in range(5):
+        u = ccpool.Unit("auto", "merge", f"merge:50@{k}", "mrg:50", 50, (0, 50), {"issue": 5})
+        w = ccpool.Session(h.pool, u, 10 + k)
+        w.gate0_lines = lines
+        h.pool.book.tries[u.key] += 1
+        h.pool.finished(w, "held (gate 0: the shared checkout is not clean)")
+        waits.append(round(h.pool.book.held_until[u.key] - h.now))
+    log = pathlib.Path(gh + ".log").read_text()
+    check("held PRs are polled again after a doubling wait, capped", waits, [60, 120, 240, 480, 600])
+    check("the third hold in a row files one stage:owner issue that quotes what blocks Gate 0",
+          (log.count("issue create"), "stage:owner" in log, "M src/app.py" in log, h.pool.book.gate0["issue"]),
+          (1, True, True, 77))
+    w = ccpool.Session(h.pool, ccpool.Unit("auto", "merge", "merge:50@ok", "mrg:50", 50, (0, 50), {"issue": 5}), 20)
+    h.pool.finished(w, "ok")
+    log = pathlib.Path(gh + ".log").read_text()
+    check("a merge past Gate 0 closes it and resets the count",
+          ("issue close 77" in log, h.pool.book.gate0["holds"], any("Gate 0 passes again" in e for e in h.pool.events)),
+          (True, 0, True))
+    slow = Rig(state(), gh=gh_log(), gate0_alert_at=0, gate0_alert_s=1800)
+    w = ccpool.Session(slow.pool, ccpool.Unit("auto", "merge", "merge:9@a", "mrg:9", 9, (0, 9), {"issue": 2}), 1)
+    slow.pool.finished(w, "held (gate 0: the shared checkout is not clean)")
+    slow.now += 1801
+    slow.pool.finished(w, "held (gate 0: the shared checkout is not clean)")
+    check("or one hold lasting POOL_GATE0_ALERT_S", slow.pool.book.gate0["issue"], 77)
+    restore = with_env({"POOL_GATE0_ALERT_AT": "", "POOL_GATE0_ALERT_S": "", "POOL_GATE0_BACKOFF_MAX_S": ""})
+    cfg = ccpool.Config.from_env()
+    check("defaults: 10 holds, 30 minutes, back-off up to 10 minutes",
+          (cfg.gate0_alert_at, cfg.gate0_alert_s, cfg.gate0_backoff_max_s), (10, 1800, 600))
+    restore()
 
 
 def test_main_check_reports_a_red_main() -> None:

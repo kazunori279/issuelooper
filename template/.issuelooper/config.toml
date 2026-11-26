@@ -283,6 +283,12 @@ park_on_quota = true         # POOL_PARK_ON_QUOTA: an implement unit whose clock
                              # freed, its claim, worktree and conversation kept, and it goes on in that conversation with a
                              # fresh time budget once its quota group's pause is over
 park_max = 2                 # POOL_PARK_MAX: parks per unit; after that it ends as an unfinished worker does
+gate0_alert_at = 10          # POOL_GATE0_ALERT_AT: after this many Gate 0 holds in a row (tracked changes in the shared
+gate0_alert_s = 1800         # POOL_GATE0_ALERT_S: checkout, or local main ahead), or one this old, one stage:owner issue
+                             # says what blocks it; it closes when a merge passes Gate 0 again
+gate0_backoff_max_s = 600    # POOL_GATE0_BACKOFF_MAX_S: a PR held at Gate 0 is polled again after a doubling wait, up to this
+quarantine_s = 300           # POOL_QUARANTINE_S: every this often, untracked files git does not ignore in the shared checkout
+                             # move to <logdir>/quarantine/ with their paths (never .env or other shared files; 0 = off)
 unblock_tries = 2            # POOL_UNBLOCK_TRIES: a blocker that has failed this many times (released units, hand-backs)
 unblock_wait_s = 5400        # POOL_UNBLOCK_WAIT_S: while an issue waited this long on it loses that GitHub dependency
                              # (the issue builds on main) and goes to stage:owner (0 tries = off)

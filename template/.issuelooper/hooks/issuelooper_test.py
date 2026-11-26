@@ -136,13 +136,17 @@ def run(repo, env, *args, timeout=120):
 def test_broker_host() -> None:
     d, repo, env = setup()
     (repo / "dirty.txt").write_text("x")
+    git("add", "dirty.txt", cwd=repo)
+    (repo / "stray.png").write_text("x")
     r = run(repo, env, "start")
     check(
-        "a dirty checkout is refused",
-        (r.returncode, "uncommitted changes" in r.stderr),
-        (1, True),
+        "a staged change is refused; an untracked file is only named (the supervisor moves it aside)",
+        (r.returncode, "uncommitted changes" in r.stderr, "untracked files in" in r.stderr and "stray.png" in r.stderr),
+        (1, True, True),
     )
+    git("rm", "-q", "--cached", "dirty.txt", cwd=repo)
     (repo / "dirty.txt").unlink()
+    (repo / "stray.png").unlink()
     # Keep this check independent of whether the developer has Claude installed.
     missing_bin = d / "missing-bin"
     missing_bin.mkdir()

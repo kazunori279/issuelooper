@@ -1045,6 +1045,32 @@ def shared_rest(path: str) -> str | None:
     return None
 
 
+def stray_file(rest: str) -> bool:
+    """Whether a path in the shared checkout (relative to it) is a stray file a session may
+    remove: an existing regular file that git neither tracks nor ignores, not .env or another
+    shared file ([sweep] link_files, [live] required_files), not under .issuelooper/, and no
+    glob. Two workers' screenshots landed there and held every merge, and the rm one of them
+    tried to clean up with was refused."""
+    root = get_shared_repo_dir()
+    if not rest or any(c in rest for c in "*?[]{}$`") or rest.startswith((".issuelooper/", ".git/", "..")):
+        return False
+    shared = {".env"} | {n.strip() for key in ("SWEEP_LINK_FILES", "POOL_REQUIRED_FILES")
+                         for n in os.environ.get(key, "").split(",") if n.strip()}
+    if rest in shared or os.path.basename(rest) in shared:
+        return False
+    path = os.path.join(root, rest)
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    try:
+        tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", "--", rest],
+                                 capture_output=True, timeout=5).returncode == 0
+        ignored = subprocess.run(["git", "-C", root, "check-ignore", "-q", "--", rest],
+                                 capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return not tracked and not ignored
+
+
 def file_targets(words: list[str]) -> list[str]:
     """The paths a file command writes or removes: every operand of rm and the like,
     the last one of mv, cp and ln (ln with one operand links into the directory)."""
@@ -1130,6 +1156,8 @@ def shared_file_check(command: str, cwd: str | None) -> None:
             skip = not m.group(1)
             if target and not target.startswith("&"):
                 targets.append(target)
+        # A plain removal (rm or unlink, with no redirect alongside it).
+        removes = bool(operands) and os.path.basename(operands[0]) in ("rm", "unlink") and not targets
         if operands and os.path.basename(operands[0]) in FILE_WRITERS:
             targets += file_targets(operands)
         for t in targets:
@@ -1139,6 +1167,8 @@ def shared_file_check(command: str, cwd: str | None) -> None:
             relative = not t.startswith(("/", "~", "$"))
             if rest is None and relative and is_shared_dir(here):
                 rest = os.path.normpath(t)
+            if rest is not None and removes and stray_file(rest):
+                continue  # a session's own stray file: removing it is cleaning up, not damage
             if rest is not None and not rest.startswith(SHARED_WRITABLE):
                 block(
                     f"This would remove, move or overwrite `{t}` in the shared checkout "
@@ -1772,15 +1802,18 @@ def get_shared_repo_dir() -> str:
 
 
 def check_shared_checkout_clean() -> None:
-    """Refuse merge if shared checkout is dirty or local main is ahead of origin/main."""
+    """Refuse merge if shared checkout is dirty or local main is ahead of origin/main.
+    Untracked files do not count: a deploy ships a commit, never the working tree, and
+    seven stray screenshots at the root held every merge for nine hours. The supervisor
+    moves them aside (ccpool.Pool.quarantine)."""
     repo_dir = get_shared_repo_dir()
     if not os.path.exists(repo_dir):
         return
 
-    # Check 1: git status --porcelain must be empty
+    # Check 1: no tracked or staged change (git status --porcelain --untracked-files=no)
     try:
         proc_status = subprocess.run(
-            ["git", "-C", repo_dir, "status", "--porcelain"],
+            ["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -1789,12 +1822,13 @@ def check_shared_checkout_clean() -> None:
             dirty = proc_status.stdout.strip()
             block(
                 f"Shared repository checkout at `{repo_dir}` is dirty.\n\n"
-                f"Unreviewed writes or untracked changes were detected:\n"
+                f"Unreviewed writes to tracked files were detected:\n"
                 f"```\n{dirty}\n```\n\n"
                 "Nothing merges while unreviewed edits exist in the shared checkout: "
                 "the next deploy would ship them. Every session works in its own "
                 "worktree, never in the shared checkout.\n"
-                "Revert, stash, or clean unreviewed changes in the shared checkout before merging."
+                "Say so on your issue: the owner reverts unreviewed changes to tracked files in the shared "
+                "checkout. Untracked files do not hold merges."
             )
     except Exception:
         pass
@@ -1824,7 +1858,7 @@ def check_shared_checkout_clean() -> None:
 def check_pr_merge(command: str) -> None:
     """Pre-merge gates 0-7, in the order a refusal is cheapest to act on.
 
-    Gate 0: the shared checkout is clean (`git status --porcelain` is empty) and
+    Gate 0: the shared checkout is clean (`git status --porcelain --untracked-files=no` is empty) and
     local main has no unpushed commits ahead of origin/main. Catches direct
     writes to the shared checkout, which the next deploy would ship unreviewed.
 

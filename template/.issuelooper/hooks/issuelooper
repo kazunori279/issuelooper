@@ -118,10 +118,13 @@ prerequisites() {
         { warn "$RUN is not ignored by git: add '${RUN#"$ROOT"/}/' to .gitignore (the merge gate needs a clean checkout)"; bad=1; }
       ;;
   esac
-  if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+  if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
     warn "the checkout at $ROOT has uncommitted changes: commit or stash them first (the merge gate refuses to merge from a dirty shared checkout; nobody edits it while the loop runs)"
     bad=1
   fi
+  stray="$(git -C "$ROOT" ls-files --others --exclude-standard)"
+  [ -z "$stray" ] ||
+    warn "untracked files in $ROOT (the supervisor moves them to its quarantine directory; gitignore what should stay): ${stray//$'\n'/ }"
   [ -f "$ROOT/.issuelooper/project.md" ] ||
     warn "no .issuelooper/project.md: the agents will not know how to set up, run or test this project"
   [ "$bad" = 0 ] || die "fix the above, then run \`issuelooper start\` again"

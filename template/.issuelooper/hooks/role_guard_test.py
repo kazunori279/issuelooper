@@ -1128,6 +1128,10 @@ def test_pr_merge_refuses_when_shared_checkout_dirty() -> None:
         repo = make_clean_repo()
         target_dir = repo / scoped
         target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "dirty_file.txt").write_text("tracked\n")
+        subprocess.check_call(["git", "-C", str(repo), "add", "-A"])
+        subprocess.check_call(["git", "-C", str(repo), "commit", "-qm", "tracked"])
+        subprocess.check_call(["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"])
         (target_dir / "dirty_file.txt").write_text("unreviewed write\n")
         commit = make_commit({"clean.py": "def foo() -> int:\n    return 42\n",
                           "tests/unit/test_clean.py": "def test_foo():\n    assert True\n",
@@ -1147,7 +1151,7 @@ def test_pr_merge_refuses_when_shared_checkout_dirty() -> None:
         check(f"refusal for dirty {scoped} mentions unreviewed writes", "Unreviewed writes" in reason, True)
 
 
-def test_pr_merge_refuses_any_untracked_file() -> None:
+def test_pr_merge_ignores_untracked_files() -> None:
     repo = make_clean_repo()
     unrelated = repo / "other-project"
     unrelated.mkdir(parents=True, exist_ok=True)
@@ -1165,8 +1169,12 @@ def test_pr_merge_refuses_any_untracked_file() -> None:
         }}
     )
     env["SHARED_REPO_PATH"] = str(repo)
-    verdict, _ = run("gh pr merge 204 --squash", role="merger", extra_env=env)
-    check("PR merge with any untracked project file is refused", verdict, "refuse")
+    verdict, reason = run("gh pr merge 204 --squash", role="merger", extra_env=env)
+    check("untracked files do not hold a merge at Gate 0 (a deploy ships a commit, not the tree): seven stray "
+          "screenshots once held every merge for hours", "is dirty" in reason, False)
+    subprocess.check_call(["git", "-C", str(repo), "add", "scratch.md"])
+    verdict, reason = run("gh pr merge 204 --squash", role="merger", extra_env=env)
+    check("a staged file still does", (verdict, "is dirty" in reason), ("refuse", True))
 
 
 def test_pr_merge_refuses_when_local_main_ahead_of_origin_main() -> None:
@@ -2129,6 +2137,25 @@ def test_files_in_the_shared_checkout() -> None:
         check(f"allowed: the rm runs in the worktree: {cmd!r}", verdict, "allow")
     verdict, _ = run("rm -f .env", role="worker", cwd=shared)
     check("Claude Code's cwd at the shared checkout counts too", verdict, "refuse")
+    # A worker's screenshots landed in the shared checkout and held every merge; its rm of
+    # them was refused. A file git neither tracks nor ignores may be removed.
+    repo = make_clean_repo()
+    (repo / ".gitignore").write_text("*.log\n")
+    (repo / "kept.py").write_text("x = 1\n")
+    subprocess.check_call(["git", "-C", str(repo), "add", "-A"])
+    subprocess.check_call(["git", "-C", str(repo), "commit", "-qm", "files"])
+    for name in ("before-1.png", "after-2.png", ".env", "app.log", "key.json"):
+        (repo / name).write_text("x")
+    env = {"SHARED_REPO_PATH": str(repo), "POOL_REQUIRED_FILES": "key.json"}
+    for cmd in (f"rm -f {repo}/before-1.png {repo}/after-2.png", 'rm -f "$SHARED_REPO_PATH/before-1.png"',
+                "rm before-1.png"):
+        verdict, _ = run(cmd, role="worker", host=AGY, extra_env=env)
+        check(f"a stray untracked file may be removed: {cmd!r}", verdict, "allow")
+    for cmd in (f"rm -f {repo}/kept.py", f"rm -f {repo}/.env", f"rm -f {repo}/app.log", f"rm -f {repo}/key.json",
+                f"rm -f {repo}/*.png", f"mv /tmp/x.png {repo}/before-1.png", f"rm -rf {repo}/missing-dir",
+                f"rm -f {repo}/before-1.png > {repo}/kept.py"):
+        verdict, _ = run(cmd, role="worker", host=AGY, extra_env=env)
+        check(f"refused: a tracked, shared or ignored file, a glob, a move onto it or a redirect: {cmd!r}", verdict, "refuse")
     for cmd in ('cd "$WT" && rm -f .env', 'rm -f "$WT/.env"', 'ln -sf "$SHARED_REPO_PATH/.env" "$WT/.env"',
                 'cd "$WT" || exit 1\nrm -f .env', 'set -e\ncd "$WT"\nrm -f .env',
                 'cd /tmp/issuelooper-x/wrk-3-12-wt && ln -sf "$SHARED_REPO_PATH/.env" .env && uv run app',

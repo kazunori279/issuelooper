@@ -458,6 +458,16 @@ class Config:
     consolidate_min: float = 5  # or a glob's directory takes this many minutes to run (0 = off)
     flaky_merges: int = 10  # merges a recorded flaky test has to be fixed or deleted in (0 = no deadline)
     hold_retry_s: float = 60  # a unit that ended held is due again after this, without spending a try
+    # Gate 0 (a shared checkout with tracked changes, or local main ahead): after gate0_alert_at
+    # holds in a row, or one lasting gate0_alert_s, one owner-visible issue says what blocks it;
+    # held PRs are polled again after a doubling wait up to gate0_backoff_max_s. Merges once
+    # stopped for nine hours on Gate 0 while the PRs were polled tens of thousands of times.
+    gate0_alert_at: int = 10
+    gate0_alert_s: float = 1800
+    gate0_backoff_max_s: float = 600
+    # Untracked files git does not ignore in the shared checkout move to <logdir>/quarantine,
+    # this often at most (0 = off): stray screenshots there once held every merge.
+    quarantine_s: float = 300
     crash_max: int = 3
     crash_pause_s: float = 120
     quota_resumes: int = 8
@@ -789,6 +799,10 @@ class Config:
             key_tries=env_int("POOL_KEY_TRIES", 2),
             family_max=env_int("POOL_FAMILY_MAX", 6),
             hold_retry_s=float(e("POOL_HOLD_RETRY_S", "") or 60),
+            gate0_alert_at=env_int("POOL_GATE0_ALERT_AT", 10),
+            gate0_alert_s=float(e("POOL_GATE0_ALERT_S", "") or 1800),
+            gate0_backoff_max_s=float(e("POOL_GATE0_BACKOFF_MAX_S", "") or 600),
+            quarantine_s=float(e("POOL_QUARANTINE_S", "") if e("POOL_QUARANTINE_S", "").strip() else 300),
             flaky_merges=env_int("POOL_FLAKY_MERGES", 10),
             consolidate_glob=e("POOL_CONSOLIDATE_GLOB", "") or "tests/e2e/test_issue_*.py,tests/accept/test_accept_*.py",
             consolidate_at=env_int("POOL_CONSOLIDATE_AT", 40),
@@ -1316,6 +1330,8 @@ class Book:
         self.clean: set[str] = set()  # keys whose session ended cleanly
         self.unclaimable: dict[int, tuple] = {}  # issue -> (updated, main, when) claim.py refused
         self.held_until: dict[str, float] = {}  # key -> when a unit that ended held is due again
+        # Gate 0 holds in a row (any PR), since when, and the owner issue raised for them.
+        self.gate0 = {"holds": 0, "since": 0.0, "issue": None, "lines": ""}
         self.hard_conflicts: dict[int, list] = {}  # PR -> [(time, files)] of rebases left to a merger
         self.swept_held: dict[int, tuple[str, str]] = {}  # PR -> (unit key, hold) after a red re-sweep
         self.rebase_wanted: dict[int, str] = {}  # PR -> head the supervisor rebases onto main (auto rebase)
@@ -5414,7 +5430,7 @@ class Session(threading.Thread):
         if not state["head"] or not state["main"]:
             return None
         root = str(repo_root())
-        gate0 = (self.git(root, "status", "--porcelain").stdout + "\0"
+        gate0 = (self.git(root, "status", "--porcelain", "--untracked-files=no").stdout + "\0"
                  + self.git(root, "rev-list", "origin/main..main").stdout)
         state["checkout"] = hashlib.sha256(gate0.encode()).hexdigest()[:16]
         state["config"] = hashlib.sha256((self.pool.cfg.guard_cmd + json.dumps(sorted(env.items())))
@@ -5524,7 +5540,10 @@ class Session(threading.Thread):
         if verdict.get("decision") in ("block", "deny"):
             reason = str(verdict.get("reason") or "")
             if "shared checkout" in reason.lower():
-                self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
+                found = re.search(r"```\n(.*?)\n```", reason, re.S)
+                self.gate0_lines = (found.group(1) if found else reason)[:1500]
+                if not self.pool.book.gate0["holds"]:
+                    self.pool.event(f"auto-merge of PR #{pr} refused by Gate 0 (shared checkout): {reason[:300]}")
                 return "held (gate 0: the shared checkout is not clean)"
             if "try again later" in reason.lower():
                 # The guard could not read GitHub or a file at the head: nothing about the
@@ -6550,6 +6569,10 @@ class Pool:
                 b.tries[u.key] -= 1
                 b.family_starts[u.family] -= 1
                 b.held_until[u.key] = now + self.cfg.hold_retry_s
+                if outcome.startswith("held (gate 0"):
+                    # Doubling with each hold in a row, up to POOL_GATE0_BACKOFF_MAX_S.
+                    b.held_until[u.key] = now + min(self.cfg.gate0_backoff_max_s, self.cfg.hold_retry_s
+                                                    * 2 ** min(b.gate0["holds"], 16))
             if outcome == "unclaimable" and u.number is not None:
                 # claim.py's own read refused it (a native dependency, attempts): no
                 # try spent; the memo holds it back until the issue or main changes, or
@@ -6607,6 +6630,8 @@ class Pool:
                 )
         if outcome.startswith("quota error"):
             self.quota_seen(u.role, group=group)
+        if u.kind == "merge":
+            self.gate0_seen(outcome.startswith("held (gate 0"), getattr(w, "gate0_lines", ""))
         if u.role == "worker" and u.kind == "implement" and u.number is not None:
             with self.lock:
                 if outcome.startswith("parked for quota"):
@@ -6941,6 +6966,15 @@ class Pool:
         root = repo_root()
         subprocess.run(["git", "-C", str(root), "fetch", "-q", "origin", "main"],
                        capture_output=True, timeout=300)
+        # A deploy command that checks the commit out in the shared checkout (`git checkout`,
+        # `merge --ff-only`) stops on an untracked file where the commit adds one: move those
+        # aside first, whatever POOL_QUARANTINE_S says.
+        try:
+            incoming = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "--name-only", "-z", sha],
+                                      capture_output=True, text=True, timeout=60).stdout.split("\0")
+            self.quarantine_files({f for f in incoming if f})
+        except (OSError, subprocess.SubprocessError):
+            pass
         # A deploy command that fetches shares the .git that worktrees and other units
         # fetch into; a concurrent fetch fails it with "cannot lock ref", and production
         # stays a merge behind until main moves again. Try again after a pause.
@@ -9225,6 +9259,92 @@ class Pool:
             self.event(f"the file system under {root} has room again")
         self.disk_low = bool(low)
 
+    def gate0_seen(self, held: bool, lines: str = "") -> None:
+        """Count Gate 0 holds in a row. After POOL_GATE0_ALERT_AT of them, or one older than
+        POOL_GATE0_ALERT_S, file one stage:owner issue with what blocks it; close it, and
+        say so, once a merge gets past Gate 0 again."""
+        now = self.clock()
+        g = self.book.gate0
+        if not held:
+            if g["holds"] or g["issue"]:
+                self.log("gate0_clear", holds=g["holds"], seconds=round(now - g["since"]) if g["since"] else 0,
+                         issue=g["issue"])
+                if g["issue"]:
+                    self.gh("issue", "close", str(g["issue"]), "--comment",
+                            "<!-- merger -->\nGate 0 passes again: merges go on.")
+                    self.event(f"Gate 0 passes again; #{g['issue']} closed")
+            self.book.gate0 = {"holds": 0, "since": 0.0, "issue": None, "lines": ""}
+            return
+        if not g["holds"]:
+            g["since"] = now
+        g["holds"] += 1
+        g["lines"] = lines or g["lines"]
+        due = ((self.cfg.gate0_alert_at and g["holds"] >= self.cfg.gate0_alert_at)
+               or (self.cfg.gate0_alert_s and now - g["since"] >= self.cfg.gate0_alert_s))
+        if g["issue"] is not None or not due:
+            return
+        fence = "`" * 3
+        body = (
+            f"<!-- merger -->\nNothing has merged for {(now - g['since']) / 60:.0f} min: Gate 0 refused "
+            f"{g['holds']} merges in a row because the shared checkout (`{repo_root()}`) has changes to tracked "
+            f"files, or its local `main` is ahead of `origin/main`. What blocks it:\n\n{fence}\n"
+            + (g["lines"] or "(see the supervisor's log)").replace(fence, "'" * 3) + f"\n{fence}\n\n"
+            "Only the owner may change the shared checkout. Revert those changes there (`git -C <checkout> "
+            "restore <file>`, or reset `main` to `origin/main`); this issue closes once a merge gets past Gate 0.")
+        r = self.file_issue("Merges are stopped: Gate 0 refuses a dirty shared checkout", ["type:bug", "P0",
+                                                                                         "stage:owner"], body)
+        m = re.search(r"/issues/(\d+)", r.stdout)
+        g["issue"] = int(m.group(1)) if m else 0
+        self.log("gate0_alert", holds=g["holds"], seconds=round(now - g["since"]), issue=g["issue"])
+        self.event(f"merges stopped for {(now - g['since']) / 60:.0f} min on Gate 0 ({g['holds']} holds): "
+                   + (f"filed #{g['issue']} for the owner" if g["issue"] else "could not file an issue")
+                   + f". What blocks it: {(g['lines'] or '').splitlines()[:3]}")
+
+    def quarantine(self) -> list[str]:
+        """Move the untracked files git does not ignore out of the shared checkout's working
+        tree into <logdir>/quarantine/<time>/, keeping their paths (POOL_QUARANTINE_S; never a
+        file in [sweep] link_files or [live] required_files, such as .env, nor under
+        .issuelooper/). Stray screenshots a worker wrote there held merges for nine hours."""
+        now = time.time()
+        if not self.cfg.quarantine_s or now - getattr(self, "quarantined_at", 0.0) < self.cfg.quarantine_s:
+            return []
+        self.quarantined_at = now
+        return self.quarantine_files(None)
+
+    def quarantine_files(self, only: set | None) -> list[str]:
+        """quarantine's move, of every candidate file or only those in `only` (relative paths)."""
+        root = repo_root()
+        try:
+            r = subprocess.run(["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if r.returncode != 0:
+            return []
+        keep = {".env"} | set(self.cfg.required_files) | {
+            n.strip() for n in os.environ.get("SWEEP_LINK_FILES", "").split(",") if n.strip()}
+        logdir = self.cfg.logdir.resolve()
+        dest = self.cfg.logdir / "quarantine" / time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        moved = []
+        for rel in [p for p in r.stdout.split("\0") if p]:
+            src = root / rel
+            if (only is not None and rel not in only) or rel in keep or os.path.basename(rel) in keep \
+                    or rel.startswith(".issuelooper/") or src.is_symlink():
+                continue
+            try:
+                if logdir == src.resolve() or logdir in src.resolve().parents:
+                    continue
+                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dest / rel))
+                moved.append(rel)
+            except OSError:
+                continue
+        if moved:
+            self.log("quarantined", files=moved[:50], count=len(moved), to=str(dest))
+            self.event(f"moved {len(moved)} untracked file(s) out of the shared checkout into {dest}: "
+                       f"{', '.join(moved[:5])}{' ...' if len(moved) > 5 else ''}")
+        return moved
+
     def check_files(self) -> None:
         """Tell the monitor when a file the loop relies on goes missing from the shared
         checkout, and when it is back: POOL_REQUIRED_FILES, by default .env when live
@@ -9281,6 +9401,7 @@ class Pool:
             self.track_edges(st)
             self.ask_decompose(st)
             self.check_files()
+            self.quarantine()
             self.check_disk()
             self.track_starving(st, now)
             due, stuck = plan(st, self.book, self.cfg, now, self.ux_target(st))

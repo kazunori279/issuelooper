@@ -29,7 +29,7 @@ No agent can merge a pull request. The supervisor merges a pull request only whe
 
 | Gate | Name | What it requires |
 |---|---|---|
-| **0** | Clean checkout | The shared checkout used by the supervisor for merging and deploying has no uncommitted changes. |
+| **0** | Clean checkout | The shared checkout used by the supervisor for merging and deploying has no uncommitted changes to tracked files (`git status --porcelain --untracked-files=no`), and its local `main` is not ahead of `origin/main`. Untracked files do not count: a deploy ships a commit, never the working tree. The supervisor moves untracked files that git does not ignore into its quarantine directory (`[pool] quarantine_s`), and a session may `rm` such a file. After `[pool] gate0_alert_at` holds in a row, or `[pool] gate0_alert_s` of holding, one `stage:owner` issue quotes what blocks Gate 0, and held PRs are polled with a doubling wait up to `[pool] gate0_backoff_max_s`. Stray screenshots once held every merge for nine hours. |
 | **1** | Syntax & conflicts | Every changed `.py` file parses cleanly with Python's AST parser and contains no merge conflict markers. |
 | **2** | Verified sweep | The PR body names the exact commit SHA it swept, and a matching green sweep record exists in `$ISSUELOOPER_TMP/sweep/`. |
 | **3** | Failing test first | The PR records a test file that failed before the fix and passes after it (`Fail-before: <file> N -> M`), or carries an explicit waiver reason. |
